@@ -1,7 +1,7 @@
 # longbet
 
-longbet extends [XBART](https://jingyuhe.com/xbart.html) (Accelerated Bayesian
-Additive Regression Trees) to support time series.
+longbet extends [XBCF](https://github.com/socket778/XBCF) (Accelerated Bayesian
+Causal Forest) to support time series.
 
 TODO(Maggie M. Wang): Describe the repository.
 

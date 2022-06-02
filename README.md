@@ -3,7 +3,7 @@
 longbet extends [XBCF](https://github.com/socket778/XBCF) (Accelerated Bayesian
 Causal Forest) to support time series.
 
-TODO(Maggie M. Wang): Describe the repository.
+TODO(maggiewang0614): Describe the repository.
 
 ## Source Code Headers
 

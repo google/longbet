@@ -1,0 +1,26 @@
+Type: Package
+Package: longbet
+Title: Bayesian Causal Analysis
+Version: 0.0.1
+Authors@R:
+    c(person(given = "Ignacio",
+           family = "Martinez",
+           role = c("aut", "cre"),
+           email = "martinezig@google.com",
+           comment = c(ORCID = "0000-0002-3721-8172")),
+      person(given = "Maggie",
+           family = "Wang",
+           role = c("aut"),
+           email = "maggiemwang@google.com"))
+Description: Provides causal analysis of time series.
+License: file LICENSE
+URL: https://github.com/googlestaging/longbet
+BugReports: https://github.com/googlestaging/longbet/issues
+Depends:
+    R (>= 3.4.0)
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.1.1
+Config/testthat/edition: 3
+Date/Publication: 2022-06-02 15:14 UTC

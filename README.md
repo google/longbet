@@ -18,7 +18,7 @@ It can be installed from GitHub directly using devtools package in R. The CRAN v
 
 ```R
 library(devtools)
-install_github("MaggieWang0614/longBet")
+install_github("google/longbet")
 ```
 
 ## Usage

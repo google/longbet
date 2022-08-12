@@ -26,9 +26,17 @@ z_mat <- cbind(matrix(0, n, (t0 - 1)),  matrix(rep(z, t1 - t0 + 1), n, t1 - t0 +
 
 t_longbet <- proc.time()
 longbet.fit <- longBet(y = y, x = x, z = z_mat, t = 1:t1, pcat = 1,
+num_sweeps = 2, num_burnin = 0,
 num_trees_pr =  50, num_trees_trt = 50)
 tau_longBet <- apply(longbet.fit$tauhats.adjusted, c(1, 2), mean)
 t_longbet <- proc.time() - t_longbet
 
 print(paste0("longBet RMSE: ", sqrt(mean((as.vector(tau_longBet[, t0:t1]) - as.vector(te[,t0:t1]))^2))))
 print(paste0("longBet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
+
+# pred <- predict.longBet(longbet.fit, x, 1:t1)
+# print("pred taudraws = ")
+# pred_longBet <- apply(pred$taudraws, c(1, 2), mean)
+# print(pred_longBet[1:5, t0:t1])
+# print("tau_longBet = ")
+# print(tau_longBet[1:5, t0:t1])

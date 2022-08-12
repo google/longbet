@@ -17,6 +17,10 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
                     matrix<double> &b_xinfo,
                     matrix<double> &a_xinfo,
                     matrix<double> &beta_xinfo,
+                    matrix<double> &time_beta,
+                    matrix<double> &time_residuals,
+                    matrix<double> &time_diag_A,
+                    matrix<double> &time_diag_Sig,
                     vector<vector<tree>> &trees_ps,
                     vector<vector<tree>> &trees_trt,
                     double no_split_penality,
@@ -163,7 +167,9 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
       }
     }
 
-    model_ps->update_time_coef(state, x_struct_trt, torder_tau_std); 
+    model_ps->update_time_coef(state, x_struct_trt, torder_tau_std,
+    time_beta[sweeps], time_residuals[sweeps],
+    time_diag_A[sweeps], time_diag_Sig[sweeps]);
     std::copy(state->beta_t.begin(), state->beta_t.end(),
     beta_xinfo[sweeps].begin());
     // store draws for b0, b1 and a, although they are updated per tree, we save results per forest (sweep)

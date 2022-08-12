@@ -381,16 +381,16 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
 }
 
 void longBetModel::update_time_coef(std::unique_ptr<State> &state,
-std::unique_ptr<X_struct> &x_struct,
-matrix<size_t> &torder_std)
+std::unique_ptr<X_struct> &x_struct, matrix<size_t> &torder_std,
+std::vector<double> &beta_xinfo,
+std::vector<double> &time_residuals, std::vector<double> &time_diag_A,
+std::vector<double> &time_diag_Sig)
 {
   // get total number of time
-  double t_size = x_struct->t_values.size();
+  size_t t_size = x_struct->t_values.size();
   double n = state->n_y;  // n obs per period. TODO: need update
   std::vector<double> res_ctrl(t_size, 0);  // residuals
   std::vector<double> res_trt(t_size, 0);
-  matrix<double> res;
-  ini_matrix(res, 1, t_size);
 
   // diagonal element of matrix A: sigma_{z_i}^{-1} * b_{z_i} * tau_i
   std::vector<double> diag_ctrl(t_size, 0);
@@ -399,8 +399,6 @@ matrix<size_t> &torder_std)
 
   double sig02 = pow(state->sigma_vec[0], 2);
   double sig12 = pow(state->sigma_vec[1], 2);
-  vec sig(t_size, fill::zeros);
-
 
   std::vector<size_t> idx(state->p_y);  // keep track of t-values
   size_t t_idx;
@@ -422,39 +420,48 @@ matrix<size_t> &torder_std)
         {
           res_ctrl[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
           diag_ctrl[i] += state->tau_fit[k][t_idx];
-          sig(i) += sig02;
+          time_diag_Sig[i] += sig02;
         } else {
           res_trt[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
           diag_trt[i] += state->tau_fit[k][t_idx];
-          sig(i) += sig12;
+          time_diag_Sig[i] += sig12;
         }
       }
     }
   }
 
   for (size_t i = 0; i < t_size; i++){
-    res[i][0] = (res_trt[i] + res_ctrl[i]) / n / x_struct->t_counts[i];
-    diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/n;
-    sig(i) = 1 / (sig[i] / pow(n, 2) / x_struct->t_counts[i]);
+    time_residuals[i] = (res_trt[i] + res_ctrl[i]) / n / x_struct->t_counts[i];
+    time_diag_A[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/n;
+    time_diag_Sig[i] = time_diag_Sig[i] / pow(n, 2) / x_struct->t_counts[i];
   }
 
   // solve by var = (Sigma0^-1 + Sigma^-1)^-1
   // Sigma0 = A*cov_kernel*A'
   // Sigma = diag(sig)
   // mu = var * (Sigma0^-1 * mu0 + res)
+
+  // transform vector form
+
+  arma::mat res(t_size, 1);
+  vec sig(t_size, fill::zeros);
+  for (size_t i = 0; i < t_size; i++){
+    res(i, 0) = time_residuals[i];
+    sig(i) = 1 / time_diag_Sig[i];
+  }
+
   arma::mat Sigma0(t_size, t_size);
-  // arma::mat Sigma_inv(t_size, t_size);
   arma::mat Sigma_inv = diagmat(sig);
   for (size_t i = 0; i < t_size; i++){
     for (size_t j = 0; j < t_size; j++){
-      Sigma0(i, j) = diag[i] * x_struct->cov_kernel[i][j] * diag[j];
+      Sigma0(i, j) = time_diag_A[i] * x_struct->cov_kernel[i][j] * time_diag_A[j];
     }
     // Sigma_inv(i, i) = 1 / sig[i];
   }
 
-  arma::mat Sigma0_inv = pinv(Sigma0);
+  arma::mat Sigma0_inv = inv_sympd(Sigma0);
   arma::mat var_inv = Sigma0_inv + Sigma_inv;
-  arma::mat var = pinv(var_inv);
+  arma::mat var = inv_sympd(var_inv);
 
   arma::mat U, V;
   arma::vec s;
@@ -463,11 +470,7 @@ matrix<size_t> &torder_std)
   arma::mat L = U * diagmat(s);
 
   // mean
-  arma::mat res_vec(t_size, 1);
-  for (size_t i = 0; i < t_size; i++){
-    res_vec(i, 0) = res[i][0];
-  }
-  arma::mat mu = var * Sigma_inv * res_vec;
+  arma::mat mu = var * Sigma_inv * res;
 
   std::normal_distribution<double> normal_samp(0.0, 1.0);
   arma::mat draws(t_size, 1);
@@ -476,14 +479,13 @@ matrix<size_t> &torder_std)
   arma::mat beta_tilde = mu + L * draws;
 
   // beta = diag^-1 * beta_tilde
-  arma::mat beta(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
-    beta(i, 0) = beta_tilde(i, 0) / diag[i];
+    beta_xinfo[i] = beta_tilde(i, 0) / time_diag_A[i];
   }
 
   // match beta to beta_t
   for (size_t i = 0; i < state->p_y; i++){
-    state->beta_t[i] = beta(idx[i], 0);
+    state->beta_t[i] = beta_xinfo[idx[i]];
   }
 }
 

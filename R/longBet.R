@@ -12,7 +12,7 @@
 #' @param mtry number of variables to be sampled as split candidate per tree.
 #' @param n_min The minimum node size. (default is 1)
 #' @param sig_knl variance parameter for squared exponential kernel (default is 1).
-#' @param lambda_knl lengthscale parameter for squared exponential kernel (default is 5).
+#' @param lambda_knl lengthscale parameter for squared exponential kernel (default is 1).
 #'
 #' @return A fit file, which contains the draws from the model as well as parameter draws at each sweep.
 #' @export
@@ -20,7 +20,7 @@ longBet <- function(y, x, z, t, pcat,
                     num_sweeps = 60, num_burnin = 20,
                     num_trees_pr = 50, num_trees_trt = 20,
                     mtry = 0L, n_min = 1L,
-                    sig_knl = 1, lambda_knl = 5) {
+                    sig_knl = 1, lambda_knl = 1) {
 
     if(!("matrix" %in% class(x))){
         cat("Msg: input x is not a matrix, try to convert type.\n")
@@ -63,6 +63,8 @@ longBet <- function(y, x, z, t, pcat,
         t_mod <- sapply(t_con, function(x) max(x - t0, 0))
         # t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)
     } else {
+        #TODO: check the logic without time axis
+        t0 <- t_con[1]
         t_mod <- c(1)
     }
 
@@ -160,6 +162,7 @@ longBet <- function(y, x, z, t, pcat,
                     sig_knl, lambda_knl)
     class(obj) = "longBet"
 
+    obj$t0 = t0
     obj$sdy = sdy
     obj$meany = meany
     obj$tauhats = obj$tauhats * sdy
@@ -173,6 +176,7 @@ longBet <- function(y, x, z, t, pcat,
         obj$tauhats.adjusted[,,i - num_burnin] = obj$tauhats.adjusted[,,i - num_burnin] * t(matrix(rep(obj$beta_draws[,i], nrow(y)), ncol(y), nrow(y)))
         obj$muhats.adjusted[,, i - num_burnin] = matrix(obj$muhats[,i], nrow(y), ncol(y)) * (obj$a_draws[i]) + meany
     }
+    # TODO: make muhats.adjusted = mu + b0*tau
     
     obj$beta_draws = obj$beta_draws[, (num_burnin+1):num_sweeps]
     return(obj)

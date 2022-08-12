@@ -13,7 +13,7 @@
 #include "split_info.h"
 
 // local modification msquinn@: Use json in third_party/
-#include "third_party/json/src/json.hpp"
+#include "json/json.hpp"
 
 //#include <armadillo>
 

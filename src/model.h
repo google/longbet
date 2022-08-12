@@ -158,8 +158,10 @@ public:
   void update_b_values(std::unique_ptr<State> &state);
 
   void update_time_coef(std::unique_ptr<State> &state,
-  std::unique_ptr<X_struct> &x_struct,
-  matrix<size_t> &torder_std);
+  std::unique_ptr<X_struct> &x_struct, matrix<size_t> &torder_std,
+  std::vector<double> &beta_xinfo,
+  std::vector<double> &time_residuals, std::vector<double> &time_diag_A,
+  std::vector<double> &time_diag_Sig);
   
   void subtract_old_tree_fit(size_t tree_ind, matrix<double> &fit,
   std::unique_ptr<X_struct> &x_struct);

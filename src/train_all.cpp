@@ -278,7 +278,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
                     bool sample_weights_flag = true,
                     bool a_scaling = true, bool b_scaling = true,
                     bool split_t_mod = true, bool split_t_con = false,
-                    double sig_knl = 1, double lambda_knl = 2)
+                    double sig_knl = 1, double lambda_knl = 1)
 {
     auto start = system_clock::now();
 
@@ -345,9 +345,8 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix y_std(N, p_y);
     Rcpp::NumericMatrix X_std(N, p_pr);
     Rcpp::NumericMatrix X_tau_std(N, p_trt);
-    Rcpp::NumericMatrix tcon_std(N, t_con.n_cols);
-    Rcpp::NumericMatrix tmod_std(N, t_mod.n_cols);
-
+    Rcpp::NumericMatrix tcon_std(t_con.n_rows, t_con.n_cols);
+    Rcpp::NumericMatrix tmod_std(t_con.n_rows, t_mod.n_cols);
     arma_to_rcpp(y, y_std);
     arma_to_rcpp(z, z_std);
     arma_to_rcpp(t_con, tcon_std);
@@ -458,9 +457,29 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     std::vector<double> initial_theta_trt(1, 0);
     std::unique_ptr<X_struct> x_struct_trt(new X_struct(Xpointer_tau, ypointer, tpointer_tau, N, p_y, Xorder_tau_std, torder_tau_std, p_categorical_trt, p_continuous_trt, &initial_theta_trt, num_trees_trt, sig_knl, lambda_knl));
 
+
+
+    // init time coefficient parameters, needed for prediction
+    size_t t_size = x_struct_trt->t_values.size();
+
+    matrix<double> time_beta;
+    matrix<double> time_residuals;
+    matrix<double> time_diag_A;
+    matrix<double> time_diag_Sig;
+    
+    ini_matrix(time_beta, t_size, num_sweeps);
+    ini_matrix(time_residuals, t_size, num_sweeps);
+    ini_matrix(time_diag_A, t_size, num_sweeps);
+    ini_matrix(time_diag_Sig, t_size, num_sweeps);
+
     // mcmc_loop returns tauhat [N x sweeps] matrix
-    mcmc_loop_longBet(Xorder_std, Xorder_tau_std, Xpointer, Xpointer_tau, torder_mu_std, torder_tau_std, verbose, sigma0_draw_xinfo, sigma1_draw_xinfo, b_xinfo, a_xinfo, beta_xinfo, *trees_pr, *trees_trt, no_split_penality,
-                   state, model_pr, model_trt, x_struct_pr, x_struct_trt, a_scaling, b_scaling, split_t_mod, split_t_con);
+    mcmc_loop_longBet(Xorder_std, Xorder_tau_std, Xpointer, Xpointer_tau,
+    torder_mu_std, torder_tau_std, verbose,
+    sigma0_draw_xinfo, sigma1_draw_xinfo, b_xinfo, a_xinfo,
+    beta_xinfo, time_beta, time_residuals, time_diag_A, time_diag_Sig,
+    *trees_pr, *trees_trt, no_split_penality,
+    state, model_pr, model_trt, x_struct_pr, x_struct_trt,
+    a_scaling, b_scaling, split_t_mod, split_t_con);
 
     // predict tauhats and muhats
     // cout << "predict " << endl;
@@ -476,6 +495,10 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix b_draws(num_sweeps, 2);
     Rcpp::NumericMatrix a_draws(num_sweeps, 1);
     Rcpp::NumericMatrix beta_draws(p_y, num_sweeps);
+    Rcpp::NumericMatrix time_beta_rcpp(t_size, num_sweeps);
+    Rcpp::NumericMatrix time_residuals_rcpp(t_size, num_sweeps);
+    Rcpp::NumericMatrix time_diag_A_rcpp(t_size, num_sweeps);
+    Rcpp::NumericMatrix time_diag_Sig_rcpp(t_size, num_sweeps);
     Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt_pr(trees_pr, true);
     Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt_trt(trees_trt, true);
 
@@ -496,6 +519,16 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     std_to_rcpp(b_xinfo, b_draws);
     std_to_rcpp(a_xinfo, a_draws);
     std_to_rcpp(beta_xinfo, beta_draws);
+    std_to_rcpp(time_beta, time_beta_rcpp);
+    std_to_rcpp(time_residuals, time_residuals_rcpp);
+    std_to_rcpp(time_diag_A, time_diag_A_rcpp);
+    std_to_rcpp(time_diag_Sig, time_diag_Sig_rcpp);
+
+    Rcpp::NumericMatrix train_t(t_size, 1);
+    for (size_t i = 0; i < t_size; i++)
+    {
+        train_t(i, 0) = x_struct_trt->t_values[i];
+    }
 
 
     auto end = system_clock::now();
@@ -550,9 +583,16 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         Rcpp::Named("b_draws") = b_draws,
         Rcpp::Named("a_draws") = a_draws,
         Rcpp::Named("beta_draws") = beta_draws,
-        Rcpp::Named("model_list") = Rcpp::List::create(Rcpp::Named("tree_pnt_pr") = tree_pnt_pr,
-                                                       Rcpp::Named("tree_pnt_trt") = tree_pnt_trt,
-                                                       Rcpp::Named("y_mean") = y_mean),
+        Rcpp::Named("time_info") = Rcpp::List::create(
+            Rcpp::Named("train_t") = train_t,
+            Rcpp::Named("time_beta") = time_beta_rcpp,
+            Rcpp::Named("time_residuals") = time_residuals_rcpp,
+            Rcpp::Named("time_diag_A") = time_diag_A_rcpp,
+            Rcpp::Named("time_diag_Sig") = time_diag_Sig_rcpp),
+        Rcpp::Named("model_list") = Rcpp::List::create(
+            Rcpp::Named("tree_pnt_pr") = tree_pnt_pr,
+            Rcpp::Named("tree_pnt_trt") = tree_pnt_trt,
+            Rcpp::Named("y_mean") = y_mean),
         Rcpp::Named("treedraws_pr") = output_tree_pr,
         Rcpp::Named("treedraws_trt") = output_tree_trt,
         Rcpp::Named("sdy_use") = NULL,
@@ -560,23 +600,26 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         Rcpp::Named("meany") = NULL,
         Rcpp::Named("tauhats.adjusted") = NULL,
         Rcpp::Named("muhats.adjusted") = NULL,
-        Rcpp::Named("model_params") = Rcpp::List::create(Rcpp::Named("num_sweeps") = num_sweeps,
-                                                         Rcpp::Named("burnin") = burnin,
-                                                         Rcpp::Named("max_depth") = max_depth,
-                                                         Rcpp::Named("Nmin") = n_min,
-                                                         Rcpp::Named("num_cutpoints") = num_cutpoints,
-                                                         Rcpp::Named("alpha_pr") = alpha_pr,
-                                                         Rcpp::Named("beta_pr") = beta_pr,
-                                                         Rcpp::Named("tau_pr") = tau_pr,
-                                                         Rcpp::Named("p_categorical_pr") = p_categorical_pr,
-                                                         Rcpp::Named("num_trees_pr") = num_trees_pr,
-                                                         Rcpp::Named("alpha_trt") = alpha_trt,
-                                                         Rcpp::Named("beta_trt") = beta_trt,
-                                                         Rcpp::Named("tau_trt") = tau_trt,
-                                                         Rcpp::Named("p_categorical_trt") = p_categorical_trt,
-                                                         Rcpp::Named("num_trees_trt") = num_trees_trt),
-        Rcpp::Named("input_var_count") = Rcpp::List::create(Rcpp::Named("x_con") = p_pr-1,
-                                                            Rcpp::Named("x_mod") = p_trt)
-
+        Rcpp::Named("model_params") = Rcpp::List::create(
+            Rcpp::Named("num_sweeps") = num_sweeps,
+            Rcpp::Named("burnin") = burnin,
+            Rcpp::Named("max_depth") = max_depth,
+            Rcpp::Named("Nmin") = n_min,
+            Rcpp::Named("num_cutpoints") = num_cutpoints,
+            Rcpp::Named("alpha_pr") = alpha_pr,
+            Rcpp::Named("beta_pr") = beta_pr,
+            Rcpp::Named("tau_pr") = tau_pr,
+            Rcpp::Named("p_categorical_pr") = p_categorical_pr,
+            Rcpp::Named("num_trees_pr") = num_trees_pr,
+            Rcpp::Named("alpha_trt") = alpha_trt,
+            Rcpp::Named("beta_trt") = beta_trt,
+            Rcpp::Named("tau_trt") = tau_trt,
+            Rcpp::Named("p_categorical_trt") = p_categorical_trt,
+            Rcpp::Named("num_trees_trt") = num_trees_trt,
+            Rcpp::Named("sig_knl") = sig_knl,
+            Rcpp::Named("lambda_knl") = lambda_knl),
+        Rcpp::Named("input_var_count") = Rcpp::List::create(
+            Rcpp::Named("x_con") = p_pr,
+            Rcpp::Named("x_mod") = p_trt)
     );
 }

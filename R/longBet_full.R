@@ -43,7 +43,7 @@
 #' @return A fit file, which contains the draws from the model as well as parameter draws at each sweep.
 #' @export
 
-longBet_full <- function(y, z, x_con, x_mod = x_con, t_con = NULL, t_mod = NULL, 
+f <- function(y, z, x_con, x_mod = x_con, t_con = NULL, t_mod = NULL, 
                 pihat = NULL,
                 pcat_con = NULL,
                 pcat_mod = pcat_con,

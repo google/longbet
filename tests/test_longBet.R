@@ -1,6 +1,9 @@
-# simple demonstration of longBet with default parameters
+# simple demonstration of longbet with default parameters
 library(longBet)
 library(dbarts)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
 
 #### 1. DATA GENERATION PROCESS
 # n <- 200 # number of observations
@@ -10,7 +13,7 @@ library(dbarts)
 set.seed(1)
 n <- 500
 t1 <- 12
-t0 <- 10
+t0 <- 6
 
 # generate dcovariates
 x1 <- rnorm(n)
@@ -85,14 +88,16 @@ num_trees_pr =  50, num_trees_trt = 50 ,
 pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
-mu_hat_longBet <- apply(longbet.fit$muhats.adjusted, c(1, 2), mean)
-tau_hat_longBet <- apply(longbet.fit$tauhats.adjusted, c(1, 2), mean)
-tau_longBet <- tau_hat_longBet[,t0:t1]
+mu_hat_longbet <- apply(longbet.fit$muhats.adjusted, c(1, 2), mean)
+tau_hat_longbet <- apply(longbet.fit$tauhats.adjusted, c(1, 2), mean)
+tau_longbet <- tau_hat_longbet[,t0:t1]
 t_longbet <- proc.time() - t_longbet
 
+
+
 cat("beta draws: ", rowMeans(longbet.fit$beta_draws), "\n")
-print(paste0("longBet RMSE: ", sqrt(mean((as.vector(tau_longBet) - as.vector(tau_mat))^2))))
-print(paste0("longBet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
+print(paste0("longbet RMSE: ", sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2))))
+print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 
 att <- colMeans(tau_mat[z == 1, ])
 rep_z <- matrix(rep(z, t1), n, t1)
@@ -100,8 +105,8 @@ ytilde <- y - matrix(rowMeans(y)) %*% rep(1,t1)- rep(1,n) %*% t(matrix(colMeans(
 recenter <- mean((colMeans(ytilde[matrix(rep_z[,1])==1,]) - colMeans(ytilde[matrix(rep_z[,1])==0,]))[1:t0-1])
 tau_hat_freq <- colMeans(ytilde[matrix(rep_z[,1])==1,]) - colMeans(ytilde[matrix(rep_z[,1])==0,])-recenter
 print(paste0("Frequentist att rmse: ", sqrt( mean((tau_hat_freq[t0:t1] - att)^2) ) ))
-att_longBet <- colMeans(tau_longBet[z == 1, ])
-print(paste0("longbet att rmse: ", sqrt(mean( (att_longBet - att)^2 ))))
+att_longbet <- colMeans(tau_longbet[z == 1, ])
+print(paste0("longbet att rmse: ", sqrt(mean( (att_longbet - att)^2 ))))
 
 
 ## create covariates for bart ##
@@ -131,16 +136,32 @@ t_bart = proc.time() - t_bart
 
 
 # compare results to inference
-print(paste0("longBet RMSE: ", round( sqrt(mean((as.vector(tau_longBet) - as.vector(tau_mat))^2)), 2 ) ))
-print(paste0("longBet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
+print(paste0("longbet RMSE: ", round( sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2)), 2 ) ))
+print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 
 
 print(paste0("bart RMSE: ", round( sqrt(mean((tau_bart - tau_mat)^2)), 2)))
 print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
 
 # check att
-att <- tau_mat[z == 1,]
-att_bart <- tau_bart[z == 1,]
-att_longBet <- tau_longBet[z == 1,]
-print(paste0("longBet att rmse: ", round( sqrt(mean((att_longBet - att)^2)), 2)))
+att <- tau_mat[z == 1,] %>% colMeans
+att_bart <- tau_bart[z == 1,] %>% colMeans
+att_longbet <- tau_longbet[z == 1,] %>% colMeans
+print(paste0("longbet att rmse: ", round( sqrt(mean((att_longbet - att)^2)), 2)))
 print(paste0("BART att rmse: ", round( sqrt(mean((att_bart - att)^2)), 2)))
+
+
+# visualize ---------------------------------------------------------------
+
+att_df <- data.frame(
+  time = t0:t1,
+  true = att,
+  bart = att_bart,
+  longbet = att_longbet
+)
+
+att_df %>% 
+  gather("method", "att", -time) %>%
+  ggplot(aes(time, att)) + 
+  geom_line(aes(color = method)) + 
+  ylab(labs(title = "Average Treatment on Treated"))

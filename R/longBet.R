@@ -16,7 +16,7 @@
 #'
 #' @return A fit file, which contains the draws from the model as well as parameter draws at each sweep.
 #' @export
-longBet <- function(y, x, z, t, pcat, 
+longbet <- function(y, x, z, t, pcat, 
                     num_sweeps = 60, num_burnin = 20,
                     num_trees_pr = 50, num_trees_trt = 20,
                     mtry = 0L, n_min = 1L,
@@ -61,6 +61,8 @@ longBet <- function(y, x, z, t, pcat,
         post_t <- sort(unique_z_sum)[2]
         t0 <- t_con[ncol(y) - post_t]
         t_mod <- sapply(t_con, function(x) max(x - t0, 0))
+        print("Adjusted treatment time:")
+        print(t_mod)
         # t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)
     } else {
         t_mod <- c(1)

@@ -1,8 +1,7 @@
 #include "mcmc_loop.h"
 #include <memory>
 #include <ostream>
-#include "third_party/R/packages/longBet/longBet/src/split_info.h"
-
+#include "split_info.h"
 // BCF main loop
 // input includes information about two sets of trees 
 // (one for prognostic term, the other for treatment term)

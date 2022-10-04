@@ -11,9 +11,10 @@
 #include "model.h"
 #include "X_struct.h"
 #include "split_info.h"
+#include "json.h"
 
 // local modification msquinn@: Use json in third_party/
-#include "third_party/json/src/json.hpp"
+// #include "third_party/json/src/json.hpp"
 
 //#include <armadillo>
 

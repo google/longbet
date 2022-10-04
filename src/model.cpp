@@ -1,5 +1,3 @@
-// #include "third_party/R/packages/longBet/longBet/src/matrix_utility.h"
-// #include "third_party/R/packages/XBCF/XBCF/src/utility.h"
 #include "tree.h"
 #include "model.h"
 #include <armadillo>

@@ -462,9 +462,17 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     matrix<double> resid_info;
     ini_matrix(resid_info, t_size, num_sweeps);
 
+    matrix<double> A_diag_info;
+    ini_matrix(A_diag_info, t_size, num_sweeps);
+
+    matrix<double> Sig_diag_info;
+    ini_matrix(Sig_diag_info, t_size, num_sweeps);
+
     // mcmc_loop returns tauhat [N x sweeps] matrix
-    mcmc_loop_longBet(Xorder_std, Xorder_tau_std, Xpointer, Xpointer_tau, torder_mu_std, torder_tau_std, verbose, sigma0_draw_xinfo, sigma1_draw_xinfo, b_xinfo, a_xinfo, beta_xinfo, *trees_pr, *trees_trt, no_split_penality,
-                   state, model_pr, model_trt, x_struct_pr, x_struct_trt, a_scaling, b_scaling, split_t_mod, split_t_con, resid_info);
+    mcmc_loop_longBet(Xorder_std, Xorder_tau_std, Xpointer, Xpointer_tau, torder_mu_std, torder_tau_std, verbose, 
+        sigma0_draw_xinfo, sigma1_draw_xinfo, b_xinfo, a_xinfo, beta_xinfo, *trees_pr, *trees_trt, no_split_penality,
+        state, model_pr, model_trt, x_struct_pr, x_struct_trt, a_scaling, b_scaling, split_t_mod, split_t_con, 
+        resid_info, A_diag_info, Sig_diag_info);
 
     // predict tauhats and muhats
     // cout << "predict " << endl;
@@ -481,6 +489,8 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix a_draws(num_sweeps, 1);
     Rcpp::NumericMatrix beta_draws(p_y, num_sweeps);
     Rcpp::NumericMatrix resid(t_size, num_sweeps);
+    Rcpp::NumericMatrix A_diag(t_size, num_sweeps);
+    Rcpp::NumericMatrix Sig_diag(t_size, num_sweeps);
     Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt_pr(trees_pr, true);
     Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt_trt(trees_trt, true);
 
@@ -502,6 +512,8 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     std_to_rcpp(a_xinfo, a_draws);
     std_to_rcpp(beta_xinfo, beta_draws);
     std_to_rcpp(resid_info, resid);
+    std_to_rcpp(A_diag_info, A_diag);
+    std_to_rcpp(Sig_diag_info, Sig_diag);
 
 
     auto end = system_clock::now();
@@ -584,7 +596,9 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         Rcpp::Named("input_var_count") = Rcpp::List::create(Rcpp::Named("x_con") = p_pr-1,
                                                             Rcpp::Named("x_mod") = p_trt),
         Rcpp::Named("gp_info") = Rcpp::List::create(
-            Rcpp::Named("resid") = resid
+            Rcpp::Named("resid") = resid,
+            Rcpp::Named("A_diag") = A_diag,
+            Rcpp::Named("Sig_diag") = Sig_diag
         )
 
     );

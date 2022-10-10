@@ -378,10 +378,8 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
   state->b_vec[0] = b0;
 }
 
-void longBetModel::update_time_coef(std::unique_ptr<State> &state,
-std::unique_ptr<X_struct> &x_struct,
-matrix<size_t> &torder_std,
-std::vector<double> &resid)
+void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_ptr<X_struct> &x_struct,
+  matrix<size_t> &torder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig)
 {
   // get total number of time
   double t_size = x_struct->t_values.size();
@@ -392,11 +390,11 @@ std::vector<double> &resid)
   // diagonal element of matrix A: sigma_{z_i}^{-1} * b_{z_i} * tau_i
   std::vector<double> diag_ctrl(t_size, 0);
   std::vector<double> diag_trt(t_size, 0);
-  std::vector<double> diag(t_size, 0);
+  // std::vector<double> diag(t_size, 0);
 
   double sig02 = pow(state->sigma_vec[0], 2);
   double sig12 = pow(state->sigma_vec[1], 2);
-  vec sig(t_size, fill::zeros);
+  // vec sig(t_size, fill::zeros);
 
 
   std::vector<size_t> idx(state->p_y);  // keep track of t-values
@@ -419,11 +417,11 @@ std::vector<double> &resid)
         {
           res_ctrl[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
           diag_ctrl[i] += state->tau_fit[k][t_idx];
-          sig(i) += sig02;
+          sig[i] += sig02;
         } else {
           res_trt[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
           diag_trt[i] += state->tau_fit[k][t_idx];
-          sig(i) += sig12;
+          sig[i] += sig12;
         }
       }
     }
@@ -432,7 +430,7 @@ std::vector<double> &resid)
   for (size_t i = 0; i < t_size; i++){
     resid[i] = (res_trt[i] + res_ctrl[i]) / n / x_struct->t_counts[i];
     diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/n;
-    sig(i) = 1 / (sig[i] / pow(n, 2) / x_struct->t_counts[i]);
+    sig[i] = 1 / (sig[i] / pow(n, 2) / x_struct->t_counts[i]);
   }
 
   // solve by var = (Sigma0^-1 + Sigma^-1)^-1
@@ -441,7 +439,7 @@ std::vector<double> &resid)
   // mu = var * (Sigma0^-1 * mu0 + res)
   arma::mat Sigma0(t_size, t_size);
   // arma::mat Sigma_inv(t_size, t_size);
-  arma::mat Sigma_inv = diagmat(sig);
+  arma::mat Sigma_inv = diagmat(conv_to<mat>::from(sig));
   for (size_t i = 0; i < t_size; i++){
     for (size_t j = 0; j < t_size; j++){
       Sigma0(i, j) = diag[i] * x_struct->cov_kernel[i][j] * diag[j];

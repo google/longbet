@@ -31,4 +31,7 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
                     bool b_scaling,
                     bool split_t_mod,
                     bool split_t_con,
-                    matrix<double> &resid_info);
+                    matrix<double> &resid_info,
+                    matrix<double> &A_diag_info,
+                    matrix<double> &Sig_diag_info
+                    );

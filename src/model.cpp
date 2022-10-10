@@ -380,15 +380,14 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
 
 void longBetModel::update_time_coef(std::unique_ptr<State> &state,
 std::unique_ptr<X_struct> &x_struct,
-matrix<size_t> &torder_std)
+matrix<size_t> &torder_std,
+std::vector<double> &resid)
 {
   // get total number of time
   double t_size = x_struct->t_values.size();
   double n = state->n_y;  // n obs per period. TODO: need update
   std::vector<double> res_ctrl(t_size, 0);  // residuals
   std::vector<double> res_trt(t_size, 0);
-  matrix<double> res;
-  ini_matrix(res, 1, t_size);
 
   // diagonal element of matrix A: sigma_{z_i}^{-1} * b_{z_i} * tau_i
   std::vector<double> diag_ctrl(t_size, 0);
@@ -431,7 +430,7 @@ matrix<size_t> &torder_std)
   }
 
   for (size_t i = 0; i < t_size; i++){
-    res[i][0] = (res_trt[i] + res_ctrl[i]) / n / x_struct->t_counts[i];
+    resid[i] = (res_trt[i] + res_ctrl[i]) / n / x_struct->t_counts[i];
     diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/n;
     sig(i) = 1 / (sig[i] / pow(n, 2) / x_struct->t_counts[i]);
   }
@@ -463,7 +462,7 @@ matrix<size_t> &torder_std)
   // mean
   arma::mat res_vec(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
-    res_vec(i, 0) = res[i][0];
+    res_vec(i, 0) = resid[i];
   }
   arma::mat mu = var * Sigma_inv * res_vec;
 

@@ -5,10 +5,8 @@ library(dplyr)
 library(ggplot2)
 library(tidyr)
 
-#### 1. DATA GENERATION PROCESS
-# n <- 200 # number of observations
-# t1 <- 20
-# t0 <- 11
+# DATA GENERATION PROCESS -------------------------------------------------
+
 
 set.seed(1)
 n <- 500
@@ -82,10 +80,12 @@ z_vec <- c(rep(0, n * (t0 - 1)), as.vector(z_mat))
 
 expand_z_mat <- cbind(matrix(0, n, (t0 - 1)), z_mat)
 
+
+# longbet -----------------------------------------------------------------
 t_longbet <- proc.time()
-longbet.fit <- longBet(y = y, x = x, z = expand_z_mat, t = 1:t1,
+longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
 num_trees_pr =  50, num_trees_trt = 50 ,
-pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
+pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 2)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 mu_hat_longbet <- apply(longbet.fit$muhats.adjusted, c(1, 2), mean)
@@ -96,20 +96,11 @@ t_longbet <- proc.time() - t_longbet
 
 
 cat("beta draws: ", rowMeans(longbet.fit$beta_draws), "\n")
-print(paste0("longbet RMSE: ", sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2))))
+print(paste0("longbet CATE RMSE: ", sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2))))
+print(paste0("longbet CATT RMSE: ", sqrt(mean((as.vector(tau_longbet[z == 1, ]) - as.vector(tau_mat[z==1,]))^2))))
 print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 
-att <- colMeans(tau_mat[z == 1, ])
-rep_z <- matrix(rep(z, t1), n, t1)
-ytilde <- y - matrix(rowMeans(y)) %*% rep(1,t1)- rep(1,n) %*% t(matrix(colMeans(y))) + mean(y)
-recenter <- mean((colMeans(ytilde[matrix(rep_z[,1])==1,]) - colMeans(ytilde[matrix(rep_z[,1])==0,]))[1:t0-1])
-tau_hat_freq <- colMeans(ytilde[matrix(rep_z[,1])==1,]) - colMeans(ytilde[matrix(rep_z[,1])==0,])-recenter
-print(paste0("Frequentist att rmse: ", sqrt( mean((tau_hat_freq[t0:t1] - att)^2) ) ))
-att_longbet <- colMeans(tau_longbet[z == 1, ])
-print(paste0("longbet att rmse: ", sqrt(mean( (att_longbet - att)^2 ))))
-
-
-## create covariates for bart ##
+# bart --------------------------------------------------------------------
 xtr <- cbind(z_vec, x_bart)
 xte <- cbind(1 - z_vec, x_bart)
 ytr <- y_vec
@@ -131,37 +122,84 @@ ce_bart$itl<-apply(ppd_test,2,quantile,probs=0.025)
 
 ## average causal effects ##
 ce_bart$ate <- mean(ce_bart$ite)
-
 t_bart = proc.time() - t_bart
 
 
-# compare results to inference
-print(paste0("longbet RMSE: ", round( sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2)), 2 ) ))
+
+# results -----------------------------------------------------------------
+# check ate
+ate <- tau_mat %>% colMeans
+ate_bart <- tau_bart %>% colMeans
+ate_longbet <- tau_longbet %>% colMeans
+
+print(paste0("longbet CATE RMSE: ", round( sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2)), 2 ) ))
+print(paste0("longbet ate rmse: ", round( sqrt(mean((ate_longbet - ate)^2)), 2)))
 print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 
-
-print(paste0("bart RMSE: ", round( sqrt(mean((tau_bart - tau_mat)^2)), 2)))
+print(paste0("bart CATE RMSE: ", round( sqrt(mean((tau_bart - tau_mat)^2)), 2)))
+print(paste0("BART ate rmse: ", round( sqrt(mean((ate_bart - ate)^2)), 2)))
 print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
 
-# check att
-att <- tau_mat[z == 1,] %>% colMeans
-att_bart <- tau_bart[z == 1,] %>% colMeans
-att_longbet <- tau_longbet[z == 1,] %>% colMeans
-print(paste0("longbet att rmse: ", round( sqrt(mean((att_longbet - att)^2)), 2)))
-print(paste0("BART att rmse: ", round( sqrt(mean((att_bart - att)^2)), 2)))
 
-
-# visualize ---------------------------------------------------------------
-
-att_df <- data.frame(
-  time = t0:t1,
-  true = att,
-  bart = att_bart,
-  longbet = att_longbet
-)
-
-att_df %>% 
-  gather("method", "att", -time) %>%
-  ggplot(aes(time, att)) + 
-  geom_line(aes(color = method)) + 
-  ylab(labs(title = "Average Treatment on Treated"))
+# # visualize ---------------------------------------------------------------
+# # ATE
+#   ate_df <- data.frame(
+#     time = t0:t1,
+#     true = ate,
+#     bart = ate_bart,
+#     longbet = ate_longbet,
+#     longbet_beta = rowMeans(longbet.fit$beta_draws)[t0:t1]
+#   )
+#   
+#   ate_df %>% 
+#     gather("method", "ate", -time) %>%
+#     ggplot(aes(time, ate)) + 
+#     geom_line(aes(color = method)) + 
+#     ylab(labs(title = "Average Treatment Effect"))
+#   
+#   
+# # Beta draws
+#   beta_df <- data.frame(
+#     beta = as.vector(longbet.fit$beta_draws[t0:t1, ]),
+#     time = rep(c(t0:t1), ncol(longbet.fit$beta_draws)),
+#     sweeps = as.vector(sapply(1:ncol(longbet.fit$beta_draws), rep, (t1 - t0 + 1)))
+#   )
+#   
+#   beta_df %>%
+#     ggplot() +
+#     geom_line(aes(time, beta, group = sweeps, color = sweeps)) +
+#     geom_line(data = att_df, aes(time, true), color = 'red')
+# 
+# 
+# # CATE
+#   cate_df <- data.frame(
+#     true = as.vector(t(tau_mat)),
+#     lonbet = as.vector(t(tau_longbet)),
+#     bart = as.vector(t(tau_bart)),
+#     time = rep(c(t0:t1), nrow(tau_mat)),
+#     id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
+#   )
+#   
+#   cate_df %>%
+#     gather("method", "cate", -time, -id) %>%
+#     ggplot() +
+#     geom_line(aes(time, cate, group = id, color = id)) +
+#     facet_wrap(~method)
+#   
+# # CATE error
+#   cate_error <- data.frame(
+#     lonbet = as.vector(t(tau_longbet - tau_mat)),
+#     bart = as.vector(t(tau_bart - tau_mat)),
+#     time = rep(c(t0:t1), nrow(tau_mat)),
+#     id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
+#   )
+#   
+#   cate_error %>%
+#     gather("method", "cate", -time, -id) %>%
+#     ggplot() +
+#     geom_line(aes(time, cate, group = id, color = id)) +
+#     facet_wrap(~method)
+#   
+#   
+# 
+# 

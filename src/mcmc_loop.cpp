@@ -27,7 +27,9 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
                     bool a_scaling,
                     bool b_scaling,
                     bool split_t_mod,
-                    bool split_t_con)
+                    bool split_t_con,
+                    matrix<double> &resid_info
+                    )
 {
 
   if (state->parallel)
@@ -162,7 +164,8 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
       }
     }
 
-    model_ps->update_time_coef(state, x_struct_trt, torder_tau_std); 
+    model_ps->update_time_coef(state, x_struct_trt, torder_tau_std, resid_info[sweeps]); 
+
     std::copy(state->beta_t.begin(), state->beta_t.end(),
     beta_xinfo[sweeps].begin());
     // store draws for b0, b1 and a, although they are updated per tree, we save results per forest (sweep)

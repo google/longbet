@@ -9,56 +9,62 @@
 #include "utility.h"
 #include "json_io.h"
 #include "model.h"
+#include "rcpp_utility.h"
 
 
-// TODO: enable predict function
-// // [[Rcpp::export]]
-// Rcpp::List predict(arma::mat X,
-//                         Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt)
-// {
+// [[Rcpp::export]]
+Rcpp::List predict(arma::mat X, arma::mat t, 
+                        Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt)
+{
 
-//     // Process the prognostic input
-//     size_t N = X.n_rows;
-//     size_t p = X.n_cols;
+    // Process the prognostic input
+    size_t N = X.n_rows;
+    size_t p = X.n_cols;
+    size_t p_y = t.n_rows;
 
-//     // Init X_std matrix
-//     Rcpp::NumericMatrix X_std(N, p);
-//     for (size_t i = 0; i < N; i++)
-//     {
-//         for (size_t j = 0; j < p; j++)
-//         {
-//             X_std(i, j) = X(i, j);
-//         }
-//     }
-//     double *Xpointer = &X_std[0];
+    // Init X_std matrix
+    Rcpp::NumericMatrix X_std(N, p);
+    Rcpp::NumericMatrix t_std(N, p_y);
 
-//     // Trees
-//     std::vector<std::vector<tree>> *trees = tree_pnt;
+    arma_to_rcpp(X, X_std);
+    arma_to_rcpp(t, t_std);
 
-//     // Result Container
-//     matrix<double> pred_xinfo;
-//     size_t N_sweeps = (*trees).size();
-//     ini_xinfo(pred_xinfo, N, N_sweeps);
+    double *Xpointer = &X_std[0];
+    double *tpointer = &t_std[0];
 
-//     longBetModel *model = new longBetModel();
+    // Trees
+    std::vector<std::vector<tree>> *trees = tree_pnt;
 
-//     // Predict
-//     model->predict_std(Xpointer, N, p, N_sweeps,
-//                        pred_xinfo, *trees);
+    // Result Container
+    size_t num_sweeps = (*trees).size();
+    std::vector<matrix<double>> pred_xinfo(num_sweeps);
+    for (size_t i = 0; i < num_sweeps; i++)
+    { 
+        ini_matrix(pred_xinfo[i], p_y, N);
+    }
 
-//     // Convert back to Rcpp
-//     Rcpp::NumericMatrix preds(N, N_sweeps);
+    longBetModel *model = new longBetModel();
 
-//     for (size_t i = 0; i < N; i++)
-//     {
-//         for (size_t j = 0; j < N_sweeps; j++)
-//         {
-//             preds(i, j) = pred_xinfo[j][i];
-//         }
-//     }
+    // Predict
+    model->predict_std(Xpointer, tpointer, N, p_y, num_sweeps, pred_xinfo, *trees);
 
-//     return Rcpp::List::create(Rcpp::Named("predicted_values") = preds);
-// }
+    // Convert back to Rcpp
+    Rcpp::NumericMatrix preds(N * p_y, num_sweeps);
+
+    for (size_t sweep_ind = 0; sweep_ind < num_sweeps; sweep_ind++)
+    {
+        for (size_t col = 0; col < p_y; col ++)
+        {
+            for (size_t row = 0; row < N; row ++)
+            {
+                preds(col * N +  row, sweep_ind) = pred_xinfo[sweep_ind][row][col];
+            }
+        }
+    }
+
+
+    return Rcpp::List::create(Rcpp::Named("preds") = preds);
+}
 
 // [[Rcpp::export]]
 Rcpp::StringVector r_to_json(double y_mean, Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt)

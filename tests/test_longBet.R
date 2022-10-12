@@ -1,10 +1,9 @@
 # simple demonstration of longbet with default parameters
-library(longBet)
 library(dbarts)
 library(dplyr)
 library(ggplot2)
 library(tidyr)
-
+library(longBet)
 # DATA GENERATION PROCESS -------------------------------------------------
 
 
@@ -88,17 +87,21 @@ num_trees_pr =  50, num_trees_trt = 50 ,
 pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 2)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
-mu_hat_longbet <- apply(longbet.fit$muhats.adjusted, c(1, 2), mean)
-tau_hat_longbet <- apply(longbet.fit$tauhats.adjusted, c(1, 2), mean)
+longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
+mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)
+tau_hat_longbet <- apply(longbet.pred$tauhats.adjusted, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t1]
 t_longbet <- proc.time() - t_longbet
-
-
 
 cat("beta draws: ", rowMeans(longbet.fit$beta_draws), "\n")
 print(paste0("longbet CATE RMSE: ", sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2))))
 print(paste0("longbet CATT RMSE: ", sqrt(mean((as.vector(tau_longbet[z == 1, ]) - as.vector(tau_mat[z==1,]))^2))))
 print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
+
+mu_hat_longbet_fit <- apply(longbet.fit$muhats.adjusted, c(1, 2), mean)
+tau_hat_longbet_fit <- apply(longbet.fit$tauhats.adjusted, c(1, 2), mean)
+tau_longbet_fit <- tau_hat_longbet_fit[,t0:t1]
+print(paste0("longbet CATE RMSE (check): ", sqrt(mean((as.vector(tau_longbet_fit) - as.vector(tau_mat))^2))))
 
 # bart --------------------------------------------------------------------
 xtr <- cbind(z_vec, x_bart)

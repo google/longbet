@@ -12,6 +12,19 @@ Rcpp::Rostream<true>&  Rcpp::Rcout = Rcpp::Rcpp_cout_get();
 Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
+// predict
+Rcpp::List predict(arma::mat X, arma::mat t, Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt);
+RcppExport SEXP _longBet_predict(SEXP XSEXP, SEXP tSEXP, SEXP tree_pntSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< arma::mat >::type X(XSEXP);
+    Rcpp::traits::input_parameter< arma::mat >::type t(tSEXP);
+    Rcpp::traits::input_parameter< Rcpp::XPtr<std::vector<std::vector<tree>>> >::type tree_pnt(tree_pntSEXP);
+    rcpp_result_gen = Rcpp::wrap(predict(X, t, tree_pnt));
+    return rcpp_result_gen;
+END_RCPP
+}
 // r_to_json
 Rcpp::StringVector r_to_json(double y_mean, Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt);
 RcppExport SEXP _longBet_r_to_json(SEXP y_meanSEXP, SEXP tree_pntSEXP) {
@@ -140,6 +153,7 @@ END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
+    {"_longBet_predict", (DL_FUNC) &_longBet_predict, 3},
     {"_longBet_r_to_json", (DL_FUNC) &_longBet_r_to_json, 2},
     {"_longBet_json_to_r", (DL_FUNC) &_longBet_json_to_r, 1},
     {"_longBet_sample_int_crank", (DL_FUNC) &_longBet_sample_int_crank, 3},

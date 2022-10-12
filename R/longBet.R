@@ -66,6 +66,7 @@ longbet <- function(y, x, z, t, pcat,
         # t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)
     } else {
         t_mod <- c(1)
+        t0 <- NULL
     }
 
     if(!("matrix" %in% class(t_con))){
@@ -162,6 +163,8 @@ longbet <- function(y, x, z, t, pcat,
                     sig_knl, lambda_knl)
     class(obj) = "longBet"
 
+    obj$t0 = t0
+    obj$t_mod = t_mod
     obj$sdy = sdy
     obj$meany = meany
     obj$tauhats = obj$tauhats * sdy

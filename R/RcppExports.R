@@ -5,6 +5,10 @@ predict <- function(X, t, tree_pnt) {
     .Call(`_longBet_predict`, X, t, tree_pnt)
 }
 
+predict_beta <- function(t, t_mod, res, A_diag, Sig_diag, sig_knl, lambda_knl) {
+    .Call(`_longBet_predict_beta`, t, t_mod, res, A_diag, Sig_diag, sig_knl, lambda_knl)
+}
+
 r_to_json <- function(y_mean, tree_pnt) {
     .Call(`_longBet_r_to_json`, y_mean, tree_pnt)
 }

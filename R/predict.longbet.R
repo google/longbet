@@ -3,10 +3,11 @@
 #' @param model A trained longbet model.
 #' @param x An input matrix for size n by p1. Column order matters: continuos features should all bgo before of categorical.
 #' @param t time variable (post-treatment time for treatment term will be infered based on input t and z).
+#' @param gp bool, predict time coefficient beta using gaussian process
 #'
 #' @return A list with two matrices. Each matrix corresponds to a set of draws of predicted values; rows are datapoints, columns are iterations.
 #' @export
-predict.longBet <- function(model, x, t) {
+predict.longBet <- function(model, x, t, gp = FALSE, ...) {
 
     print(dim(x))
     if(!("matrix" %in% class(x))) {
@@ -29,9 +30,14 @@ predict.longBet <- function(model, x, t) {
         print(model$t_mod)
         stop()
     }
-    
+    print("Predict con")
     obj_mu = .Call(`_longBet_predict`, x, t_con, model$model_list$tree_pnt_pr)
+    print("Predict mod")
     obj_tau = .Call(`_longBet_predict`, x, t_mod, model$model_list$tree_pnt_trt)
+    print("Predict beta")
+    obj_beta = .Call(`_longBet_predict_beta`, t_mod, 
+        model$t_mod, model$gp_info$resid, model$gp_info$A_diag, model$gp_info$Sig_diag,
+        model$model_params$sig_knl, model$model_params$lambda_knl)
 
     num_sweeps <- ncol(model$tauhats)
     num_burnin <- model$model_params$burnin

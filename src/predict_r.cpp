@@ -67,6 +67,52 @@ Rcpp::List predict(arma::mat X, arma::mat t,
 }
 
 // [[Rcpp::export]]
+Rcpp::List predict_beta(arma::mat t_test, arma::mat t_train,
+    arma::mat res, arma::mat A_diag, arma::mat Sig_diag,
+    double sig_knl, double lambda_knl)
+{
+    size_t tr_size = t_train.n_rows;
+    size_t te_size = t_test.n_rows;
+    size_t num_sweeps = res.n_cols;
+
+    // Init matrix
+    std::vector<double> tr_std(tr_size);
+    std::vector<double> te_std(te_size);
+    // Rcpp::NumericMatrix res_std(t_size, num_sweeps);
+    // Rcpp::NumericMatrix A_diag_std(t_size, num_sweeps);
+    // Rcpp::NumericMatrix Sig_diag_std(t_size, num_sweeps);
+    
+    arma_to_std(t_train, tr_std);
+    arma_to_std(t_test, te_std);
+    // arma_to_rcpp(res, res_std);
+    // arma_to_rcpp(A_diag, A_diag_std);
+    // arma_to_rcpp(Sig_diag, Sig_diag_std);
+    
+    // Calculate Sigma matrix
+    matrix<double> Sigma_tr;
+    matrix<double> Sigma_te;
+    matrix<double> Sigma_tt;
+    ini_matrix(Sigma_tr, tr_size, tr_size);
+    ini_matrix(Sigma_te, te_size, te_size);
+    ini_matrix(Sigma_tt, te_size, tr_size);
+
+    cov_kernel(tr_std, tr_std, sig_knl, lambda_knl, Sigma_tr);
+    cov_kernel(te_std, te_std, sig_knl, lambda_knl, Sigma_te);
+    cov_kernel(tr_std, te_std, sig_knl, lambda_knl, Sigma_tt);
+
+
+    // // output
+    // Rcpp::NumericMatrix preds(pred_t_size, num_sweeps);
+
+    // for (size_t sweeps = 0; sweeps < num_sweeps; sweeps++)
+    // {
+
+    // }
+
+    return Rcpp::List::create();
+}
+
+// [[Rcpp::export]]
 Rcpp::StringVector r_to_json(double y_mean, Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt)
 {
 

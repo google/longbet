@@ -25,6 +25,23 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// predict_beta
+Rcpp::List predict_beta(arma::mat t, arma::mat t_mod, arma::mat res, arma::mat A_diag, arma::mat Sig_diag, double sig_knl, double lambda_knl);
+RcppExport SEXP _longBet_predict_beta(SEXP tSEXP, SEXP t_modSEXP, SEXP resSEXP, SEXP A_diagSEXP, SEXP Sig_diagSEXP, SEXP sig_knlSEXP, SEXP lambda_knlSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< arma::mat >::type t(tSEXP);
+    Rcpp::traits::input_parameter< arma::mat >::type t_mod(t_modSEXP);
+    Rcpp::traits::input_parameter< arma::mat >::type res(resSEXP);
+    Rcpp::traits::input_parameter< arma::mat >::type A_diag(A_diagSEXP);
+    Rcpp::traits::input_parameter< arma::mat >::type Sig_diag(Sig_diagSEXP);
+    Rcpp::traits::input_parameter< double >::type sig_knl(sig_knlSEXP);
+    Rcpp::traits::input_parameter< double >::type lambda_knl(lambda_knlSEXP);
+    rcpp_result_gen = Rcpp::wrap(predict_beta(t, t_mod, res, A_diag, Sig_diag, sig_knl, lambda_knl));
+    return rcpp_result_gen;
+END_RCPP
+}
 // r_to_json
 Rcpp::StringVector r_to_json(double y_mean, Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt);
 RcppExport SEXP _longBet_r_to_json(SEXP y_meanSEXP, SEXP tree_pntSEXP) {
@@ -154,6 +171,7 @@ END_RCPP
 
 static const R_CallMethodDef CallEntries[] = {
     {"_longBet_predict", (DL_FUNC) &_longBet_predict, 3},
+    {"_longBet_predict_beta", (DL_FUNC) &_longBet_predict_beta, 7},
     {"_longBet_r_to_json", (DL_FUNC) &_longBet_r_to_json, 2},
     {"_longBet_json_to_r", (DL_FUNC) &_longBet_json_to_r, 1},
     {"_longBet_sample_int_crank", (DL_FUNC) &_longBet_sample_int_crank, 3},

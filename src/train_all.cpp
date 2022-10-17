@@ -371,7 +371,10 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
                                                          Rcpp::Named("beta_trt") = beta_trt,
                                                          Rcpp::Named("tau_trt") = tau_trt,
                                                          Rcpp::Named("p_categorical_trt") = p_categorical_trt,
-                                                         Rcpp::Named("num_trees_trt") = num_trees_trt),
+                                                         Rcpp::Named("num_trees_trt") = num_trees_trt,
+                                                         Rcpp::Named("sig_knl") = sig_knl,
+                                                         Rcpp::Named("lambda_knl") = lambda_knl
+                                                         ),
         Rcpp::Named("input_var_count") = Rcpp::List::create(Rcpp::Named("x_con") = p_pr,
                                                             Rcpp::Named("x_mod") = p_trt),
         Rcpp::Named("gp_info") = Rcpp::List::create(

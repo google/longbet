@@ -155,4 +155,6 @@ int get_index(std::vector<double> v, double K);
 void svd(std::vector<std::vector<double>> matrix,
 std::vector<std::vector<double>>& s, std::vector<std::vector<double>>& u,
 std::vector<std::vector<double>>& v);
+
+void cov_kernel(std::vector<double> &t1, std::vector<double> &t2, double &sig_knl, double &lambda_knl, matrix<double> &cov_kernel);
 #endif

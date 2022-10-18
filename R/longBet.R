@@ -164,7 +164,6 @@ longbet <- function(y, x, z, t, pcat,
     class(obj) = "longBet"
 
     obj$t0 = t0
-    obj$t_mod = t_mod
     obj$sdy = sdy
     obj$meany = meany
     obj$tauhats = obj$tauhats * sdy
@@ -179,6 +178,6 @@ longbet <- function(y, x, z, t, pcat,
         obj$muhats.adjusted[,, i - num_burnin] = matrix(obj$muhats[,i], nrow(y), ncol(y)) * (obj$a_draws[i]) + meany
     }
     
-    obj$beta_draws = obj$beta_draws[, (num_burnin+1):num_sweeps]
+    # obj$beta_draws = obj$beta_draws[, (num_burnin+1):num_sweeps]
     return(obj)
 }

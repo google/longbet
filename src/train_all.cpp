@@ -270,6 +270,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix resid(t_size, num_sweeps);
     Rcpp::NumericMatrix A_diag(t_size, num_sweeps);
     Rcpp::NumericMatrix Sig_diag(t_size, num_sweeps);
+    Rcpp::NumericMatrix t_values(t_size, 1);
     Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt_pr(trees_pr, true);
     Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt_trt(trees_trt, true);
 
@@ -293,6 +294,11 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     std_to_rcpp(resid_info, resid);
     std_to_rcpp(A_diag_info, A_diag);
     std_to_rcpp(Sig_diag_info, Sig_diag);
+
+    for (size_t i = 0; i < t_size; i++)
+    {
+        t_values(i, 0) = x_struct_trt->t_values[i];
+    }
 
 
     auto end = system_clock::now();
@@ -378,6 +384,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         Rcpp::Named("input_var_count") = Rcpp::List::create(Rcpp::Named("x_con") = p_pr,
                                                             Rcpp::Named("x_mod") = p_trt),
         Rcpp::Named("gp_info") = Rcpp::List::create(
+            Rcpp::Named("t_values") = t_values,
             Rcpp::Named("resid") = resid,
             Rcpp::Named("A_diag") = A_diag,
             Rcpp::Named("Sig_diag") = Sig_diag

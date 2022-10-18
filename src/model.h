@@ -11,6 +11,7 @@
 #include "cdf.h"
 
 using namespace std;
+using namespace arma;
 
 class tree;
 
@@ -165,6 +166,11 @@ public:
 
   void set_state_status(std::unique_ptr<State> &state, size_t value,
   const double *X, matrix<size_t> &Xorder, const double *t_std);
+
+  void predict_beta(std::vector<double> &beta,
+    std::vector<double> &res_vec, std::vector<double> &a_vec, std::vector<double> &sig_vec, 
+    matrix<double> &Sigma_tr_std, matrix<double> &Sigma_te_std, matrix<double> &Sigma_tt_std,
+    std::mt19937 &gen);
 };
 
 

@@ -25,19 +25,24 @@ predict.longBet <- function(model, x, t, gp = FALSE, ...) {
     t_mod <- as.matrix(sapply(t_con, function(x) max(x - model$t0, 0)))
     # print("Adjusted treatment time to predict:")
     # print(t_mod)
-    if (any(t_mod != model$t_mod)){
-        print('Adjusted treatment time does not trained treatment time:')
-        print(model$t_mod)
-        stop()
-    }
-    print("Predict con")
+    
     obj_mu = .Call(`_longBet_predict`, x, t_con, model$model_list$tree_pnt_pr)
-    print("Predict mod")
+
     obj_tau = .Call(`_longBet_predict`, x, t_mod, model$model_list$tree_pnt_trt)
-    print("Predict beta")
-    obj_beta = .Call(`_longBet_predict_beta`, t_mod, 
-        model$t_mod, model$gp_info$resid, model$gp_info$A_diag, model$gp_info$Sig_diag,
-        model$model_params$sig_knl, model$model_params$lambda_knl)
+
+    # Match t_mod and t_values
+    idx <- match(t_mod, model$gp_info$t_values)
+    beta <- model$beta_draws[idx, ]
+    t_mod_new <- as.matrix(t_mod[which(is.na(idx))])
+
+    if (length(t_mod_new) > 0) 
+    {
+        print("predict beta")
+        obj_beta = .Call(`_longBet_predict_beta`, t_mod_new, 
+            model$gp_info$t_values, model$gp_info$resid, model$gp_info$A_diag, model$gp_info$Sig_diag,
+            model$model_params$sig_knl, model$model_params$lambda_knl)
+        beta[is.na(idx), ] <- obj_beta$beta
+    }
 
     num_sweeps <- ncol(model$tauhats)
     num_burnin <- model$model_params$burnin
@@ -62,10 +67,10 @@ predict.longBet <- function(model, x, t, gp = FALSE, ...) {
     seq <- (num_burnin+1):num_sweeps
     for (i in seq) {
         obj$muhats.adjusted[,, i - num_burnin] = matrix(obj_mu$preds[,i], n, p) * (model$a_draws[i]) + model$meany
-        obj$tauhats.adjusted[,, i - num_burnin] = matrix(obj_tau$preds[,i], n, p) * (model$b_draws[i,2] - model$b_draws[i,1]) * t(matrix(rep(model$beta_draws[,i - num_burnin], n), p, n))
+        obj$tauhats.adjusted[,, i - num_burnin] = matrix(obj_tau$preds[,i], n, p) * (model$b_draws[i,2] - model$b_draws[i,1]) * t(matrix(rep(beta[, i], n), p, n))
         # TODO: check betadraws t_mod matches t
     }
     
-    obj$beta_draws = model$beta_draws
+    obj$beta_draws = beta
     return(obj)
 }

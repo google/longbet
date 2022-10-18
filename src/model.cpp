@@ -517,3 +517,48 @@ void longBetModel::set_state_status(std::unique_ptr<State> &state, size_t value,
   }
 
 }
+
+void longBetModel::predict_beta(std::vector<double> &beta,
+  std::vector<double> &res_vec, std::vector<double> &a_vec, std::vector<double> &sig_vec, 
+  matrix<double> &Sigma_tr_std, matrix<double> &Sigma_te_std, matrix<double> &Sigma_tt_std,
+  std::mt19937 &gen)
+{
+  vec a_diag = conv_to<vec>::from(a_vec);
+  vec sig_diag = conv_to<vec>::from(sig_vec);
+  vec res = conv_to<vec>::from(res_vec);
+
+  size_t tr_size = Sigma_tr_std.size();
+  size_t te_size = Sigma_te_std.size();
+  mat Sigma_tr(tr_size, tr_size);
+  mat Sigma_te(te_size, te_size);
+  mat Sigma_tt(tr_size, te_size);
+
+  std_to_arma(Sigma_tr_std, Sigma_tr);
+  std_to_arma(Sigma_te_std, Sigma_te);
+  std_to_arma(Sigma_tt_std, Sigma_tt);
+
+  mat A = diagmat(a_diag);
+  mat Sig = diagmat(sig_diag);
+  mat Sig_inv = pinv(Sig + A * Sigma_tr * A.t());
+  mat common_mat = Sigma_tt.t() * A.t() * Sig_inv;
+  
+  mat mu = common_mat * res;
+  mat var = Sigma_te - common_mat * A * Sigma_tt;
+
+  arma::mat U, V;
+  arma::vec s;
+  svd(U, s, V, var);
+
+  arma::mat L = U * diagmat(s);
+
+  std::normal_distribution<double> normal_samp(0.0, 1.0);
+  arma::mat draws(te_size, 1);
+  for (size_t i = 0; i < te_size; i++){ draws(i, 0) = normal_samp(gen); }
+
+  arma::mat beta_tilde = mu + L * draws;
+
+  for (size_t i = 0; i < te_size; i++){
+    beta[i] = beta_tilde(i, 0);
+  }
+  
+}

@@ -1,7 +1,7 @@
 #include <ctime>
-#include <RcppArmadillo.h>
 // #include <Rcpp.h>
 // #include <armadillo>
+#include <RcppArmadillo.h>
 #include "tree.h"
 #include "forest.h"
 #include <chrono>
@@ -12,6 +12,7 @@
 #include "rcpp_utility.h"
 
 
+using namespace arma;
 // [[Rcpp::export]]
 Rcpp::List predict(arma::mat X, arma::mat t, 
                         Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt)
@@ -89,27 +90,53 @@ Rcpp::List predict_beta(arma::mat t_test, arma::mat t_train,
     // arma_to_rcpp(Sig_diag, Sig_diag_std);
     
     // Calculate Sigma matrix
-    matrix<double> Sigma_tr;
-    matrix<double> Sigma_te;
-    matrix<double> Sigma_tt;
-    ini_matrix(Sigma_tr, tr_size, tr_size);
-    ini_matrix(Sigma_te, te_size, te_size);
-    ini_matrix(Sigma_tt, te_size, tr_size);
+    matrix<double> Sigma_tr_std;
+    matrix<double> Sigma_te_std;
+    matrix<double> Sigma_tt_std;
+    ini_matrix(Sigma_tr_std, tr_size, tr_size);
+    ini_matrix(Sigma_te_std, te_size, te_size);
+    ini_matrix(Sigma_tt_std, te_size, tr_size);
 
-    cov_kernel(tr_std, tr_std, sig_knl, lambda_knl, Sigma_tr);
-    cov_kernel(te_std, te_std, sig_knl, lambda_knl, Sigma_te);
-    cov_kernel(tr_std, te_std, sig_knl, lambda_knl, Sigma_tt);
+    cov_kernel(tr_std, tr_std, sig_knl, lambda_knl, Sigma_tr_std);
+    cov_kernel(te_std, te_std, sig_knl, lambda_knl, Sigma_te_std);
+    cov_kernel(tr_std, te_std, sig_knl, lambda_knl, Sigma_tt_std);
 
+    longBetModel *model = new longBetModel();
 
-    // // output
-    // Rcpp::NumericMatrix preds(pred_t_size, num_sweeps);
+    // cout << "tr_size" << tr_size << endl;
 
-    // for (size_t sweeps = 0; sweeps < num_sweeps; sweeps++)
-    // {
+    // mat A(tr_size, tr_size, fill::zeros);
+    // mat Sig(tr_size, tr_size, fill::zeros);
+    // mat res_vec(tr_size, 1, fill::zeros);
+    // cout << "A " << A << endl;
 
-    // }
+    std::vector<double> a_vec(tr_size);
+    std::vector<double> sig_vec(tr_size);
+    std::vector<double> res_vec(tr_size);
 
-    return Rcpp::List::create();
+    // output
+    std::random_device rd;
+    std::mt19937 gen = std::mt19937(rd());;
+    std::vector<double> beta_std(te_size);
+    Rcpp::NumericMatrix beta(te_size, num_sweeps);
+
+    for (size_t sweeps = 0; sweeps < num_sweeps; sweeps++)
+    {
+        for (size_t i = 0; i < tr_size; i++)
+        {
+            a_vec[i] = A_diag(i, sweeps);
+            sig_vec[i] = Sig_diag(i, sweeps);
+            res_vec[i] = res(i, sweeps);
+        }
+
+        model->predict_beta(beta_std, res_vec, a_vec, sig_vec, Sigma_tr_std, Sigma_te_std, Sigma_tt_std, gen);
+
+        for (size_t i = 0; i < te_size; i++)
+        {
+            beta(i, sweeps) = beta_std[i];
+        }
+    }
+    return Rcpp::List::create(Rcpp::Named("beta") = beta);
 }
 
 // [[Rcpp::export]]

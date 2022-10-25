@@ -68,6 +68,13 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     size_t p_trt = X_tau.n_cols;
     size_t p_y = y.n_cols;  // dimension of response variables
 
+    if ( N * p_pr * p_trt * p_y == 0)
+    {
+        cout << "Wrong dimension " << " N " << N << " p_pr " << p_pr << " p_trt " << p_trt << " p_y" << p_y << endl;
+        abort();
+    }
+
+
     // number of continuous variables
     size_t p_continuous_pr = p_pr - p_categorical_pr;
     size_t p_continuous_trt = p_trt - p_categorical_trt;

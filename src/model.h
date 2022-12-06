@@ -9,6 +9,8 @@
 #include "state.h"
 #include "X_struct.h"
 #include "cdf.h"
+#include "RcppArmadillo.h"
+#include "rcpp_utility.h"
 
 using namespace std;
 using namespace arma;

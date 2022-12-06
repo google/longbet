@@ -93,6 +93,7 @@ void arma_to_rcpp(const arma::mat &matrix_in, Rcpp::NumericMatrix &matrix_out)
 {
     size_t dim_x = matrix_in.n_rows;
     size_t dim_y = matrix_in.n_cols;
+    // cout << "mat dim " << dim_x << " " << matrix_in.n_cols << " first value " << matrix_in(0,0) <<endl;
 
     for (size_t i = 0; i < dim_x; i++)
     {
@@ -220,4 +221,16 @@ void rcpp_to_std2(arma::mat X, arma::mat Xtest, Rcpp::NumericMatrix &X_std, Rcpp
     }
 
     return;
+}
+
+void std_to_arma(matrix<double> &mat_std, arma::mat &mat_arma)
+{
+    mat_arma.resize(mat_std.size(), mat_std[0].size());
+    for (size_t i = 0; i < mat_std.size(); i++)
+    {
+        for (size_t j = 0; j < mat_std[0].size(); j++)
+        {
+            mat_arma(i, j) = mat_std[i][j];
+        }
+    }
 }

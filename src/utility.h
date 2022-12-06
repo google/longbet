@@ -13,7 +13,6 @@ extern ThreadPool thread_pool;
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <numeric>
-#include <armadillo>
 #endif
 
 template <typename T>
@@ -160,7 +159,5 @@ std::vector<std::vector<double>>& v);
 void cov_kernel(std::vector<double> &t1, std::vector<double> &t2, double &sig_knl, double &lambda_knl, matrix<double> &cov_kernel);
 
 void predict_beta(std::vector<double> &A_diag, std::vector<double> &Sig_diag, std::vector<double> &res);
-
-void std_to_arma(matrix<double> &mat_std, arma::mat &mat_arma);
 
 #endif

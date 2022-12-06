@@ -1,7 +1,5 @@
 #include <ctime>
 // #include <Rcpp.h>
-// #include <armadillo>
-#include <RcppArmadillo.h>
 #include "tree.h"
 #include "forest.h"
 #include <chrono>
@@ -9,6 +7,7 @@
 #include "utility.h"
 #include "json_io.h"
 #include "model.h"
+#include <RcppArmadillo.h>
 #include "rcpp_utility.h"
 
 
@@ -22,6 +21,12 @@ Rcpp::List predict(arma::mat X, arma::mat t,
     size_t N = X.n_rows;
     size_t p = X.n_cols;
     size_t p_y = t.n_rows;
+
+    if (N * p * p_y == 0)
+    {
+        std::cout << "Wrong dimensions " << " N " << N << " p " << p << " p_y " << p_y << endl;
+        abort();
+    }
 
     // Init X_std matrix
     Rcpp::NumericMatrix X_std(N, p);
@@ -76,6 +81,15 @@ Rcpp::List predict_beta(arma::mat t_test, arma::mat t_train,
     size_t te_size = t_test.n_rows;
     size_t num_sweeps = res.n_cols;
 
+    if (tr_size * te_size * num_sweeps == 0)
+    {
+        std::cout << "Wrong dimensions " << " tr_size " << tr_size << " te_size " << te_size << " num_sweeps " << num_sweeps << endl;
+        abort();
+    }
+    // std::cout << "tr_size " << tr_size << endl;
+    // std::cout << "t_train " << t_train << endl;
+    // std::cout << "t_test " << t_test << endl;
+
     // Init matrix
     std::vector<double> tr_std(tr_size);
     std::vector<double> te_std(te_size);
@@ -85,9 +99,9 @@ Rcpp::List predict_beta(arma::mat t_test, arma::mat t_train,
     
     arma_to_std(t_train, tr_std);
     arma_to_std(t_test, te_std);
-    // arma_to_rcpp(res, res_std);
-    // arma_to_rcpp(A_diag, A_diag_std);
-    // arma_to_rcpp(Sig_diag, Sig_diag_std);
+    
+    // std::cout << "tr_std " << tr_std << endl;
+    // std::cout << "te_std " << te_std << endl;
     
     // Calculate Sigma matrix
     matrix<double> Sigma_tr_std;

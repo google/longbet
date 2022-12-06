@@ -1,5 +1,4 @@
 #include <ctime>
-#include <RcppArmadillo.h>
 #include "tree.h"
 #include <chrono>
 // #include "mcmc_loop.h"
@@ -7,6 +6,7 @@
 #include "mcmc_loop.h"
 #include "common.h"
 #include "rcpp_utility.h"
+#include <RcppArmadillo.h>
 
 using namespace std;
 using namespace chrono;
@@ -131,14 +131,14 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix y_std(N, p_y);
     Rcpp::NumericMatrix X_std(N, p_pr);
     Rcpp::NumericMatrix X_tau_std(N, p_trt);
-    Rcpp::NumericMatrix tcon_std(N, t_con.n_cols);
-    Rcpp::NumericMatrix tmod_std(N, t_mod.n_cols);
+    Rcpp::NumericMatrix tcon_std(t_con.n_rows, t_con.n_cols);
+    Rcpp::NumericMatrix tmod_std(t_mod.n_rows, t_mod.n_cols);
 
+    arma_to_rcpp(X, X_std);
     arma_to_rcpp(y, y_std);
     arma_to_rcpp(z, z_std);
     arma_to_rcpp(t_con, tcon_std);
     arma_to_rcpp(t_mod, tmod_std);
-    arma_to_rcpp(X, X_std);
     arma_to_std_ordered(X, Xorder_std);
     arma_to_std_ordered(t_con, torder_mu_std);
     arma_to_std_ordered(t_mod, torder_tau_std);
@@ -306,6 +306,8 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     {
         t_values(i, 0) = x_struct_trt->t_values[i];
     }
+    // cout << "x_struct t_values " << x_struct_trt->t_values << endl;
+    // cout << "t_values output " << t_values << endl;
 
 
     auto end = system_clock::now();

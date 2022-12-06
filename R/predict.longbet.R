@@ -34,7 +34,8 @@ predict.longBet <- function(model, x, t, gp = FALSE, ...) {
     idx <- match(t_mod, model$gp_info$t_values)
     beta <- model$beta_draws[idx, ]
     t_mod_new <- as.matrix(t_mod[which(is.na(idx))])
-
+    # print("t_values") 
+    # print(model$gp_info$t_values)
     if (length(t_mod_new) > 0) 
     {
         print("predict beta")

@@ -23,3 +23,5 @@ double compute_vec_mean(const std::vector<double> &vec);
 double compute_mat_mean(const Rcpp::NumericMatrix &matrix);
 
 void rcpp_to_std2(arma::mat X, arma::mat Xtest, Rcpp::NumericMatrix &X_std, Rcpp::NumericMatrix &Xtest_std, matrix<size_t> &Xorder_std);
+
+void std_to_arma(matrix<double> &mat_std, arma::mat &mat_arma);

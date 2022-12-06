@@ -300,15 +300,3 @@ void cov_kernel(std::vector<double> &t1, std::vector<double> &t2, double &sig_kn
         }
         // std::cout << "cov_kernel = " << cov_kernel << endl;
 }
-
-void std_to_arma(matrix<double> &mat_std, arma::mat &mat_arma)
-{
-    mat_arma.resize(mat_std.size(), mat_std[0].size());
-    for (size_t i = 0; i < mat_std.size(); i++)
-    {
-        for (size_t j = 0; j < mat_std[0].size(); j++)
-        {
-            mat_arma(i, j) = mat_std[i][j];
-        }
-    }
-}

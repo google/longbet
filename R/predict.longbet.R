@@ -30,15 +30,18 @@ predict.longBet <- function(model, x, t, gp = FALSE, ...) {
 
     obj_tau = .Call(`_longBet_predict`, x, t_mod, model$model_list$tree_pnt_trt)
 
-    # Match t_mod and t_values
-    idx <- match(t_mod, model$gp_info$t_values)
-    beta <- model$beta_draws[idx, ]
-    t_mod_new <- as.matrix(t_mod[which(is.na(idx))])
+
     # print("t_values") 
     # print(model$gp_info$t_values)
+
+    # Match t_mod and t_values
+    idx <- match(t_mod, model$gp_info$t_values)
+
+    beta <- model$beta_values[idx, ]
+    t_mod_new <- as.matrix(t_mod[which(is.na(idx))])
     if (length(t_mod_new) > 0) 
     {
-        print("predict beta")
+        print("This part need to be updated. predict beta with GP")
         obj_beta = .Call(`_longBet_predict_beta`, t_mod_new, 
             model$gp_info$t_values, model$gp_info$resid, model$gp_info$A_diag, model$gp_info$Sig_diag,
             model$model_params$sig_knl, model$model_params$lambda_knl)

@@ -15,6 +15,7 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
                     matrix<double> &sigma1_draw_xinfo,
                     matrix<double> &b_xinfo,
                     matrix<double> &a_xinfo,
+                    matrix<double> &beta_info,
                     matrix<double> &beta_xinfo,
                     vector<vector<tree>> &trees_ps,
                     vector<vector<tree>> &trees_trt,
@@ -167,7 +168,7 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
     }
 
     model_ps->update_time_coef(state, x_struct_trt, torder_tau_std, 
-      resid_info[sweeps], A_diag_info[sweeps], Sig_diag_info[sweeps]); 
+      resid_info[sweeps], A_diag_info[sweeps], Sig_diag_info[sweeps], beta_info[sweeps]); 
 
     std::copy(state->beta_t.begin(), state->beta_t.end(),
     beta_xinfo[sweeps].begin());

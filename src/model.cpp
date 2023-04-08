@@ -379,7 +379,7 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
 }
 
 void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_ptr<X_struct> &x_struct,
-  matrix<size_t> &torder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig)
+  matrix<size_t> &torder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig, std::vector<double> &beta)
 {
   // get total number of time
   double t_size = x_struct->t_values.size();
@@ -402,6 +402,12 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   size_t counts = 0;
   const double *z_pointer;
   const double *y_pointer;
+
+  // if(t_size <= 1){
+  //   cout << "unique t values need to be greater than 1" << endl;
+  //   throw;
+  // }
+
   for (size_t i = 0; i < t_size; i++)
   {
     for (size_t j = 0; j < x_struct->t_counts[i]; j++)
@@ -432,7 +438,6 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
     diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/n;
     sig[i] = 1 / (sig[i] / pow(n, 2) / x_struct->t_counts[i]);
   }
-
   // solve by var = (Sigma0^-1 + Sigma^-1)^-1
   // Sigma0 = A*cov_kernel*A'
   // Sigma = diag(sig)
@@ -456,7 +461,6 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   svd(U, s, V, var);
 
   arma::mat L = U * diagmat(s);
-
   // mean
   arma::mat res_vec(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
@@ -471,14 +475,14 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   arma::mat beta_tilde = mu + L * draws;
 
   // beta = diag^-1 * beta_tilde
-  arma::mat beta(t_size, 1);
+  // arma::mat beta(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
-    beta(i, 0) = beta_tilde(i, 0) / diag[i];
+    beta[i] = beta_tilde(i, 0) / diag[i];
   }
 
   // match beta to beta_t
   for (size_t i = 0; i < state->p_y; i++){
-    state->beta_t[i] = beta(idx[i], 0);
+    state->beta_t[i] = beta[idx[i]];
   }
 }
 

@@ -17,6 +17,7 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
                     matrix<double> &sigma1_draw_xinfo,
                     matrix<double> &b_xinfo,
                     matrix<double> &a_xinfo,
+                    matrix<double> &beta_info,
                     matrix<double> &beta_xinfo,
                     vector<vector<tree>> &trees_ps,
                     vector<vector<tree>> &trees_trt,

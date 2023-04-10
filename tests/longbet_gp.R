@@ -8,7 +8,7 @@ library(longBet)
 
 
 set.seed(1)
-n <- 500
+n <- 2000
 t1 <- 12
 t0 <- 6
 alpha = 0.05

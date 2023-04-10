@@ -403,11 +403,6 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   const double *z_pointer;
   const double *y_pointer;
 
-  // if(t_size <= 1){
-  //   cout << "unique t values need to be greater than 1" << endl;
-  //   throw;
-  // }
-
   for (size_t i = 0; i < t_size; i++)
   {
     for (size_t j = 0; j < x_struct->t_counts[i]; j++)
@@ -438,16 +433,25 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
     diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/n;
     sig[i] = 1 / (sig[i] / pow(n, 2) / x_struct->t_counts[i]);
   }
+
+  t_size = t_size - 1; // ignore the first t value, t = 0
+  std::vector<double> resid_cp(t_size);
+  std::vector<double> diag_cp(t_size);
+  std::vector<double> sig_cp(t_size);
+  std::copy(resid.begin() + 1, resid.end(), resid_cp.begin());
+  std::copy(diag.begin() + 1, diag.end(), diag_cp.begin());
+  std::copy(sig.begin() + 1, sig.end(), sig_cp.begin());
+
   // solve by var = (Sigma0^-1 + Sigma^-1)^-1
   // Sigma0 = A*cov_kernel*A'
   // Sigma = diag(sig)
   // mu = var * (Sigma0^-1 * mu0 + res)
   arma::mat Sigma0(t_size, t_size);
   // arma::mat Sigma_inv(t_size, t_size);
-  arma::mat Sigma_inv = diagmat(conv_to<mat>::from(sig));
+  arma::mat Sigma_inv = diagmat(conv_to<mat>::from(sig_cp));
   for (size_t i = 0; i < t_size; i++){
     for (size_t j = 0; j < t_size; j++){
-      Sigma0(i, j) = diag[i] * x_struct->cov_kernel[i][j] * diag[j];
+      Sigma0(i, j) = diag_cp[i] * x_struct->cov_kernel[i + 1][j + 1] * diag_cp[j];
     }
     // Sigma_inv(i, i) = 1 / sig[i];
   }
@@ -464,7 +468,7 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   // mean
   arma::mat res_vec(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
-    res_vec(i, 0) = resid[i];
+    res_vec(i, 0) = resid_cp[i];
   }
   arma::mat mu = var * Sigma_inv * res_vec;
 
@@ -476,8 +480,9 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
 
   // beta = diag^-1 * beta_tilde
   // arma::mat beta(t_size, 1);
+  beta[0] = 1;
   for (size_t i = 0; i < t_size; i++){
-    beta[i] = beta_tilde(i, 0) / diag[i];
+    beta[i + 1] = beta_tilde(i, 0) / diag_cp[i];
   }
 
   // match beta to beta_t

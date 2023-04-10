@@ -164,12 +164,6 @@ ate_df <- data.frame(
   longbet_beta = rowMeans(longbet.fit$beta_draws)[t0:t1]
 )
 
-ate_df %>% 
-  gather("method", "ate", -time) %>%
-  ggplot(aes(time, ate)) + 
-  geom_line(aes(color = method)) + 
-  ylab(labs(title = "Average Treatment Effect"))
-
 ate_plot <- 
   ggplot(ate_df , aes(x = time, y = true)) +
   geom_line(aes(y = true, color = "True")) +
@@ -211,3 +205,22 @@ cate_error_plot <- cate_error %>%
   facet_wrap(~method)
 print(cate_error_plot)
 
+# mu plot
+mu_hat_longbet <- apply(longbet.fit$muhats.adjusted, c(2, 3), mean)
+mu_df <- data.frame(
+  time = 1:t1,
+  true = colMeans(mu_mat),
+  longbet = rowMeans(mu_hat_longbet),
+  longbet_up = apply(mu_hat_longbet, 1, quantile, probs = 1 - alpha / 2),
+  longbet_low = apply(mu_hat_longbet, 1, quantile, probs = alpha / 2)
+)
+
+mu_plot <- 
+  ggplot(mu_df , aes(x = time, y = true)) +
+  geom_line(aes(y = true, color = "True")) +
+  geom_line(aes(y = longbet, color = "LongBet")) +
+  geom_ribbon(aes(ymin = longbet_low, ymax = longbet_up, fill = "LongBet"), alpha = 0.15, fill = colors[2]) +
+  # geom_ribbon(aes(ymin = longbet_low, ymax = longbet_up, fill = "BART"), alpha = 0.15, fill = colors[3]) +
+  labs(x = "Time", y = "Mu.hat", color = "Legend") +
+  scale_color_manual(name = "Legend", values = colors, labels = labels)
+print(mu_plot)

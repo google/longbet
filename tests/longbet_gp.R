@@ -86,7 +86,8 @@ t_longbet <- proc.time()
 longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
                        num_sweeps = 100,
                        num_trees_pr =  20, num_trees_trt = 20 ,
-                       pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
+                       pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1,
+                       b_scaling = FALSE)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
@@ -152,7 +153,7 @@ print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
 # visualize ---------------------------------------------------------------
 colors <- c("black", "#FFA500", "#00BFFF")
 labels <- c("True", "LongBet", "BART")
-
+names(colors) <- labels
 # ATE
 ate_df <- data.frame(
   time = t0:t1,
@@ -220,7 +221,6 @@ mu_plot <-
   geom_line(aes(y = true, color = "True")) +
   geom_line(aes(y = longbet, color = "LongBet")) +
   geom_ribbon(aes(ymin = longbet_low, ymax = longbet_up, fill = "LongBet"), alpha = 0.15, fill = colors[2]) +
-  # geom_ribbon(aes(ymin = longbet_low, ymax = longbet_up, fill = "BART"), alpha = 0.15, fill = colors[3]) +
   labs(x = "Time", y = "Mu.hat", color = "Legend") +
   scale_color_manual(name = "Legend", values = colors, labels = labels)
 print(mu_plot)

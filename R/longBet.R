@@ -20,7 +20,8 @@ longbet <- function(y, x, z, t, pcat,
                     num_sweeps = 60, num_burnin = 20,
                     num_trees_pr = 50, num_trees_trt = 20,
                     mtry = 0L, n_min = 1L,
-                    sig_knl = 1, lambda_knl = 5) {
+                    sig_knl = 1, lambda_knl = 5,
+                    a_scaling = TRUE, b_scaling = FALSE) {
 
     if(!("matrix" %in% class(x))){
         cat("Msg: input x is not a matrix, try to convert type.\n")
@@ -138,7 +139,6 @@ longbet <- function(y, x, z, t, pcat,
     verbose = FALSE; parallel = TRUE
     set_random_seed = FALSE; random_seed = 0
     sample_weights_flag = TRUE
-    a_scaling = TRUE; b_scaling = FALSE
     split_t_mod = TRUE; split_t_con = TRUE
     
     obj = longBet_cpp(y, x, x, z = z, 

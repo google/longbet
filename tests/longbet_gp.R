@@ -87,7 +87,7 @@ longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
                        num_sweeps = 100,
                        num_trees_pr =  20, num_trees_trt = 20 ,
                        pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1,
-                       b_scaling = FALSE)
+                       b_scaling = TRUE)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)

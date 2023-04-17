@@ -192,7 +192,7 @@ cate_df %>%
 # CATE error
 cate_error <- data.frame(
   lonbet = as.vector(t(tau_longbet - tau_mat)),
-  time = rep(c(t0:t), nrow(tau_mat)),
+  time = rep(c(t0:t2), nrow(tau_mat)),
   id = as.vector(sapply(1:nrow(tau_longbet), rep, (t2 - t0 + 1)))
 )
 

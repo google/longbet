@@ -26,19 +26,19 @@ BEGIN_RCPP
 END_RCPP
 }
 // predict_beta
-Rcpp::List predict_beta(arma::mat t, arma::mat t_mod, arma::mat res, arma::mat A_diag, arma::mat Sig_diag, double sig_knl, double lambda_knl);
-RcppExport SEXP _longBet_predict_beta(SEXP tSEXP, SEXP t_modSEXP, SEXP resSEXP, SEXP A_diagSEXP, SEXP Sig_diagSEXP, SEXP sig_knlSEXP, SEXP lambda_knlSEXP) {
+Rcpp::List predict_beta(arma::mat t_test, arma::mat t_train, arma::mat res, arma::mat A_diag, arma::mat Sig_diag, double sig_knl, double lambda_knl);
+RcppExport SEXP _longBet_predict_beta(SEXP t_testSEXP, SEXP t_trainSEXP, SEXP resSEXP, SEXP A_diagSEXP, SEXP Sig_diagSEXP, SEXP sig_knlSEXP, SEXP lambda_knlSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< arma::mat >::type t(tSEXP);
-    Rcpp::traits::input_parameter< arma::mat >::type t_mod(t_modSEXP);
+    Rcpp::traits::input_parameter< arma::mat >::type t_test(t_testSEXP);
+    Rcpp::traits::input_parameter< arma::mat >::type t_train(t_trainSEXP);
     Rcpp::traits::input_parameter< arma::mat >::type res(resSEXP);
     Rcpp::traits::input_parameter< arma::mat >::type A_diag(A_diagSEXP);
     Rcpp::traits::input_parameter< arma::mat >::type Sig_diag(Sig_diagSEXP);
     Rcpp::traits::input_parameter< double >::type sig_knl(sig_knlSEXP);
     Rcpp::traits::input_parameter< double >::type lambda_knl(lambda_knlSEXP);
-    rcpp_result_gen = Rcpp::wrap(predict_beta(t, t_mod, res, A_diag, Sig_diag, sig_knl, lambda_knl));
+    rcpp_result_gen = Rcpp::wrap(predict_beta(t_test, t_train, res, A_diag, Sig_diag, sig_knl, lambda_knl));
     return rcpp_result_gen;
 END_RCPP
 }

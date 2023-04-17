@@ -86,8 +86,11 @@ longbet.fit <- longbet(y = ytrain, x = x, z = ztrain, t = 1:t1,
                        pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1,
                        b_scaling = TRUE)
 # TODO: lambda_knl is quite sensitve, need better understanding
+in_sample_tau <- longbet.fit$tauhats.adjusted
+sigma_knl = sqrt(var(apply(in_sample_tau, 2, mean)[t0:t1]) / longbet.fit$model_params$num_trees_trt)
+lambda_knl = (t1 - t0)
 
-longbet.pred <- predict.longBet(longbet.fit, x, 1:t2)
+longbet.pred <- predict.longBet(longbet.fit, x, 1:t2, sigma = sigma_knl, lambda = lambda_knl)
 mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)
 tau_hat_longbet <- apply(longbet.pred$tauhats.adjusted, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t2]
@@ -174,6 +177,7 @@ ate_plot <-
   labs(x = "Time", y = "ATE", color = "Legend") +
   scale_color_manual(name = "Legend", values = colors, labels = labels)
 print(ate_plot)
+readline(prompt="Press [enter] to continue")
 
 # CATE
 cate_df <- data.frame(
@@ -183,11 +187,14 @@ cate_df <- data.frame(
   id = as.vector(sapply(1:nrow(tau_longbet), rep, (t2 - t0 + 1)))
 )
 
-cate_df %>%
+cate_plot <- cate_df %>%
   gather("method", "cate", -time, -id) %>%
   ggplot() +
   geom_line(aes(time, cate, group = id, color = id)) +
   facet_wrap(~method)
+print(cate_plot)
+
+readline(prompt="Press [enter] to continue")
 
 # CATE error
 cate_error <- data.frame(
@@ -200,5 +207,22 @@ cate_error_plot <- cate_error %>%
   gather("method", "cate", -time, -id) %>%
   ggplot() +
   geom_line(aes(time, cate, group = id, color = id)) +
+  labs(x = "Time", y = "CATE Error") +
   facet_wrap(~method)
 print(cate_error_plot)
+
+readline(prompt="Press [enter] to continue")
+
+beta_df <- data.frame(
+  time = 1:dim(longbet.pred$beta_draws)[1],
+  mean = rowMeans(longbet.pred$beta_draws),
+  upper = apply(longbet.pred$beta_draws, 1, quantile, probs = 1 - alpha / 2),
+  lower = apply(longbet.pred$beta_draws, 1, quantile, probs =alpha  / 2)
+)
+beta_plot <- 
+  ggplot(beta_df , aes(x = time, y = mean)) +
+  geom_line(aes(x = time, y = mean, color = "LongBet")) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = "LongBet"), alpha = 0.15, fill = colors[2]) +
+  labs(x = "Time", y = "Beta", color = "Legend") +
+  scale_color_manual(name = "Legend", values = colors, labels = labels)
+print(beta_plot)

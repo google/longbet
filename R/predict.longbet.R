@@ -7,7 +7,7 @@
 #'
 #' @return A list with two matrices. Each matrix corresponds to a set of draws of predicted values; rows are datapoints, columns are iterations.
 #' @export
-predict.longBet <- function(model, x, t, gp = FALSE, ...) {
+predict.longBet <- function(model, x, t, sigma = NULL, lambda = NULL, ...) {
 
     print(dim(x))
     if(!("matrix" %in% class(x))) {
@@ -41,10 +41,12 @@ predict.longBet <- function(model, x, t, gp = FALSE, ...) {
     t_mod_new <- as.matrix(t_mod[which(is.na(idx))])
     if (length(t_mod_new) > 0) 
     {
-        print("This part need to be updated. predict beta with GP")
+        if (is.null(sigma)) { sigma = model$model_params$sig_knl}
+        if (is.null(lambda)) { lambda = model$model_params$lambda_knl}
+        print(paste("predict beta with GP, sigma = ", sigma, ", lambda = ", lambda, sep = ""))
         obj_beta = .Call(`_longBet_predict_beta`, t_mod_new, 
             model$gp_info$t_values, model$gp_info$resid, model$gp_info$A_diag, model$gp_info$Sig_diag,
-            model$model_params$sig_knl, model$model_params$lambda_knl)
+            sigma, lambda)
         beta[is.na(idx), ] <- obj_beta$beta
     }
 

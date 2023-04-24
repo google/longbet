@@ -445,7 +445,7 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   for (size_t i = 0; i < t_size; i++){
     resid[i] = (res_trt[i] + res_ctrl[i]) / n / x_struct->t_counts[i];
     diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/n;
-    sig[i] = 1 / (sig[i] / pow(n, 2) / x_struct->t_counts[i]);
+    sig[i] = sig[i] / pow(n, 2) / x_struct->t_counts[i];
   }
   // solve by var = (Sigma0^-1 + Sigma^-1)^-1
   // Sigma0 = A*cov_kernel*A'
@@ -458,7 +458,7 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
     for (size_t j = 0; j < t_size; j++){
       Sigma0(i, j) = diag[i] * x_struct->cov_kernel[i][j] * diag[j];
     }
-    // Sigma_inv(i, i) = 1 / sig[i];
+    Sigma_inv(i, i) = 1 / sig[i];
   }
 
   arma::mat Sigma0_inv = pinv(Sigma0);

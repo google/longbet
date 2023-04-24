@@ -63,6 +63,11 @@ size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
 
   if (state->fl == 0)  // suff stat for prognostic trees
   {
+    // r = resid / a
+    // s0 = sum(r)
+    // s1 = sum(r)
+    // s2 = n0  
+    // s3 = n1
     if (gp == 1)
     {
       suffstats[1] += resid / state->a;
@@ -71,8 +76,12 @@ size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
       suffstats[0] += resid / state->a;
       suffstats[2] += 1;
     }
-  } else {  // suff stat for treatment trees
-  // cout << "resid = " << resid << endl;
+  } else {
+    // r = resid / b / beta
+    // s0 = sum(beta^2 * r)
+    // s1 = sum(beta^2 * r)
+    // s2 = sum(beta^2)
+    // s3 = sum(beta^2)
     if (gp == 1)
     {
       // beta_t^2 * r / b / beta_t = beta_t * r / b

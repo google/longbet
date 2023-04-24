@@ -26,9 +26,9 @@ x <- cbind(x1, x2, x3, x4, x5)
 post_t <- 1:(t2 - t0 + 1) 
 beta_t <- dgamma(post_t, 2, 1)
 # define heterogeneous treatment effects
-tau <- 1 + 2 * x[,2] * x[,5]
+tau <- 1 + 2 * abs(x[,2] * x[,5])
 # time-varyiing heterogeneous treatment effect
-tau_mat <- 1 + 5 * outer(tau, beta_t , "*")
+tau_mat <- 2 + 2 * outer(tau, beta_t , "*")
 
 
 # ## define prognostic function (RIC)
@@ -82,13 +82,13 @@ z_vec <- as.vector(ztrain)
 t_longbet <- proc.time()
 longbet.fit <- longbet(y = ytrain, x = x, z = ztrain, t = 1:t1,
                        num_sweeps = 100,
-                       num_trees_pr =  20, num_trees_trt = 20 ,
+                       num_trees_pr =  20, num_trees_trt = 20,
                        pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1,
                        b_scaling = TRUE)
 # TODO: lambda_knl is quite sensitve, need better understanding
-in_sample_tau <- longbet.fit$tauhats.adjusted
-sigma_knl = sqrt(var(apply(in_sample_tau, 2, mean)[t0:t1]) / longbet.fit$model_params$num_trees_trt)
-lambda_knl = (t1 - t0)
+sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
+# sigma_knl = 1
+lambda_knl = (t1 - t0 + 1)
 
 longbet.pred <- predict.longBet(longbet.fit, x, 1:t2, sigma = sigma_knl, lambda = lambda_knl)
 mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)
@@ -177,7 +177,7 @@ ate_plot <-
   labs(x = "Time", y = "ATE", color = "Legend") +
   scale_color_manual(name = "Legend", values = colors, labels = labels)
 print(ate_plot)
-readline(prompt="Press [enter] to continue")
+# readline(prompt="Press [enter] to continue")
 
 # CATE
 cate_df <- data.frame(
@@ -194,7 +194,7 @@ cate_plot <- cate_df %>%
   facet_wrap(~method)
 print(cate_plot)
 
-readline(prompt="Press [enter] to continue")
+# readline(prompt="Press [enter] to continue")
 
 # CATE error
 cate_error <- data.frame(
@@ -211,18 +211,49 @@ cate_error_plot <- cate_error %>%
   facet_wrap(~method)
 print(cate_error_plot)
 
-readline(prompt="Press [enter] to continue")
+# analyse tauhat ----------------------------------------------------------
+# library(reshape2)
+# beta_draws = as.data.frame(t(longbet.pred$beta_draws))
+# beta_draws$trial = rownames(beta_draws)
+# mdat = melt(beta_draws, id.vars="trial")
+# mdat$time = as.numeric(gsub("V", "", mdat$variable))
+# 
+# beta_draws_plot = ggplot(mdat, aes(x=time, y=value, group=trial)) +
+#   theme_bw() +
+#   theme(panel.grid=element_blank()) +
+#   geom_line(linewidth=0.5, alpha=0.5)
+# plot(beta_draws_plot)
+# 
+# # per sweep
+# tauhat <- longbet.pred$tauhats
+# tau_draws = as.data.frame(matrix(tauhat[,100], n,t2))
+# tau_draws$trial = rownames(tau_draws)
+# mdat = melt(tau_draws, id.vars="trial")
+# mdat$time = as.numeric(gsub("V", "", mdat$variable))
+# 
+# tau_draws_plot = ggplot(mdat, aes(x=time, y=value, group=trial)) +
+#   theme_bw() +
+#   theme(panel.grid=element_blank()) +
+#   geom_line(linewidth=0.5, alpha=0.5) + 
+#   labs(y = "Tauhat", title = "Tauhats at 100 sweep")
+# plot(tau_draws_plot)
+# 
+# num_sweeps <- longbet.fit$model_params$num_sweeps 
+# tau_draws <- matrix(NA, num_sweeps, t2)
+# for (i in 1:num_sweeps){
+#   temp <- matrix(tauhat[,i], n, t2)
+#   tau_draws[i, ] <- temp[1,]
+# }
+# tau_draws = as.data.frame(tau_draws)
+# tau_draws$trial = rownames(tau_draws)
+# mdat = melt(tau_draws, id.vars="trial")
+# mdat$time = as.numeric(gsub("V", "", mdat$variable))
+# 
+# tau_draws_plot = ggplot(mdat, aes(x=time, y=value, group=trial)) +
+#   theme_bw() +
+#   theme(panel.grid=element_blank()) +
+#   geom_line(linewidth=0.5, alpha=0.5) + 
+#   labs(y = "Tauhat", title = "Tauhats of 1 obs across sweeps")
+# plot(tau_draws_plot)
 
-beta_df <- data.frame(
-  time = 1:dim(longbet.pred$beta_draws)[1],
-  mean = rowMeans(longbet.pred$beta_draws),
-  upper = apply(longbet.pred$beta_draws, 1, quantile, probs = 1 - alpha / 2),
-  lower = apply(longbet.pred$beta_draws, 1, quantile, probs =alpha  / 2)
-)
-beta_plot <- 
-  ggplot(beta_df , aes(x = time, y = mean)) +
-  geom_line(aes(x = time, y = mean, color = "LongBet")) +
-  geom_ribbon(aes(ymin = lower, ymax = upper, fill = "LongBet"), alpha = 0.15, fill = colors[2]) +
-  labs(x = "Time", y = "Beta", color = "Legend") +
-  scale_color_manual(name = "Legend", values = colors, labels = labels)
-print(beta_plot)
+

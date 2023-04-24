@@ -1132,12 +1132,17 @@ std::unique_ptr<State> &state, tree *tree_pointer)
                     split_info->torder_std[i], n1, temp, model, state);
                     n1 = n1 + split_info->t_counts[j];
 
+                    loglike[loglike_start + j] = model->likelihood(temp_suff_stat, tree_pointer->suff_stat, true, false, state)
+                    + model->likelihood(temp_suff_stat, tree_pointer->suff_stat, false, false, state);
+
+                    // loglike[loglike_start + j] = -INFINITY;
+
                     // if (state->fl) {
                     //     // no split on time on treatment tree
                     //     loglike[loglike_start + j] = -INFINITY;
                     // } else {
-                    loglike[loglike_start + j] = model->likelihood(temp_suff_stat, tree_pointer->suff_stat, true, false, state)
-                    + model->likelihood(temp_suff_stat, tree_pointer->suff_stat, false, false, state);
+                    //     loglike[loglike_start + j] = model->likelihood(temp_suff_stat, tree_pointer->suff_stat, true, false, state)
+                    //     + model->likelihood(temp_suff_stat, tree_pointer->suff_stat, false, false, state);
                     // }
 
                     // count total number of cutpoint candidates

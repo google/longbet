@@ -37,16 +37,16 @@ ytrain <- as.matrix(ytrain)
 ztrain <- as.matrix(ztrain)
 
 t_longbet <- proc.time()
-longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = ttrain,
+longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:5,
                        num_sweeps = 100,
                        num_trees_pr =  20, num_trees_trt = 20,
                        pcat = 0,  b_scaling = TRUE)
 # TODO: lambda_knl is quite sensitve, need better understanding
-sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
-lambda_knl = 4 #(t1 - t0 + 1) / 2
-
-longbet.pred <- predict.longBet(longbet.fit, xtrain, ttrain, sigma = sigma_knl, lambda = lambda_knl)
-mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)
-tau_hat_longbet <- apply(longbet.pred$tauhats.adjusted, c(1, 2), mean)
-tau_longbet <- tau_hat_longbet[,t0:t2]
-t_longbet <- proc.time() - t_longbet
+# sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
+# lambda_knl = 4 #(t1 - t0 + 1) / 2
+# 
+# longbet.pred <- predict.longBet(longbet.fit, xtrain, ttrain, sigma = sigma_knl, lambda = lambda_knl)
+# mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)
+# tau_hat_longbet <- apply(longbet.pred$tauhats.adjusted, c(1, 2), mean)
+# tau_longbet <- tau_hat_longbet[,t0:t2]
+# t_longbet <- proc.time() - t_longbet

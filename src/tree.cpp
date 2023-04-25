@@ -687,6 +687,7 @@ const size_t &tree_ind, bool control_split_t)
     std::vector<double> left_suff_stat(this->l->suff_stat.size(), 0.0);
     std::vector<double> right_suff_stat(this->r->suff_stat.size(), 0.0);
 
+    // cout << "split this" << endl;
     // TODO: potential bug using split_info structure without categorical variable
     split->split_this(split_left, split_right, split_var, split_point, split_t,
     model, x_struct, state, this->suff_stat, left_suff_stat, right_suff_stat);

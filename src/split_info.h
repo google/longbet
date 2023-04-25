@@ -93,10 +93,11 @@ public:
   std::vector<double> &left_suff_stat, std::vector<double> &right_suff_stat)
   {
     if (split_t){
+
+    // cout << "split_t, split_point = " << split_point << endl;
     split_torder_std(split_left, split_right, split_var, split_point,
     model, x_struct, state, suff_stat, left_suff_stat, right_suff_stat);
     
-    // cout << "split_t, split_point = " << split_point << endl;
     // cout << "left_suff_stat = " << left_suff_stat << endl;
     // cout << "right_suff_stat = " << right_suff_stat << endl;
     } else {
@@ -379,6 +380,7 @@ public:
 
     // if the left side is smaller, we only compute sum of it
     bool compute_left_side = N_torder_left < N_torder_right;
+    // cout << "Nleft " << N_torder_left << " Nright " << N_torder_right << endl; 
 
     size_t start;
     size_t end;
@@ -394,9 +396,9 @@ public:
       left_ix = 0;
       right_ix = 0;
 
-      start = x_struct->variable_ind[i];
-      end = x_struct->variable_ind[i + 1];
-      // cout << "start = " << start << " end = " << end << endl;
+      start = x_struct->t_variable_ind[i];
+      end = x_struct->t_variable_ind[i + 1];
+      // cout << "i = " << i << " start = " << start << " end = " << end << endl;
       if (i == split_var)
       {
         ///////////////////////////////////////////////////////////
@@ -443,6 +445,7 @@ public:
             }
           }
         }
+
         for (size_t k = start; k < end; k++)
         {
           // loop from start to end!

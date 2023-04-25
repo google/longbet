@@ -59,6 +59,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
                     bool split_t_mod = true, bool split_t_con = false,
                     double sig_knl = 1, double lambda_knl = 2)
 {
+    cout << "start longbet" << endl;
     auto start = system_clock::now();
 
     size_t N = X.n_rows;
@@ -256,6 +257,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
 
     matrix<double> beta_info;
     ini_matrix(beta_info, t_size, num_sweeps);
+    cout << "mcmc loop" << endl;
 
     // mcmc_loop returns tauhat [N x sweeps] matrix
     mcmc_loop_longBet(Xorder_std, Xorder_tau_std, Xpointer, Xpointer_tau, torder_mu_std, torder_tau_std, verbose, 

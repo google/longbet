@@ -87,8 +87,7 @@ longbet.fit <- longbet(y = ytrain, x = x, z = ztrain, t = 1:t1,
                        b_scaling = TRUE)
 # TODO: lambda_knl is quite sensitve, need better understanding
 sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
-# sigma_knl = 1
-lambda_knl = (t1 - t0 + 1)
+lambda_knl = 4 #(t1 - t0 + 1) / 2
 
 longbet.pred <- predict.longBet(longbet.fit, x, 1:t2, sigma = sigma_knl, lambda = lambda_knl)
 mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)

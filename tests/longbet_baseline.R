@@ -25,9 +25,9 @@ x <- cbind(x1, x2, x3, x4, x5)
 post_t <- 1:(t1 - t0 + 1) 
 beta_t <- dgamma(post_t, 2, 1)
 # define heterogeneous treatment effects
-tau <- 1 + 2 * x[,2] * x[,5]
+tau <- 1 + 2 * abs(x[,2] * x[,5])
 # time-varyiing heterogeneous treatment effect
-tau_mat <- 1 + 5 * outer(tau, beta_t , "*")
+tau_mat <- 2 + 2 * outer(tau, beta_t , "*")
 
 
 # ## define prognostic function (RIC)
@@ -65,8 +65,6 @@ y = Ey + matrix(sig*rnorm(n*t1), n, t1)
 # If you didn't know pi, you would estimate it here
 pi_mat <- as.matrix(rep(pi, t1), n, t1)
 pi_vec <- as.vector(pi_mat)
-
-
 
 # Turn input into nt*1 vector and nt*p matrix
 y_vec <- as.vector(y)
@@ -173,8 +171,10 @@ ate_plot <-
   geom_ribbon(aes(ymin = longbet_low, ymax = longbet_up, fill = "LongBet"), alpha = 0.15, fill = colors[2]) +
   # geom_ribbon(aes(ymin = longbet_low, ymax = longbet_up, fill = "BART"), alpha = 0.15, fill = colors[3]) +
   labs(x = "Time", y = "ATE", color = "Legend") +
-  scale_color_manual(name = "Legend", values = colors, labels = labels)
+  scale_color_manual(name = "Legend", values = c("black", "#FFA500", "#00BFFF"), labels = c("True", "LongBet", "BART"))
 print(ate_plot)
+
+readline(prompt="Press [enter] to continue")
 
 # CATE
 cate_df <- data.frame(
@@ -185,42 +185,11 @@ cate_df <- data.frame(
   id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
 )
 
-cate_df %>%
+cate_plot <- cate_df %>%
   gather("method", "cate", -time, -id) %>%
   ggplot() +
   geom_line(aes(time, cate, group = id, color = id)) +
-  facet_wrap(~method)
+  facet_wrap(~method, ncol = 2)
+plot(cate_plot)
 
-# CATE error
-cate_error <- data.frame(
-  lonbet = as.vector(t(tau_longbet - tau_mat)),
-  bart = as.vector(t(tau_bart - tau_mat)),
-  time = rep(c(t0:t1), nrow(tau_mat)),
-  id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
-)
-
-cate_error_plot <- cate_error %>%
-  gather("method", "cate", -time, -id) %>%
-  ggplot() +
-  geom_line(aes(time, cate, group = id, color = id)) +
-  facet_wrap(~method)
-print(cate_error_plot)
-
-# mu plot
-mu_hat_longbet <- apply(longbet.fit$muhats.adjusted, c(2, 3), mean)
-mu_df <- data.frame(
-  time = 1:t1,
-  true = colMeans(mu_mat),
-  longbet = rowMeans(mu_hat_longbet),
-  longbet_up = apply(mu_hat_longbet, 1, quantile, probs = 1 - alpha / 2),
-  longbet_low = apply(mu_hat_longbet, 1, quantile, probs = alpha / 2)
-)
-
-mu_plot <- 
-  ggplot(mu_df , aes(x = time, y = true)) +
-  geom_line(aes(y = true, color = "True")) +
-  geom_line(aes(y = longbet, color = "LongBet")) +
-  geom_ribbon(aes(ymin = longbet_low, ymax = longbet_up, fill = "LongBet"), alpha = 0.15, fill = colors[2]) +
-  labs(x = "Time", y = "Mu.hat", color = "Legend") +
-  scale_color_manual(name = "Legend", values = colors, labels = labels)
-print(mu_plot)
+readline(prompt="Press [enter] to continue")

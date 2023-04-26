@@ -87,7 +87,7 @@ longbet.fit <- longbet(y = ytrain, x = x, z = ztrain, t = 1:t1,
                        b_scaling = TRUE)
 # TODO: lambda_knl is quite sensitve, need better understanding
 sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
-lambda_knl = 4 #(t1 - t0 + 1) / 2
+lambda_knl = (t1 - t0 + 1) 
 
 longbet.pred <- predict.longBet(longbet.fit, x, 1:t2, sigma = sigma_knl, lambda = lambda_knl)
 mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)
@@ -102,14 +102,13 @@ ate_longbet_fit <- apply(longbet.pred$tauhats.adjusted, c(2, 3), mean)[t0:t2, ]
 ate <- tau_mat %>% colMeans
 ate_longbet <- ate_longbet_fit %>% rowMeans
 
-print(paste0("longbet CATE RMSE: ", sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2))))
-print(paste0("longbet ate rmse: ", round( sqrt(mean((ate_longbet - ate)^2)), 2)))
-print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
+print(paste0("longbet CATE RMSE in-sample: ", sqrt(mean((as.vector(tau_longbet[, 1:(t1 - t0 + 1)]) - as.vector(tau_mat[, 1:(t1 - t0 + 1)]))^2))))
+print(paste0("longbet CATE RMSE extrapolate: ", sqrt(mean((as.vector(tau_longbet[, (t1 + 1):(t2 - t1 + 1)]) - as.vector(tau_mat[, (t1 + 1): (t2 - t1 + 1)]))^2))))
 
-mu_hat_longbet_fit <- apply(longbet.fit$muhats.adjusted, c(1, 2), mean)
-tau_hat_longbet_fit <- apply(longbet.fit$tauhats.adjusted, c(1, 2), mean)
-tau_longbet_fit <- tau_hat_longbet_fit[,t0:t1]
-print(paste0("longbet CATE in-sample: ", sqrt(mean((as.vector(tau_longbet_fit) - as.vector(tau_mat[, 1:(t1 - t0 + 1)]))^2))))
+print(paste0("longbet ATE RMSE in-sample: ", round( sqrt(mean((ate_longbet[1:(t1 -t0 + 1)] - ate[1:(t1 - t0 + 1)])^2)), 2)))
+print(paste0("longbet ATE RMSE extrapolate: ", round( sqrt(mean((ate_longbet[(t1 + 1):(t2 -t1 + 1)] - ate[(t1 + 1):(t2 -t1 + 1)])^2)), 2)))
+
+print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 
 # # # bart --------------------------------------------------------------------
 # xtr <- cbind(z_vec, x_bart)
@@ -173,10 +172,11 @@ ate_plot <-
   geom_line(aes(y = true, color = "True")) +
   geom_line(aes(y = longbet, color = "LongBet")) +
   geom_ribbon(aes(ymin = longbet_low, ymax = longbet_up, fill = "LongBet"), alpha = 0.15, fill = colors[2]) +
+  geom_vline(xintercept = t1, linetype = "dashed", color = "grey") +
   labs(x = "Time", y = "ATE", color = "Legend") +
   scale_color_manual(name = "Legend", values = colors, labels = labels)
 print(ate_plot)
-# readline(prompt="Press [enter] to continue")
+readline(prompt="Press [enter] to continue")
 
 # CATE
 cate_df <- data.frame(
@@ -190,25 +190,9 @@ cate_plot <- cate_df %>%
   gather("method", "cate", -time, -id) %>%
   ggplot() +
   geom_line(aes(time, cate, group = id, color = id)) +
-  facet_wrap(~method)
+  geom_vline(xintercept = t1, linetype = "dashed", color = "grey") +
+  facet_wrap(~method, ncol = 1)
 print(cate_plot)
-
-# readline(prompt="Press [enter] to continue")
-
-# CATE error
-cate_error <- data.frame(
-  lonbet = as.vector(t(tau_longbet - tau_mat)),
-  time = rep(c(t0:t2), nrow(tau_mat)),
-  id = as.vector(sapply(1:nrow(tau_longbet), rep, (t2 - t0 + 1)))
-)
-
-cate_error_plot <- cate_error %>%
-  gather("method", "cate", -time, -id) %>%
-  ggplot() +
-  geom_line(aes(time, cate, group = id, color = id)) +
-  labs(x = "Time", y = "CATE Error") +
-  facet_wrap(~method)
-print(cate_error_plot)
 
 # analyse tauhat ----------------------------------------------------------
 # library(reshape2)

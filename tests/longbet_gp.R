@@ -93,9 +93,6 @@ tau_hat_longbet <- apply(longbet.pred$tauhats.adjusted, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t2]
 t_longbet <- proc.time() - t_longbet
 
-cat("          beta draws: ", round(rowMeans(longbet.fit$beta_draws),3), "\n")
-cat("predicted beta draws: ", round(rowMeans(longbet.pred$beta_draws),3), "\n")
-
 ate_longbet_fit <- apply(longbet.pred$tauhats.adjusted, c(2, 3), mean)[t0:t2, ]
 ate <- tau_mat %>% colMeans
 ate_longbet <- ate_longbet_fit %>% rowMeans
@@ -161,8 +158,7 @@ ate_df <- data.frame(
   true = ate,
   longbet = ate_longbet,
   longbet_up = apply(ate_longbet_fit, 1, quantile, probs = 1 - alpha / 2),
-  longbet_low = apply(ate_longbet_fit, 1, quantile, probs = alpha / 2),
-  longbet_beta = rowMeans(longbet.pred$beta_draws)[t0:t2]
+  longbet_low = apply(ate_longbet_fit, 1, quantile, probs = alpha / 2)
 )
 
 ate_plot <- 

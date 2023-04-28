@@ -81,14 +81,13 @@ z_vec <- as.vector(ztrain)
 # longbet -----------------------------------------------------------------
 t_longbet <- proc.time()
 longbet.fit <- longbet(y = ytrain, x = x, z = ztrain, t = 1:t1,
-                       num_sweeps = 100,
+                       num_sweeps = 60,
                        num_trees_pr =  20, num_trees_trt = 20,
-                       pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
-# TODO: lambda_knl is quite sensitve, need better understanding
-sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
-lambda_knl = (t1 - t0 + 1) 
+                       pcat = ncol(x) - 3)
 
-longbet.pred <- predict.longBet(longbet.fit, x, 1:t2, sigma = sigma_knl, lambda = lambda_knl)
+# sigma = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
+# lambda = (t1 - t0 + 1) 
+longbet.pred <- predict.longBet(longbet.fit, x, 1:t2, lambda = 3)
 mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)
 tau_hat_longbet <- apply(longbet.pred$tauhats.adjusted, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t2]

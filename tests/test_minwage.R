@@ -53,8 +53,7 @@ for (year in gp_year){
   longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = ttrain,
                          num_sweeps = 100,
                          num_trees_pr =  20, num_trees_trt = 20,
-                         pcat = 0,  b_scaling = TRUE,
-                         sig_knl = 1, lambda_knl = 1)
+                         pcat = 0,  sig_knl = 1, lambda_knl = 1)
   # TODO: lambda_knl is quite sensitve, need better understanding
   if (t1 > t0){
   sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))

@@ -140,8 +140,7 @@ longbet <- function(y, x, z, t, pcat,
     sample_weights_flag = TRUE
     split_t_mod = TRUE; split_t_con = TRUE
     a_scaling = TRUE; b_scaling = TRUE
-    print( "call longbet function" )
-    
+
     obj = longBet_cpp(y = y,
                     X = x, 
                     X_tau = x, 

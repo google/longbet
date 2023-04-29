@@ -187,18 +187,7 @@ longbet <- function(y, x, z, t, pcat,
     obj$t0 = t0
     obj$sdy = sdy
     obj$meany = meany
-    obj$tauhats = obj$tauhats * sdy
-    obj$muhats = obj$muhats * sdy
 
-    obj$tauhats.adjusted <- array(NA, dim = c(nrow(y), ncol(y), num_sweeps - num_burnin))
-    obj$muhats.adjusted <- array(NA, dim = c(nrow(y), ncol(y), num_sweeps - num_burnin))
-    seq <- (num_burnin+1):num_sweeps
-    for (i in seq) {
-        obj$tauhats.adjusted[,, i - num_burnin] = matrix(obj$tauhats[,i], nrow(y), ncol(y)) * (obj$b_draws[i,2] - obj$b_draws[i,1])
-        obj$tauhats.adjusted[,,i - num_burnin] = obj$tauhats.adjusted[,,i - num_burnin] * t(matrix(rep(obj$beta_draws[,i], nrow(y)), ncol(y), nrow(y)))
-        obj$muhats.adjusted[,, i - num_burnin] = matrix(obj$muhats[,i], nrow(y), ncol(y)) * (obj$a_draws[i]) + meany
-    }
-    
     # obj$beta_draws = obj$beta_draws[, (num_burnin+1):num_sweeps]
     return(obj)
 }

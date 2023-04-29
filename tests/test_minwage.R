@@ -66,7 +66,7 @@ for (year in gp_year){
   t_longbet <- proc.time() - t_longbet
   
   treated <- ztrain[,ncol(ztrain)]
-  att_longbet_fit <- apply(longbet.pred$tauhats.adjusted[treated,,], c(2, 3), mean)[t0:t1, ]
+  att_longbet_fit <- apply(longbet.pred$tauhats[treated,,], c(2, 3), mean)[t0:t1, ]
   if (t1 > t0){
     att_df <- data.frame(
       group = rep(year, length(ttreated)),

@@ -88,21 +88,14 @@ longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
-mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)
-tau_hat_longbet <- apply(longbet.pred$tauhats.adjusted, c(1, 2), mean)
+mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
+tau_hat_longbet <- apply(longbet.pred$tauhats, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t1]
 t_longbet <- proc.time() - t_longbet
 
-cat("          beta draws: ", round(rowMeans(longbet.fit$beta_draws),3), "\n")
-cat("predicted beta draws: ", round(rowMeans(longbet.pred$beta_draws),3), "\n")
 print(paste0("longbet CATE RMSE: ", sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2))))
 print(paste0("longbet CATT RMSE: ", sqrt(mean((as.vector(tau_longbet[z == 1, ]) - as.vector(tau_mat[z==1,]))^2))))
 print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
-
-mu_hat_longbet_fit <- apply(longbet.fit$muhats.adjusted, c(1, 2), mean)
-tau_hat_longbet_fit <- apply(longbet.fit$tauhats.adjusted, c(1, 2), mean)
-tau_longbet_fit <- tau_hat_longbet_fit[,t0:t1]
-print(paste0("longbet CATE RMSE (check): ", sqrt(mean((as.vector(tau_longbet_fit) - as.vector(tau_mat))^2))))
 
 # # bart --------------------------------------------------------------------
 xtr <- cbind(z_vec, x_bart)
@@ -132,7 +125,7 @@ t_bart = proc.time() - t_bart
 
 # results -----------------------------------------------------------------
 # check ate
-ate_longbet_fit <- apply(longbet.fit$tauhats.adjusted, c(2, 3), mean)[t0:t1, ]
+ate_longbet_fit <- apply(longbet.pred$tauhats, c(2, 3), mean)[t0:t1, ]
 
 ate <- tau_mat %>% colMeans
 ate_bart <- tau_bart %>% colMeans
@@ -158,8 +151,7 @@ ate_df <- data.frame(
   bart = ate_bart,
   longbet = ate_longbet,
   longbet_up = apply(ate_longbet_fit, 1, quantile, probs = 1 - alpha / 2),
-  longbet_low = apply(ate_longbet_fit, 1, quantile, probs = alpha / 2),
-  longbet_beta = rowMeans(longbet.fit$beta_draws)[t0:t1]
+  longbet_low = apply(ate_longbet_fit, 1, quantile, probs = alpha / 2)
 )
 
 ate_plot <- 

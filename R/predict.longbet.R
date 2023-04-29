@@ -73,26 +73,26 @@ predict.longBet <- function(model, x, t, sigma = NULL, lambda = NULL, ...) {
 
     obj <- list()
     class(obj) = "longBet.pred"
-    # obj$muhats <- obj_mu$preds
-    # obj$tauhats <- obj_tau$preds
 
     
-    obj$muhats.adjusted <- array(NA, dim = c(n, p, num_sweeps - num_burnin))
-    obj$tauhats.adjusted <- array(NA, dim = c(n, p, num_sweeps - num_burnin))
+    obj$muhats <- array(NA, dim = c(n, p, num_sweeps - num_burnin))
+    obj$tauhats <- array(NA, dim = c(n, p, num_sweeps - num_burnin))
     seq <- (num_burnin+1):num_sweeps
     for (i in seq) {
-        obj$muhats.adjusted[,, i - num_burnin] = matrix(obj_mu$preds[,i], n, p) * (model$a_draws[i]) + model$meany +  matrix(obj_tau$preds[,i], n, p) *  model$b_draws[i,1] * t(matrix(rep(beta[, i], n), p, n))
-        obj$tauhats.adjusted[,, i - num_burnin] = matrix(obj_tau$preds[,i], n, p) * (model$b_draws[i,2] - model$b_draws[i,1]) * t(matrix(rep(beta[, i], n), p, n))
+        obj$muhats[,, i - num_burnin] = matrix(obj_mu$preds[,i], n, p) * (model$a_draws[i]) + model$meany +  matrix(obj_tau$preds[,i], n, p) *  model$b_draws[i,1] * t(matrix(rep(beta[, i], n), p, n))
+        obj$tauhats[,, i - num_burnin] = matrix(obj_tau$preds[,i], n, p) * (model$b_draws[i,2] - model$b_draws[i,1]) * t(matrix(rep(beta[, i], n), p, n))
     }
     
     # obj$beta_draws = beta
     return(obj)
 }
 
-# get_att <- function(object, ...) {
+# get_ate <- function(object, ...) {
 #     if(class(object) != "longBet.pred"){
 #         stop("Input object should be output from predict.longBet function")    
 #     }
+#     obj <- list()
+#     obj$ate <- apply(object$tauhats[,,], c(2, 3), mean)[t0:t1, ]
 
 # }
 

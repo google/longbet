@@ -88,20 +88,14 @@ pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 2)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
-mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)
-tau_hat_longbet <- apply(longbet.pred$tauhats.adjusted, c(1, 2), mean)
+mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
+tau_hat_longbet <- apply(longbet.pred$tauhats, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t1]
 t_longbet <- proc.time() - t_longbet
 
-cat("beta draws: ", rowMeans(longbet.fit$beta_draws), "\n")
 print(paste0("longbet CATE RMSE: ", sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2))))
 print(paste0("longbet CATT RMSE: ", sqrt(mean((as.vector(tau_longbet[z == 1, ]) - as.vector(tau_mat[z==1,]))^2))))
 print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
-
-mu_hat_longbet_fit <- apply(longbet.fit$muhats.adjusted, c(1, 2), mean)
-tau_hat_longbet_fit <- apply(longbet.fit$tauhats.adjusted, c(1, 2), mean)
-tau_longbet_fit <- tau_hat_longbet_fit[,t0:t1]
-print(paste0("longbet CATE RMSE (check): ", sqrt(mean((as.vector(tau_longbet_fit) - as.vector(tau_mat))^2))))
 
 # bart --------------------------------------------------------------------
 xtr <- cbind(z_vec, x_bart)
@@ -150,8 +144,7 @@ print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
 #     time = t0:t1,
 #     true = ate,
 #     bart = ate_bart,
-#     longbet = ate_longbet,
-#     longbet_beta = rowMeans(longbet.fit$beta_draws)[t0:t1]
+#     longbet = ate_longbet
 #   )
 #   
 #   ate_df %>% 
@@ -160,19 +153,6 @@ print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
 #     geom_line(aes(color = method)) + 
 #     ylab(labs(title = "Average Treatment Effect"))
 #   
-#   
-# # Beta draws
-#   beta_df <- data.frame(
-#     beta = as.vector(longbet.fit$beta_draws[t0:t1, ]),
-#     time = rep(c(t0:t1), ncol(longbet.fit$beta_draws)),
-#     sweeps = as.vector(sapply(1:ncol(longbet.fit$beta_draws), rep, (t1 - t0 + 1)))
-#   )
-#   
-#   beta_df %>%
-#     ggplot() +
-#     geom_line(aes(time, beta, group = sweeps, color = sweeps)) +
-#     geom_line(data = att_df, aes(time, true), color = 'red')
-# 
 # 
 # # CATE
 #   cate_df <- data.frame(

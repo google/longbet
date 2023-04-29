@@ -88,12 +88,12 @@ longbet.fit <- longbet(y = ytrain, x = x, z = ztrain, t = 1:t1,
 # sigma = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
 # lambda = (t1 - t0 + 1) 
 longbet.pred <- predict.longBet(longbet.fit, x, 1:t2, lambda = 3)
-mu_hat_longbet <- apply(longbet.pred$muhats.adjusted, c(1, 2), mean)
-tau_hat_longbet <- apply(longbet.pred$tauhats.adjusted, c(1, 2), mean)
+mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
+tau_hat_longbet <- apply(longbet.pred$tauhats, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t2]
 t_longbet <- proc.time() - t_longbet
 
-ate_longbet_fit <- apply(longbet.pred$tauhats.adjusted, c(2, 3), mean)[t0:t2, ]
+ate_longbet_fit <- apply(longbet.pred$tauhats, c(2, 3), mean)[t0:t2, ]
 ate <- tau_mat %>% colMeans
 ate_longbet <- ate_longbet_fit %>% rowMeans
 
@@ -133,7 +133,7 @@ print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"
 
 # # results -----------------------------------------------------------------
 # # check ate
-# ate_longbet_fit <- apply(longbet.fit$tauhats.adjusted, c(2, 3), mean)[t0:t1, ]
+# ate_longbet_fit <- apply(longbet.pred$tauhats, c(2, 3), mean)[t0:t1, ]
 # 
 # ate <- tau_mat %>% colMeans
 # ate_bart <- tau_bart %>% colMeans

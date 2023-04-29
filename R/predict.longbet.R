@@ -87,12 +87,36 @@ predict.longBet <- function(model, x, t, sigma = NULL, lambda = NULL, ...) {
     return(obj)
 }
 
-# get_ate <- function(object, ...) {
-#     if(class(object) != "longBet.pred"){
-#         stop("Input object should be output from predict.longBet function")    
-#     }
-#     obj <- list()
-#     obj$ate <- apply(object$tauhats[,,], c(2, 3), mean)[t0:t1, ]
+get_ate <- function(object, alpha = 0.05, ...) {
+    if(class(object) != "longBet.pred"){
+        stop("Input object should be output from predict.longBet function")    
+    }
+    ate_full <- apply(object$tauhats, c(2, 3), mean)
+    obj <- list()
+    obj$ate <- rowMeans(ate_full)
+    obj$interval <- apply(ate_full, 1, quantile, probs = c(alpha / 2, 1- alpha / 2))
+    obj$ate_full <- ate_full
+    return(obj)
+}
 
-# }
+get_att <- function(object, z, alpha = 0.05, ...){
+    if(class(object) != "longBet.pred"){
+        stop("Input object should be output from predict.longBet function")    
+    }
+    att_full <- apply(object$tauhats[z,,], c(2, 3), mean)
+    obj <- list()
+    obj$att <- rowMeans(att_full)
+    obj$interval <- apply(att_full, 1, quantile, probs = c(alpha / 2, 1- alpha / 2))
+    obj$att_full <- att_full
+    return(obj)
+}
 
+get_cate <- function(object, alpha = 0.05, ...){
+    if(class(object) != "longBet.pred"){
+        stop("Input object should be output from predict.longBet function")    
+    }
+    obj <- list()
+    obj$cate <- apply(object$tauhats, c(1, 2), mean)
+    obj$interval <- apply(object$tauhats, c(1, 2), quantile, probs = c(alpha / 2, 1 - alpha / 2))
+    return(obj)
+}

@@ -30,8 +30,8 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
                     std::unique_ptr<X_struct> &x_struct_trt,
                     bool a_scaling,
                     bool b_scaling,
-                    bool split_t_mod,
-                    bool split_t_con,
+                    bool split_time_ps,
+                    bool split_time_trt,
                     matrix<double> &resid_info,
                     matrix<double> &A_diag_info,
                     matrix<double> &Sig_diag_info

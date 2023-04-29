@@ -12,7 +12,9 @@
 #' @param mtry number of variables to be sampled as split candidate per tree.
 #' @param n_min The minimum node size. (default is 1)
 #' @param sig_knl variance parameter for squared exponential kernel (default is 1).
-#' @param lambda_knl lengthscale parameter for squared exponential kernel (default is 5).
+#' @param lambda_knl lengthscale parameter for squared exponential kernel (default is 1).
+#' @param split_time_ps whether to split on time variable in prognostic trees (default is TRUE)
+#' @param split_time_trt whether to split on time variable in treatment trees (default is FALSE)
 #'
 #' @return A fit file, which contains the draws from the model as well as parameter draws at each sweep.
 #' @export
@@ -20,7 +22,8 @@ longbet <- function(y, x, z, t, pcat,
                     num_sweeps = 60, num_burnin = 20,
                     num_trees_pr = 20, num_trees_trt = 20,
                     mtry = 0L, n_min = 10,
-                    sig_knl = 1, lambda_knl = 1) {
+                    sig_knl = 1, lambda_knl = 1,
+                    split_time_ps = TRUE, split_time_trt = FALSE) {
 
     if(!("matrix" %in% class(x))){
         cat("Msg: input x is not a matrix, try to convert type.\n")
@@ -138,7 +141,6 @@ longbet <- function(y, x, z, t, pcat,
     verbose = FALSE; parallel = TRUE
     set_random_seed = FALSE; random_seed = 0
     sample_weights_flag = TRUE
-    split_t_mod = TRUE; split_t_con = TRUE
     a_scaling = TRUE; b_scaling = TRUE
 
     obj = longBet_cpp(y = y,
@@ -178,8 +180,8 @@ longbet <- function(y, x, z, t, pcat,
                     sample_weights_flag = sample_weights_flag,
                     a_scaling = a_scaling, 
                     b_scaling = b_scaling,
-                    split_t_mod = split_t_mod, 
-                    split_t_con = split_t_con,
+                    split_time_ps = split_time_ps, 
+                    split_time_trt = split_time_trt,
                     sig_knl = sig_knl, 
                     lambda_knl = lambda_knl)
     class(obj) = "longBet"

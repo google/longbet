@@ -56,7 +56,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
                     bool set_random_seed = false, size_t random_seed = 0,
                     bool sample_weights_flag = true,
                     bool a_scaling = true, bool b_scaling = true,
-                    bool split_t_mod = true, bool split_t_con = false,
+                    bool split_time_ps = true, bool split_time_trt = false,
                     double sig_knl = 1, double lambda_knl = 2)
 {
     // cout << "start training longbet" << endl;
@@ -262,7 +262,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     // mcmc_loop returns tauhat [N x sweeps] matrix
     mcmc_loop_longBet(Xorder_std, Xorder_tau_std, Xpointer, Xpointer_tau, torder_mu_std, torder_tau_std, verbose, 
         sigma0_draw_xinfo, sigma1_draw_xinfo, b_xinfo, a_xinfo, beta_info, beta_xinfo, *trees_pr, *trees_trt, no_split_penality,
-        state, model_pr, model_trt, x_struct_pr, x_struct_trt, a_scaling, b_scaling, split_t_mod, split_t_con, 
+        state, model_pr, model_trt, x_struct_pr, x_struct_trt, a_scaling, b_scaling, split_time_ps, split_time_trt, 
         resid_info, A_diag_info, Sig_diag_info);
 
     // predict tauhats and muhats

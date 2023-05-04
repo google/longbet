@@ -8,9 +8,10 @@ library(longBet)
 
 
 set.seed(1)
-n <- 500
+n <- 2000
 t1 <- 12
 t0 <- 6
+alpha = 0.05
 
 # generate dcovariates
 x1 <- rnorm(n)
@@ -24,9 +25,9 @@ x <- cbind(x1, x2, x3, x4, x5)
 post_t <- 1:(t1 - t0 + 1) 
 beta_t <- dgamma(post_t, 2, 1)
 # define heterogeneous treatment effects
-tau <- 1 + 2 * x[,2] * x[,5]
+tau <- 1 + 2 * abs(x[,2] * x[,5])
 # time-varyiing heterogeneous treatment effect
-tau_mat <- 1 + 5 * outer(tau, beta_t , "*")
+tau_mat <- 2 + 2 * outer(tau, beta_t , "*")
 
 
 # ## define prognostic function (RIC)
@@ -65,8 +66,6 @@ y = Ey + matrix(sig*rnorm(n*t1), n, t1)
 pi_mat <- as.matrix(rep(pi, t1), n, t1)
 pi_vec <- as.vector(pi_mat)
 
-
-
 # Turn input into nt*1 vector and nt*p matrix
 y_vec <- as.vector(y)
 x_bart <- c()
@@ -83,8 +82,9 @@ expand_z_mat <- cbind(matrix(0, n, (t0 - 1)), z_mat)
 # longbet -----------------------------------------------------------------
 t_longbet <- proc.time()
 longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
-num_trees_pr =  50, num_trees_trt = 50 ,
-pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 2)
+                       num_sweeps = 100,
+                       num_trees_pr =  20, num_trees_trt = 20 ,
+                       pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
@@ -97,14 +97,14 @@ print(paste0("longbet CATE RMSE: ", sqrt(mean((as.vector(tau_longbet) - as.vecto
 print(paste0("longbet CATT RMSE: ", sqrt(mean((as.vector(tau_longbet[z == 1, ]) - as.vector(tau_mat[z==1,]))^2))))
 print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 
-# bart --------------------------------------------------------------------
+# # bart --------------------------------------------------------------------
 xtr <- cbind(z_vec, x_bart)
 xte <- cbind(1 - z_vec, x_bart)
 ytr <- y_vec
 
 t_bart = proc.time()
 ce_bart <- list()
-bartps<-bart(x.train = xtr, y.train = ytr, x.test = xte)
+bartps<-bart(x.train = xtr, y.train = ytr, x.test = xte, ndpost = 200)
 ppd_test<-t(apply(bartps$yhat.test,1,function(x) rnorm(n=length(x),mean=x,sd=bartps$sigma)))
 ppd_test_mean<-apply(ppd_test,2,mean)
 
@@ -125,64 +125,62 @@ t_bart = proc.time() - t_bart
 
 # results -----------------------------------------------------------------
 # check ate
+ate_longbet_fit <- apply(longbet.pred$tauhats, c(2, 3), mean)[t0:t1, ]
+
 ate <- tau_mat %>% colMeans
 ate_bart <- tau_bart %>% colMeans
-ate_longbet <- tau_longbet %>% colMeans
+ate_longbet <- ate_longbet_fit %>% rowMeans
 
-print(paste0("longbet CATE RMSE: ", round( sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2)), 2 ) ))
+print(paste0("longbet CATE RMSE: ", round( sqrt( mean(  as.vector(tau_longbet - tau_mat)^2 ) ), 2 ) ))
 print(paste0("longbet ate rmse: ", round( sqrt(mean((ate_longbet - ate)^2)), 2)))
 print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 
-print(paste0("bart CATE RMSE: ", round( sqrt(mean((tau_bart - tau_mat)^2)), 2)))
+print(paste0("bart CATE RMSE: ", round( sqrt( mean( (tau_bart - tau_mat)^2 ) ), 2)))
 print(paste0("BART ate rmse: ", round( sqrt(mean((ate_bart - ate)^2)), 2)))
 print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
 
 
-# # visualize ---------------------------------------------------------------
-# # ATE
-#   ate_df <- data.frame(
-#     time = t0:t1,
-#     true = ate,
-#     bart = ate_bart,
-#     longbet = ate_longbet
-#   )
-#   
-#   ate_df %>% 
-#     gather("method", "ate", -time) %>%
-#     ggplot(aes(time, ate)) + 
-#     geom_line(aes(color = method)) + 
-#     ylab(labs(title = "Average Treatment Effect"))
-#   
-# 
-# # CATE
-#   cate_df <- data.frame(
-#     true = as.vector(t(tau_mat)),
-#     lonbet = as.vector(t(tau_longbet)),
-#     bart = as.vector(t(tau_bart)),
-#     time = rep(c(t0:t1), nrow(tau_mat)),
-#     id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
-#   )
-#   
-#   cate_df %>%
-#     gather("method", "cate", -time, -id) %>%
-#     ggplot() +
-#     geom_line(aes(time, cate, group = id, color = id)) +
-#     facet_wrap(~method)
-#   
-# # CATE error
-#   cate_error <- data.frame(
-#     lonbet = as.vector(t(tau_longbet - tau_mat)),
-#     bart = as.vector(t(tau_bart - tau_mat)),
-#     time = rep(c(t0:t1), nrow(tau_mat)),
-#     id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
-#   )
-#   
-#   cate_error %>%
-#     gather("method", "cate", -time, -id) %>%
-#     ggplot() +
-#     geom_line(aes(time, cate, group = id, color = id)) +
-#     facet_wrap(~method)
-#   
-#   
-# 
-# 
+# visualize ---------------------------------------------------------------
+colors <- c("black", "#FFA500", "#00BFFF")
+labels <- c("True", "LongBet", "BART")
+names(colors) <- labels
+# ATE
+ate_df <- data.frame(
+  time = t0:t1,
+  true = ate,
+  bart = ate_bart,
+  longbet = ate_longbet,
+  longbet_up = apply(ate_longbet_fit, 1, quantile, probs = 1 - alpha / 2),
+  longbet_low = apply(ate_longbet_fit, 1, quantile, probs = alpha / 2)
+)
+
+ate_plot <- 
+  ggplot(ate_df , aes(x = time, y = true)) +
+  geom_line(aes(y = true, color = "True")) +
+  geom_line(aes(y = longbet, color = "LongBet")) +
+  geom_line(aes(y = bart, color = "BART")) +
+  geom_ribbon(aes(ymin = longbet_low, ymax = longbet_up, fill = "LongBet"), alpha = 0.15, fill = colors[2]) +
+  # geom_ribbon(aes(ymin = longbet_low, ymax = longbet_up, fill = "BART"), alpha = 0.15, fill = colors[3]) +
+  labs(x = "Time", y = "ATE", color = "Legend") +
+  scale_color_manual(name = "Legend", values = c("black", "#FFA500", "#00BFFF"), labels = c("True", "LongBet", "BART"))
+print(ate_plot)
+
+readline(prompt="Press [enter] to continue")
+
+# CATE
+cate_df <- data.frame(
+  true = as.vector(t(tau_mat)),
+  lonbet = as.vector(t(tau_longbet)),
+  bart = as.vector(t(tau_bart)),
+  time = rep(c(t0:t1), nrow(tau_mat)),
+  id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
+)
+
+cate_plot <- cate_df %>%
+  gather("method", "cate", -time, -id) %>%
+  ggplot() +
+  geom_line(aes(time, cate, group = id, color = id)) +
+  facet_wrap(~method, ncol = 2)
+plot(cate_plot)
+
+readline(prompt="Press [enter] to continue")

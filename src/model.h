@@ -9,8 +9,11 @@
 #include "state.h"
 #include "X_struct.h"
 #include "cdf.h"
+#include "RcppArmadillo.h"
+#include "rcpp_utility.h"
 
 using namespace std;
+using namespace arma;
 
 class tree;
 
@@ -157,17 +160,19 @@ public:
 
   void update_b_values(std::unique_ptr<State> &state);
 
-  void update_time_coef(std::unique_ptr<State> &state,
-  std::unique_ptr<X_struct> &x_struct, matrix<size_t> &torder_std,
-  std::vector<double> &beta_xinfo,
-  std::vector<double> &time_residuals, std::vector<double> &time_diag_A,
-  std::vector<double> &time_diag_Sig);
+  void update_time_coef(std::unique_ptr<State> &state, std::unique_ptr<X_struct> &x_struct,
+    matrix<size_t> &torder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig, std::vector<double> &beta);
   
   void subtract_old_tree_fit(size_t tree_ind, matrix<double> &fit,
   std::unique_ptr<X_struct> &x_struct);
 
   void set_state_status(std::unique_ptr<State> &state, size_t value,
   const double *X, matrix<size_t> &Xorder, const double *t_std);
+
+  void predict_beta(std::vector<double> &beta,
+    std::vector<double> &res_vec, std::vector<double> &a_vec, std::vector<double> &sig_vec, 
+    matrix<double> &Sigma_tr_std, matrix<double> &Sigma_te_std, matrix<double> &Sigma_tt_std,
+    std::mt19937 &gen);
 };
 
 

@@ -1,8 +1,6 @@
-// #include "third_party/R/packages/longBet/longBet/src/matrix_utility.h"
-// #include "third_party/R/packages/XBCF/XBCF/src/utility.h"
 #include "tree.h"
 #include "model.h"
-#include <armadillo>
+// #include <armadillo>
 #include <cstddef>
 #include <memory>
 #include <numeric>
@@ -65,6 +63,11 @@ size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
 
   if (state->fl == 0)  // suff stat for prognostic trees
   {
+    // r = resid / a
+    // s0 = sum(r)
+    // s1 = sum(r)
+    // s2 = n0  
+    // s3 = n1
     if (gp == 1)
     {
       suffstats[1] += resid / state->a;
@@ -73,8 +76,12 @@ size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
       suffstats[0] += resid / state->a;
       suffstats[2] += 1;
     }
-  } else {  // suff stat for treatment trees
-  // cout << "resid = " << resid << endl;
+  } else {
+    // r = resid / b / beta
+    // s0 = sum(beta^2 * r)
+    // s1 = sum(beta^2 * r)
+    // s2 = sum(beta^2)
+    // s3 = sum(beta^2)
     if (gp == 1)
     {
       // beta_t^2 * r / b / beta_t = beta_t * r / b
@@ -380,12 +387,9 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
   state->b_vec[0] = b0;
 }
 
-void longBetModel::update_time_coef(std::unique_ptr<State> &state,
-std::unique_ptr<X_struct> &x_struct, matrix<size_t> &torder_std,
-std::vector<double> &beta_xinfo,
-std::vector<double> &time_residuals, std::vector<double> &time_diag_A,
-std::vector<double> &time_diag_Sig)
-{
+void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_ptr<X_struct> &x_struct,
+  matrix<size_t> &torder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig, std::vector<double> &beta)
+{  
   // get total number of time
   size_t t_size = x_struct->t_values.size();
   double n = state->n_y;  // n obs per period. TODO: need update
@@ -395,16 +399,23 @@ std::vector<double> &time_diag_Sig)
   // diagonal element of matrix A: sigma_{z_i}^{-1} * b_{z_i} * tau_i
   std::vector<double> diag_ctrl(t_size, 0);
   std::vector<double> diag_trt(t_size, 0);
-  std::vector<double> diag(t_size, 0);
+  // std::vector<double> diag(t_size, 0);
 
   double sig02 = pow(state->sigma_vec[0], 2);
   double sig12 = pow(state->sigma_vec[1], 2);
+  // vec sig(t_size, fill::zeros);
 
   std::vector<size_t> idx(state->p_y);  // keep track of t-values
   size_t t_idx;
   size_t counts = 0;
   const double *z_pointer;
   const double *y_pointer;
+
+  // if(t_size <= 1){
+  //   cout << "unique t values need to be greater than 1" << endl;
+  //   throw;
+  // }
+
   for (size_t i = 0; i < t_size; i++)
   {
     for (size_t j = 0; j < x_struct->t_counts[i]; j++)
@@ -420,22 +431,21 @@ std::vector<double> &time_diag_Sig)
         {
           res_ctrl[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
           diag_ctrl[i] += state->tau_fit[k][t_idx];
-          time_diag_Sig[i] += sig02;
+          sig[i] += sig02;
         } else {
           res_trt[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
           diag_trt[i] += state->tau_fit[k][t_idx];
-          time_diag_Sig[i] += sig12;
+          sig[i] += sig12;
         }
       }
     }
   }
 
   for (size_t i = 0; i < t_size; i++){
-    time_residuals[i] = (res_trt[i] + res_ctrl[i]) / n / x_struct->t_counts[i];
-    time_diag_A[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/n;
-    time_diag_Sig[i] = time_diag_Sig[i] / pow(n, 2) / x_struct->t_counts[i];
+    resid[i] = (res_trt[i] + res_ctrl[i]) / n / x_struct->t_counts[i];
+    diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/n;
+    sig[i] = sig[i] / pow(n, 2) / x_struct->t_counts[i];
   }
-
   // solve by var = (Sigma0^-1 + Sigma^-1)^-1
   // Sigma0 = A*cov_kernel*A'
   // Sigma = diag(sig)
@@ -451,12 +461,14 @@ std::vector<double> &time_diag_Sig)
   }
 
   arma::mat Sigma0(t_size, t_size);
-  arma::mat Sigma_inv = diagmat(sig);
+  // arma::mat Sigma_inv(t_size, t_size);
+  arma::mat Sigma_inv = diagmat(conv_to<mat>::from(sig));
+  
   for (size_t i = 0; i < t_size; i++){
     for (size_t j = 0; j < t_size; j++){
       Sigma0(i, j) = time_diag_A[i] * x_struct->cov_kernel[i][j] * time_diag_A[j];
     }
-    // Sigma_inv(i, i) = 1 / sig[i];
+    Sigma_inv(i, i) = 1 / sig[i];
   }
 
   arma::mat Sigma0_inv = inv_sympd(Sigma0);
@@ -468,9 +480,12 @@ std::vector<double> &time_diag_Sig)
   svd(U, s, V, var);
 
   arma::mat L = U * diagmat(s);
-
   // mean
-  arma::mat mu = var * Sigma_inv * res;
+  arma::mat res_vec(t_size, 1);
+  for (size_t i = 0; i < t_size; i++){
+    res_vec(i, 0) = resid[i];
+  }
+  arma::mat mu = var * Sigma_inv * res_vec;
 
   std::normal_distribution<double> normal_samp(0.0, 1.0);
   arma::mat draws(t_size, 1);
@@ -479,13 +494,14 @@ std::vector<double> &time_diag_Sig)
   arma::mat beta_tilde = mu + L * draws;
 
   // beta = diag^-1 * beta_tilde
+  // arma::mat beta(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
-    beta_xinfo[i] = beta_tilde(i, 0) / time_diag_A[i];
+    beta[i] = beta_tilde(i, 0) / diag[i];
   }
 
   // match beta to beta_t
   for (size_t i = 0; i < state->p_y; i++){
-    state->beta_t[i] = beta_xinfo[idx[i]];
+    state->beta_t[i] = beta[idx[i]];
   }
 }
 
@@ -523,4 +539,49 @@ void longBetModel::set_state_status(std::unique_ptr<State> &state, size_t value,
     state->p_continuous = state->p_continuous_trt;
   }
 
+}
+
+void longBetModel::predict_beta(std::vector<double> &beta,
+  std::vector<double> &res_vec, std::vector<double> &a_vec, std::vector<double> &sig_vec, 
+  matrix<double> &Sigma_tr_std, matrix<double> &Sigma_te_std, matrix<double> &Sigma_tt_std,
+  std::mt19937 &gen)
+{
+  vec a_diag = conv_to<vec>::from(a_vec);
+  vec sig_diag = conv_to<vec>::from(sig_vec);
+  vec res = conv_to<vec>::from(res_vec);
+
+  size_t tr_size = Sigma_tr_std.size();
+  size_t te_size = Sigma_te_std.size();
+  mat Sigma_tr(tr_size, tr_size);
+  mat Sigma_te(te_size, te_size);
+  mat Sigma_tt(tr_size, te_size);
+
+  std_to_arma(Sigma_tr_std, Sigma_tr);
+  std_to_arma(Sigma_te_std, Sigma_te);
+  std_to_arma(Sigma_tt_std, Sigma_tt);
+
+  mat A = diagmat(a_diag);
+  mat Sig = diagmat(sig_diag);
+  mat Sig_inv = pinv(Sig + A * Sigma_tr * A.t());
+  mat common_mat = Sigma_tt.t() * A.t() * Sig_inv;
+  
+  mat mu = common_mat * res;
+  mat var = Sigma_te - common_mat * A * Sigma_tt;
+
+  arma::mat U, V;
+  arma::vec s;
+  svd(U, s, V, var);
+
+  arma::mat L = U * diagmat(s);
+
+  std::normal_distribution<double> normal_samp(0.0, 1.0);
+  arma::mat draws(te_size, 1);
+  for (size_t i = 0; i < te_size; i++){ draws(i, 0) = normal_samp(gen); }
+
+  arma::mat beta_tilde = mu + L * draws;
+
+  for (size_t i = 0; i < te_size; i++){
+    beta[i] = beta_tilde(i, 0);
+  }
+  
 }

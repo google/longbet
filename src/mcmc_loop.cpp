@@ -16,6 +16,7 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
                     matrix<double> &sigma1_draw_xinfo,
                     matrix<double> &b_xinfo,
                     matrix<double> &a_xinfo,
+                    matrix<double> &beta_info,
                     matrix<double> &beta_xinfo,
                     matrix<double> &time_beta,
                     matrix<double> &time_residuals,
@@ -31,8 +32,12 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
                     std::unique_ptr<X_struct> &x_struct_trt,
                     bool a_scaling,
                     bool b_scaling,
-                    bool split_t_mod,
-                    bool split_t_con)
+                    bool split_time_ps,
+                    bool split_time_trt,
+                    matrix<double> &resid_info,
+                    matrix<double> &A_diag_info,
+                    matrix<double> &Sig_diag_info
+                    )
 {
 
   if (state->parallel)
@@ -93,7 +98,7 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
       // cout << "root suffstat = " << trees_ps[sweeps][tree_ind].suff_stat << endl;
       // GFR
       trees_ps[sweeps][tree_ind].grow_from_root(state, split_ps, model_ps,
-      x_struct_ps, sweeps, tree_ind, split_t_mod);
+      x_struct_ps, sweeps, tree_ind, split_time_ps);
       model_ps->state_sweep(tree_ind, state->mu_fit, x_struct_ps);  // update total mu_fit by adding just fitted values
 
       state->update_split_counts(tree_ind, 0);  // update split counts for mu 
@@ -148,7 +153,7 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
       model_trt->initialize_root_suffstat(state, trees_trt[sweeps][tree_ind].suff_stat); // initialize suff stat using partial fit
       // cout << "root suffstat = " << trees_trt[sweeps][tree_ind].suff_stat << endl;
       // GFR
-      trees_trt[sweeps][tree_ind].grow_from_root(state, split_trt, model_trt, x_struct_trt, sweeps, tree_ind, split_t_con);
+      trees_trt[sweeps][tree_ind].grow_from_root(state, split_trt, model_trt, x_struct_trt, sweeps, tree_ind, split_time_trt);
       // cout << "finish treatment " << tree_ind << endl;
 
       model_trt->state_sweep(tree_ind, state->tau_fit, x_struct_trt); // update total tau_fit by adding just fitted values
@@ -167,9 +172,9 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
       }
     }
 
-    model_ps->update_time_coef(state, x_struct_trt, torder_tau_std,
-    time_beta[sweeps], time_residuals[sweeps],
-    time_diag_A[sweeps], time_diag_Sig[sweeps]);
+    model_ps->update_time_coef(state, x_struct_trt, torder_tau_std, 
+      resid_info[sweeps], A_diag_info[sweeps], Sig_diag_info[sweeps], beta_info[sweeps]); 
+    
     std::copy(state->beta_t.begin(), state->beta_t.end(),
     beta_xinfo[sweeps].begin());
     // store draws for b0, b1 and a, although they are updated per tree, we save results per forest (sweep)

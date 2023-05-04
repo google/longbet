@@ -1,11 +1,12 @@
 #include <ctime>
-#include <RcppArmadillo.h>
 #include "tree.h"
 #include <chrono>
 // #include "mcmc_loop.h"
 #include "X_struct.h"
 #include "mcmc_loop.h"
 #include "common.h"
+#include "rcpp_utility.h"
+#include <RcppArmadillo.h>
 
 using namespace std;
 using namespace chrono;
@@ -16,228 +17,6 @@ using namespace chrono;
 //                                                                    //
 //                                                                    //
 ////////////////////////////////////////////////////////////////////////
-
-void rcpp_to_std2(arma::mat y, arma::mat X, arma::mat Xtest, Rcpp::NumericMatrix &y_std, double &y_mean, Rcpp::NumericMatrix &X_std, Rcpp::NumericMatrix &Xtest_std, matrix<size_t> &Xorder_std)
-{
-    // The goal of this function is to convert RCPP object to std objects
-
-    // TODO: Refactor code so for loops are self contained functions
-    // TODO: Why RCPP and not std?
-    // TODO: inefficient Need Replacement?
-
-    size_t N = X.n_rows;
-    size_t p = X.n_cols;
-    size_t N_test = Xtest.n_rows;
-    size_t p_y = y.n_cols;
-
-    // Create y_std
-    for (size_t i = 0; i < N; i++)
-    {
-        for (size_t j = 0; j < p_y; j++){
-            y_std(i, j) = y(i, j);
-            y_mean = y_mean + y_std(i, j);
-        }
-    }
-    y_mean = y_mean / (double)N / (double) p_y;
-
-    // X_std
-    for (size_t i = 0; i < N; i++)
-    {
-        for (size_t j = 0; j < p; j++)
-        {
-            X_std(i, j) = X(i, j);
-        }
-    }
-
-    //X_std_test
-    for (size_t i = 0; i < N_test; i++)
-    {
-        for (size_t j = 0; j < p; j++)
-        {
-            Xtest_std(i, j) = Xtest(i, j);
-        }
-    }
-
-    // Create Xorder
-    // Order
-    arma::umat Xorder(X.n_rows, X.n_cols);
-    for (size_t i = 0; i < X.n_cols; i++)
-    {
-        Xorder.col(i) = arma::sort_index(X.col(i));
-    }
-    // Create
-    for (size_t i = 0; i < N; i++)
-    {
-        for (size_t j = 0; j < p; j++)
-        {
-            Xorder_std[j][i] = Xorder(i, j);
-        }
-    }
-
-    return;
-}
-
-// FUNCTION arma_to_std (instance 1)
-// transfers data from an armadillo matrix object (column 0) to an std vector object
-void arma_to_std(const arma::mat &matrix_in, std::vector<double> &vector_out)
-{
-    size_t dim = matrix_in.n_rows;
-
-    for (size_t i = 0; i < dim; i++)
-    {
-        vector_out[i] = matrix_in(i, 0);
-    }
-
-    return;
-}
-
-// transfers data from an armadillo matrix object (column 0) to an std vector object
-void arma_to_std(const arma::mat &matrix_in, std::vector<size_t> &vector_out)
-{
-    size_t dim = matrix_in.n_rows;
-
-    for (size_t i = 0; i < dim; i++)
-    {
-        vector_out[i] = (size_t)matrix_in(i, 0);
-    }
-
-    return;
-}
-
-// FUNCTION arma_to_rcpp (instance 1)                    ?? Rcpp matrix or std matrix ??
-// transfers data from an armadillo matrix object to an Rcpp matrix object
-void arma_to_rcpp(const arma::mat &matrix_in, Rcpp::NumericMatrix &matrix_out)
-{
-    size_t dim_x = matrix_in.n_rows;
-    size_t dim_y = matrix_in.n_cols;
-
-    for (size_t i = 0; i < dim_x; i++)
-    {
-        for (size_t j = 0; j < dim_y; j++)
-        {
-            matrix_out(i, j) = matrix_in(i, j);
-        }
-    }
-
-    return;
-}
-
-// FUNCTION arma_to_std_ordered
-// transfers data from an armadillo matrix object to an std matrix object with indeces [carries the pre-sorted features]
-void arma_to_std_ordered(const arma::mat &matrix_in, matrix<size_t> &matrix_ordered_std)
-{
-    size_t dim_x = matrix_in.n_rows;
-    size_t dim_y = matrix_in.n_cols;
-
-    arma::umat matrix_ordered(dim_x, dim_y);
-    for (size_t i = 0; i < dim_y; i++)
-    {
-        matrix_ordered.col(i) = arma::sort_index(matrix_in.col(i));
-    }
-
-    for (size_t i = 0; i < dim_x; i++)
-    {
-        for (size_t j = 0; j < dim_y; j++)
-        {
-            matrix_ordered_std[j][i] = matrix_ordered(i, j);
-        }
-    }
-
-    return;
-}
-
-// FUNCTION std_to_Rcpp
-// transfers data from an std matrix object to an Rcpp NumericMatrix object
-void std_to_rcpp(const matrix<double> &matrix_in, Rcpp::NumericMatrix &matrix_out)
-{
-    size_t dim_x = matrix_in.size();
-    size_t dim_y = matrix_in[0].size();
-    for (size_t i = 0; i < dim_y; i++)
-    {
-        for (size_t j = 0; j < dim_x; j++)
-        {
-            matrix_out(i, j) = matrix_in[j][i];
-        }
-    }
-
-    return;
-}
-
-double compute_vec_mean(const std::vector<double> &vec)
-{
-    double mean = 0;
-    int length = vec.size();
-
-    for (size_t i = 0; i < length; i++)
-    {
-        mean = mean + vec[i];
-    }
-    mean = mean / (double)length;
-    return mean;
-}
-
-double compute_mat_mean(const Rcpp::NumericMatrix &matrix)
-{
-    double mean = 0;
-
-    for (size_t i = 0; i < matrix.nrow(); i++)
-    {
-        for (size_t j = 0; j < matrix.ncol(); j++){
-            mean = mean + matrix(i, j);
-        }
-    }
-    mean = mean / (double) matrix.nrow() / (double) matrix.ncol();
-    return mean;
-}
-
-void rcpp_to_std2(arma::mat X, arma::mat Xtest, Rcpp::NumericMatrix &X_std, Rcpp::NumericMatrix &Xtest_std, matrix<size_t> &Xorder_std)
-{
-    // The goal of this function is to convert RCPP object to std objects
-
-    // TODO: Refactor code so for loops are self contained functions
-    // TODO: Why RCPP and not std?
-    // TODO: inefficient Need Replacement?
-
-    size_t N = X.n_rows;
-    size_t p = X.n_cols;
-    size_t N_test = Xtest.n_rows;
-
-    // X_std
-    for (size_t i = 0; i < N; i++)
-    {
-        for (size_t j = 0; j < p; j++)
-        {
-            X_std(i, j) = X(i, j);
-        }
-    }
-
-    //X_std_test
-    for (size_t i = 0; i < N_test; i++)
-    {
-        for (size_t j = 0; j < p; j++)
-        {
-            Xtest_std(i, j) = Xtest(i, j);
-        }
-    }
-
-    // Create Xorder
-    // Order
-    arma::umat Xorder(X.n_rows, X.n_cols);
-    for (size_t i = 0; i < X.n_cols; i++)
-    {
-        Xorder.col(i) = arma::sort_index(X.col(i));
-    }
-    // Create
-    for (size_t i = 0; i < N; i++)
-    {
-        for (size_t j = 0; j < p; j++)
-        {
-            Xorder_std[j][i] = Xorder(i, j);
-        }
-    }
-
-    return;
-}
 
 // FUNCTION longBet
 // preprocesses input received from R
@@ -277,9 +56,10 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
                     bool set_random_seed = false, size_t random_seed = 0,
                     bool sample_weights_flag = true,
                     bool a_scaling = true, bool b_scaling = true,
-                    bool split_t_mod = true, bool split_t_con = false,
-                    double sig_knl = 1, double lambda_knl = 1)
+                    bool split_time_ps = true, bool split_time_trt = false,
+                    double sig_knl = 1, double lambda_knl = 2)
 {
+    // cout << "start training longbet" << endl;
     auto start = system_clock::now();
 
     size_t N = X.n_rows;
@@ -288,6 +68,13 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     size_t p_pr = X.n_cols;
     size_t p_trt = X_tau.n_cols;
     size_t p_y = y.n_cols;  // dimension of response variables
+
+    if ( N * p_pr * p_trt * p_y == 0)
+    {
+        cout << "Wrong dimension " << " N " << N << " p_pr " << p_pr << " p_trt " << p_trt << " p_y" << p_y << endl;
+        abort();
+    }
+
 
     // number of continuous variables
     size_t p_continuous_pr = p_pr - p_categorical_pr;
@@ -346,12 +133,13 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix X_std(N, p_pr);
     Rcpp::NumericMatrix X_tau_std(N, p_trt);
     Rcpp::NumericMatrix tcon_std(t_con.n_rows, t_con.n_cols);
-    Rcpp::NumericMatrix tmod_std(t_con.n_rows, t_mod.n_cols);
+    Rcpp::NumericMatrix tmod_std(t_mod.n_rows, t_mod.n_cols);
+
+    arma_to_rcpp(X, X_std);
     arma_to_rcpp(y, y_std);
     arma_to_rcpp(z, z_std);
     arma_to_rcpp(t_con, tcon_std);
     arma_to_rcpp(t_mod, tmod_std);
-    arma_to_rcpp(X, X_std);
     arma_to_std_ordered(X, Xorder_std);
     arma_to_std_ordered(t_con, torder_mu_std);
     arma_to_std_ordered(t_mod, torder_tau_std);
@@ -457,29 +245,25 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     std::vector<double> initial_theta_trt(1, 0);
     std::unique_ptr<X_struct> x_struct_trt(new X_struct(Xpointer_tau, ypointer, tpointer_tau, N, p_y, Xorder_tau_std, torder_tau_std, p_categorical_trt, p_continuous_trt, &initial_theta_trt, num_trees_trt, sig_knl, lambda_knl));
 
-
-
-    // init time coefficient parameters, needed for prediction
     size_t t_size = x_struct_trt->t_values.size();
+    matrix<double> resid_info;
+    ini_matrix(resid_info, t_size, num_sweeps);
 
-    matrix<double> time_beta;
-    matrix<double> time_residuals;
-    matrix<double> time_diag_A;
-    matrix<double> time_diag_Sig;
-    
-    ini_matrix(time_beta, t_size, num_sweeps);
-    ini_matrix(time_residuals, t_size, num_sweeps);
-    ini_matrix(time_diag_A, t_size, num_sweeps);
-    ini_matrix(time_diag_Sig, t_size, num_sweeps);
+    matrix<double> A_diag_info;
+    ini_matrix(A_diag_info, t_size, num_sweeps);
 
+    matrix<double> Sig_diag_info;
+    ini_matrix(Sig_diag_info, t_size, num_sweeps);
+
+    matrix<double> beta_info;
+    ini_matrix(beta_info, t_size, num_sweeps);
+
+    // cout << "mcmc loop" << endl;
     // mcmc_loop returns tauhat [N x sweeps] matrix
-    mcmc_loop_longBet(Xorder_std, Xorder_tau_std, Xpointer, Xpointer_tau,
-    torder_mu_std, torder_tau_std, verbose,
-    sigma0_draw_xinfo, sigma1_draw_xinfo, b_xinfo, a_xinfo,
-    beta_xinfo, time_beta, time_residuals, time_diag_A, time_diag_Sig,
-    *trees_pr, *trees_trt, no_split_penality,
-    state, model_pr, model_trt, x_struct_pr, x_struct_trt,
-    a_scaling, b_scaling, split_t_mod, split_t_con);
+    mcmc_loop_longBet(Xorder_std, Xorder_tau_std, Xpointer, Xpointer_tau, torder_mu_std, torder_tau_std, verbose, 
+        sigma0_draw_xinfo, sigma1_draw_xinfo, b_xinfo, a_xinfo, beta_info, beta_xinfo, *trees_pr, *trees_trt, no_split_penality,
+        state, model_pr, model_trt, x_struct_pr, x_struct_trt, a_scaling, b_scaling, split_time_ps, split_time_trt, 
+        resid_info, A_diag_info, Sig_diag_info);
 
     // predict tauhats and muhats
     // cout << "predict " << endl;
@@ -494,11 +278,12 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix sigma1_draws(num_trees_trt + num_trees_pr, num_sweeps);
     Rcpp::NumericMatrix b_draws(num_sweeps, 2);
     Rcpp::NumericMatrix a_draws(num_sweeps, 1);
+    Rcpp::NumericMatrix beta_values(t_size, num_sweeps);
     Rcpp::NumericMatrix beta_draws(p_y, num_sweeps);
-    Rcpp::NumericMatrix time_beta_rcpp(t_size, num_sweeps);
-    Rcpp::NumericMatrix time_residuals_rcpp(t_size, num_sweeps);
-    Rcpp::NumericMatrix time_diag_A_rcpp(t_size, num_sweeps);
-    Rcpp::NumericMatrix time_diag_Sig_rcpp(t_size, num_sweeps);
+    Rcpp::NumericMatrix resid(t_size, num_sweeps);
+    Rcpp::NumericMatrix A_diag(t_size, num_sweeps);
+    Rcpp::NumericMatrix Sig_diag(t_size, num_sweeps);
+    Rcpp::NumericMatrix t_values(t_size, 1);
     Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt_pr(trees_pr, true);
     Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt_trt(trees_trt, true);
 
@@ -519,16 +304,17 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     std_to_rcpp(b_xinfo, b_draws);
     std_to_rcpp(a_xinfo, a_draws);
     std_to_rcpp(beta_xinfo, beta_draws);
-    std_to_rcpp(time_beta, time_beta_rcpp);
-    std_to_rcpp(time_residuals, time_residuals_rcpp);
-    std_to_rcpp(time_diag_A, time_diag_A_rcpp);
-    std_to_rcpp(time_diag_Sig, time_diag_Sig_rcpp);
+    std_to_rcpp(beta_info, beta_values);
+    std_to_rcpp(resid_info, resid);
+    std_to_rcpp(A_diag_info, A_diag);
+    std_to_rcpp(Sig_diag_info, Sig_diag);
 
-    Rcpp::NumericMatrix train_t(t_size, 1);
     for (size_t i = 0; i < t_size; i++)
     {
-        train_t(i, 0) = x_struct_trt->t_values[i];
+        t_values(i, 0) = x_struct_trt->t_values[i];
     }
+    // cout << "x_struct t_values " << x_struct_trt->t_values << endl;
+    // cout << "t_values output " << t_values << endl;
 
 
     auto end = system_clock::now();
@@ -583,16 +369,10 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         Rcpp::Named("b_draws") = b_draws,
         Rcpp::Named("a_draws") = a_draws,
         Rcpp::Named("beta_draws") = beta_draws,
-        Rcpp::Named("time_info") = Rcpp::List::create(
-            Rcpp::Named("train_t") = train_t,
-            Rcpp::Named("time_beta") = time_beta_rcpp,
-            Rcpp::Named("time_residuals") = time_residuals_rcpp,
-            Rcpp::Named("time_diag_A") = time_diag_A_rcpp,
-            Rcpp::Named("time_diag_Sig") = time_diag_Sig_rcpp),
-        Rcpp::Named("model_list") = Rcpp::List::create(
-            Rcpp::Named("tree_pnt_pr") = tree_pnt_pr,
-            Rcpp::Named("tree_pnt_trt") = tree_pnt_trt,
-            Rcpp::Named("y_mean") = y_mean),
+        Rcpp::Named("beta_values") = beta_values,
+        Rcpp::Named("model_list") = Rcpp::List::create(Rcpp::Named("tree_pnt_pr") = tree_pnt_pr,
+                                                       Rcpp::Named("tree_pnt_trt") = tree_pnt_trt,
+                                                       Rcpp::Named("y_mean") = y_mean),
         Rcpp::Named("treedraws_pr") = output_tree_pr,
         Rcpp::Named("treedraws_trt") = output_tree_trt,
         Rcpp::Named("sdy_use") = NULL,
@@ -600,26 +380,32 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         Rcpp::Named("meany") = NULL,
         Rcpp::Named("tauhats.adjusted") = NULL,
         Rcpp::Named("muhats.adjusted") = NULL,
-        Rcpp::Named("model_params") = Rcpp::List::create(
-            Rcpp::Named("num_sweeps") = num_sweeps,
-            Rcpp::Named("burnin") = burnin,
-            Rcpp::Named("max_depth") = max_depth,
-            Rcpp::Named("Nmin") = n_min,
-            Rcpp::Named("num_cutpoints") = num_cutpoints,
-            Rcpp::Named("alpha_pr") = alpha_pr,
-            Rcpp::Named("beta_pr") = beta_pr,
-            Rcpp::Named("tau_pr") = tau_pr,
-            Rcpp::Named("p_categorical_pr") = p_categorical_pr,
-            Rcpp::Named("num_trees_pr") = num_trees_pr,
-            Rcpp::Named("alpha_trt") = alpha_trt,
-            Rcpp::Named("beta_trt") = beta_trt,
-            Rcpp::Named("tau_trt") = tau_trt,
-            Rcpp::Named("p_categorical_trt") = p_categorical_trt,
-            Rcpp::Named("num_trees_trt") = num_trees_trt,
-            Rcpp::Named("sig_knl") = sig_knl,
-            Rcpp::Named("lambda_knl") = lambda_knl),
-        Rcpp::Named("input_var_count") = Rcpp::List::create(
-            Rcpp::Named("x_con") = p_pr,
-            Rcpp::Named("x_mod") = p_trt)
+        Rcpp::Named("model_params") = Rcpp::List::create(Rcpp::Named("num_sweeps") = num_sweeps,
+                                                         Rcpp::Named("burnin") = burnin,
+                                                         Rcpp::Named("max_depth") = max_depth,
+                                                         Rcpp::Named("Nmin") = n_min,
+                                                         Rcpp::Named("num_cutpoints") = num_cutpoints,
+                                                         Rcpp::Named("alpha_pr") = alpha_pr,
+                                                         Rcpp::Named("beta_pr") = beta_pr,
+                                                         Rcpp::Named("tau_pr") = tau_pr,
+                                                         Rcpp::Named("p_categorical_pr") = p_categorical_pr,
+                                                         Rcpp::Named("num_trees_pr") = num_trees_pr,
+                                                         Rcpp::Named("alpha_trt") = alpha_trt,
+                                                         Rcpp::Named("beta_trt") = beta_trt,
+                                                         Rcpp::Named("tau_trt") = tau_trt,
+                                                         Rcpp::Named("p_categorical_trt") = p_categorical_trt,
+                                                         Rcpp::Named("num_trees_trt") = num_trees_trt,
+                                                         Rcpp::Named("sig_knl") = sig_knl,
+                                                         Rcpp::Named("lambda_knl") = lambda_knl
+                                                         ),
+        Rcpp::Named("input_var_count") = Rcpp::List::create(Rcpp::Named("x_con") = p_pr,
+                                                            Rcpp::Named("x_mod") = p_trt),
+        Rcpp::Named("gp_info") = Rcpp::List::create(
+            Rcpp::Named("t_values") = t_values,
+            Rcpp::Named("resid") = resid,
+            Rcpp::Named("A_diag") = A_diag,
+            Rcpp::Named("Sig_diag") = Sig_diag
+        )
+
     );
 }

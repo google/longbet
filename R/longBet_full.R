@@ -262,6 +262,6 @@ f <- function(y, z, x_con, x_mod = x_con, t_con = NULL, t_mod = NULL,
         obj$muhats.adjusted[,, i - burnin] = matrix(obj$muhats[,i], nrow(y), ncol(y)) * (obj$a_draws[i]) + meany
     }
     
-    obj$beta_draws = obj$beta_draws[, (burnin+1):num_sweeps]
+    # obj$beta_draws = obj$beta_draws[, (burnin+1):num_sweeps]
     return(obj)
 }

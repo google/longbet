@@ -13,14 +13,17 @@
 #' @param n_min The minimum node size. (default is 1)
 #' @param sig_knl variance parameter for squared exponential kernel (default is 1).
 #' @param lambda_knl lengthscale parameter for squared exponential kernel (default is 1).
+#' @param split_time_ps whether to split on time variable in prognostic trees (default is TRUE)
+#' @param split_time_trt whether to split on time variable in treatment trees (default is FALSE)
 #'
 #' @return A fit file, which contains the draws from the model as well as parameter draws at each sweep.
 #' @export
-longBet <- function(y, x, z, t, pcat, 
+longbet <- function(y, x, z, t, pcat, 
                     num_sweeps = 60, num_burnin = 20,
-                    num_trees_pr = 50, num_trees_trt = 20,
-                    mtry = 0L, n_min = 1L,
-                    sig_knl = 1, lambda_knl = 1) {
+                    num_trees_pr = 20, num_trees_trt = 20,
+                    mtry = 0L, n_min = 10,
+                    sig_knl = 1, lambda_knl = 1,
+                    split_time_ps = TRUE, split_time_trt = FALSE) {
 
     if(!("matrix" %in% class(x))){
         cat("Msg: input x is not a matrix, try to convert type.\n")
@@ -61,11 +64,14 @@ longBet <- function(y, x, z, t, pcat,
         post_t <- sort(unique_z_sum)[2]
         t0 <- t_con[ncol(y) - post_t]
         t_mod <- sapply(t_con, function(x) max(x - t0, 0))
+        print("Adjusted treatment time:")
+        print(t_mod)
         # t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)
     } else {
         #TODO: check the logic without time axis
         t0 <- t_con[1]
         t_mod <- c(1)
+        t0 <- NULL
     }
 
     if(!("matrix" %in% class(t_con))){
@@ -137,47 +143,56 @@ longBet <- function(y, x, z, t, pcat,
     verbose = FALSE; parallel = TRUE
     set_random_seed = FALSE; random_seed = 0
     sample_weights_flag = TRUE
-    a_scaling = TRUE; b_scaling = FALSE
-    split_t_mod = TRUE; split_t_con = TRUE
-    
-    obj = longBet_cpp(y, x, x, z = z, 
-                    t_con, t_mod,
-                    num_sweeps, num_burnin,
-                    max_depth, n_min,
-                    num_cutpoints,
-                    no_split_penality,
-                    mtry, mtry,
-                    pcat, pcat,
-                    num_trees_pr,
-                    alpha_con, beta_con, tau_con,
-                    kap_con, s_con,
-                    pr_scale,
-                    num_trees_trt,
-                    alpha_mod, beta_mod, tau_mod,
-                    kap_mod, s_mod,
-                    trt_scale,
-                    verbose, parallel, set_random_seed,
-                    random_seed, sample_weights_flag,
-                    a_scaling, b_scaling,
-                    sig_knl, lambda_knl)
+    a_scaling = TRUE; b_scaling = TRUE
+
+    obj = longBet_cpp(y = y,
+                    X = x, 
+                    X_tau = x, 
+                    z = z, 
+                    t_con = t_con, 
+                    t_mod = t_mod,
+                    num_sweeps = num_sweeps, 
+                    burnin = num_burnin,
+                    max_depth = max_depth, 
+                    n_min = n_min,
+                    num_cutpoints = num_cutpoints,
+                    no_split_penality = no_split_penality,
+                    mtry_pr = mtry, 
+                    mtry_trt = mtry,
+                    p_categorical_pr = pcat, 
+                    p_categorical_trt = pcat,
+                    num_trees_pr = num_trees_pr,
+                    alpha_pr = alpha_con, 
+                    beta_pr = beta_con, 
+                    tau_pr = tau_con,
+                    kap_pr = kap_con, 
+                    s_pr = s_con,
+                    pr_scale = pr_scale,
+                    num_trees_trt = num_trees_trt,
+                    alpha_trt = alpha_mod, 
+                    beta_trt = beta_mod,
+                    tau_trt = tau_mod,
+                    kap_trt = kap_mod, 
+                    s_trt = s_mod,
+                    trt_scale = trt_scale,
+                    verbose = verbose, 
+                    parallel = parallel, 
+                    set_random_seed = set_random_seed,
+                    random_seed = random_seed, 
+                    sample_weights_flag = sample_weights_flag,
+                    a_scaling = a_scaling, 
+                    b_scaling = b_scaling,
+                    split_time_ps = split_time_ps, 
+                    split_time_trt = split_time_trt,
+                    sig_knl = sig_knl, 
+                    lambda_knl = lambda_knl)
     class(obj) = "longBet"
 
     obj$t0 = t0
     obj$sdy = sdy
     obj$meany = meany
-    obj$tauhats = obj$tauhats * sdy
-    obj$muhats = obj$muhats * sdy
 
-    obj$tauhats.adjusted <- array(NA, dim = c(nrow(y), ncol(y), num_sweeps - num_burnin))
-    obj$muhats.adjusted <- array(NA, dim = c(nrow(y), ncol(y), num_sweeps - num_burnin))
-    seq <- (num_burnin+1):num_sweeps
-    for (i in seq) {
-        obj$tauhats.adjusted[,, i - num_burnin] = matrix(obj$tauhats[,i], nrow(y), ncol(y)) * (obj$b_draws[i,2] - obj$b_draws[i,1])
-        obj$tauhats.adjusted[,,i - num_burnin] = obj$tauhats.adjusted[,,i - num_burnin] * t(matrix(rep(obj$beta_draws[,i], nrow(y)), ncol(y), nrow(y)))
-        obj$muhats.adjusted[,, i - num_burnin] = matrix(obj$muhats[,i], nrow(y), ncol(y)) * (obj$a_draws[i]) + meany
-    }
-    # TODO: make muhats.adjusted = mu + b0*tau
-    
-    obj$beta_draws = obj$beta_draws[, (num_burnin+1):num_sweeps]
+    # obj$beta_draws = obj$beta_draws[, (num_burnin+1):num_sweeps]
+
     return(obj)
 }

@@ -280,3 +280,23 @@ int get_index(std::vector<double> v, double K)
     }
     return ind;
 }
+
+void cov_kernel(std::vector<double> &t1, std::vector<double> &t2, double &sig_knl, double &lambda_knl, matrix<double> &cov_kernel)
+{
+        double sigma2 = pow(sig_knl, 2);
+        double lambda2 = pow(lambda_knl, 2);
+
+        size_t size1 = t1.size();
+        size_t size2 = t2.size();
+
+        ini_matrix(cov_kernel, size2, size1);
+        double diag = squared_exponential(t1[0], t1[0], sigma2, lambda2);
+
+        for (size_t i = 0; i < size1; i++){
+            // calculate diagonal element
+            for (size_t j = 0; j < size2; j++){
+                cov_kernel[i][j] = squared_exponential(t1[i], t2[j], sigma2, lambda2);
+            } 
+        }
+        // std::cout << "cov_kernel = " << cov_kernel << endl;
+}

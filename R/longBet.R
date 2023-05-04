@@ -68,6 +68,8 @@ longbet <- function(y, x, z, t, pcat,
         print(t_mod)
         # t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)
     } else {
+        #TODO: check the logic without time axis
+        t0 <- t_con[1]
         t_mod <- c(1)
         t0 <- NULL
     }
@@ -191,5 +193,6 @@ longbet <- function(y, x, z, t, pcat,
     obj$meany = meany
 
     # obj$beta_draws = obj$beta_draws[, (num_burnin+1):num_sweeps]
+
     return(obj)
 }

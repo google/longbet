@@ -36,3 +36,10 @@ ate <- te %>% colMeans
 print(paste0("longBet CATE RMSE: ", sqrt(mean((as.vector(longbet.cate$cate[, t0:t1]) - as.vector(te[,t0:t1]))^2))))
 print(paste0("longBet ATE RMSE: ", sqrt(mean((as.vector(longbet.ate$ate[t0:t1]) - as.vector(ate[t0:t1]))^2))))
 print(paste0("longBet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
+
+# pred <- predict.longBet(longbet.fit, x, 1:t1)
+# print("pred taudraws = ")
+# pred_longBet <- apply(pred$taudraws, c(1, 2), mean)
+# print(pred_longBet[1:5, t0:t1])
+# print("tau_longBet = ")
+# print(tau_longBet[1:5, t0:t1])

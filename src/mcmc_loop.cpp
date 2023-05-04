@@ -2,6 +2,7 @@
 #include <memory>
 #include <ostream>
 #include "split_info.h"
+
 // BCF main loop
 // input includes information about two sets of trees 
 // (one for prognostic term, the other for treatment term)
@@ -17,6 +18,10 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
                     matrix<double> &a_xinfo,
                     matrix<double> &beta_info,
                     matrix<double> &beta_xinfo,
+                    matrix<double> &time_beta,
+                    matrix<double> &time_residuals,
+                    matrix<double> &time_diag_A,
+                    matrix<double> &time_diag_Sig,
                     vector<vector<tree>> &trees_ps,
                     vector<vector<tree>> &trees_trt,
                     double no_split_penality,
@@ -169,7 +174,7 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
 
     model_ps->update_time_coef(state, x_struct_trt, torder_tau_std, 
       resid_info[sweeps], A_diag_info[sweeps], Sig_diag_info[sweeps], beta_info[sweeps]); 
-
+    
     std::copy(state->beta_t.begin(), state->beta_t.end(),
     beta_xinfo[sweeps].begin());
     // store draws for b0, b1 and a, although they are updated per tree, we save results per forest (sweep)

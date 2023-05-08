@@ -32,7 +32,7 @@ longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
 longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
 t_longbet <- proc.time() - t_longbet
 
-ate <- te %>% colMeans
+ate <- colMeans(te)
 print(paste0("longBet CATE RMSE: ", sqrt(mean((as.vector(longbet.cate$cate[, t0:t1]) - as.vector(te[,t0:t1]))^2))))
 print(paste0("longBet ATE RMSE: ", sqrt(mean((as.vector(longbet.ate$ate[t0:t1]) - as.vector(ate[t0:t1]))^2))))
 print(paste0("longBet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))

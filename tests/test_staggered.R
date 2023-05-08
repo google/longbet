@@ -1,7 +1,7 @@
 # simple demonstration of longbet with default parameters
 library(dbarts)
 library(dplyr)
-library(ggplot1)
+library(ggplot2)
 library(tidyr)
 library(longBet)
 # DATA GENERATION PROCESS -------------------------------------------------

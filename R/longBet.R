@@ -60,6 +60,26 @@ longbet <- function(y, x, z, t, pcat,
         t_con = t
     }
 
+    # get post-treatment time matrix
+    get_trt_time <- function(z_vec, t){
+        treated_period <- which(z_vec == 1)
+        if (length(treated_period) == 0){
+            # no treated period
+            return(rep(0, length(z_vec)))
+        } else {
+            if (treated_period[1] == 1){
+                # case: no untreated period for this unit
+                # assuming last untreated time point is lag 1
+                t0 <- t[1] - 1
+            } else {
+                t0 <- t[treated_period[1] - 1]
+            }
+            trt_time <- sapply(t, function(x, t0) max(0, x - t0), t0 = t0)
+            return(trt_time)
+        }
+    }
+    post_trt_time <- t(apply(z, 1, get_trt_time, t = t))
+
     if (ncol(y) > 1) {
         post_t <- sort(unique_z_sum)[2]
         t0 <- t_con[ncol(y) - post_t]
@@ -68,8 +88,6 @@ longbet <- function(y, x, z, t, pcat,
         print(t_mod)
         # t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)
     } else {
-        #TODO: check the logic without time axis
-        t0 <- t_con[1]
         t_mod <- c(1)
         t0 <- NULL
     }
@@ -151,6 +169,7 @@ longbet <- function(y, x, z, t, pcat,
                     z = z, 
                     t_con = t_con, 
                     t_mod = t_mod,
+                    post_t = post_trt_time,
                     num_sweeps = num_sweeps, 
                     burnin = num_burnin,
                     max_depth = max_depth, 
@@ -193,6 +212,5 @@ longbet <- function(y, x, z, t, pcat,
     obj$meany = meany
 
     # obj$beta_draws = obj$beta_draws[, (num_burnin+1):num_sweeps]
-
     return(obj)
 }

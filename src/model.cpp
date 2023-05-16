@@ -391,7 +391,7 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   matrix<size_t> &torder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig, std::vector<double> &beta)
 {  
   // get total number of time
-  size_t t_size = x_struct->t_values.size();
+  double t_size = x_struct->t_values.size();
   double n = state->n_y;  // n obs per period. TODO: need update
   std::vector<double> res_ctrl(t_size, 0);  // residuals
   std::vector<double> res_trt(t_size, 0);
@@ -404,6 +404,7 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   double sig02 = pow(state->sigma_vec[0], 2);
   double sig12 = pow(state->sigma_vec[1], 2);
   // vec sig(t_size, fill::zeros);
+
 
   std::vector<size_t> idx(state->p_y);  // keep track of t-values
   size_t t_idx;
@@ -450,30 +451,19 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   // Sigma0 = A*cov_kernel*A'
   // Sigma = diag(sig)
   // mu = var * (Sigma0^-1 * mu0 + res)
-
-  // transform vector form
-
-  arma::mat res(t_size, 1);
-  vec sig(t_size, fill::zeros);
-  for (size_t i = 0; i < t_size; i++){
-    res(i, 0) = time_residuals[i];
-    sig(i) = 1 / time_diag_Sig[i];
-  }
-
   arma::mat Sigma0(t_size, t_size);
   // arma::mat Sigma_inv(t_size, t_size);
   arma::mat Sigma_inv = diagmat(conv_to<mat>::from(sig));
-  
   for (size_t i = 0; i < t_size; i++){
     for (size_t j = 0; j < t_size; j++){
-      Sigma0(i, j) = time_diag_A[i] * x_struct->cov_kernel[i][j] * time_diag_A[j];
+      Sigma0(i, j) = diag[i] * x_struct->cov_kernel[i][j] * diag[j];
     }
     Sigma_inv(i, i) = 1 / sig[i];
   }
 
-  arma::mat Sigma0_inv = inv_sympd(Sigma0);
+  arma::mat Sigma0_inv = pinv(Sigma0);
   arma::mat var_inv = Sigma0_inv + Sigma_inv;
-  arma::mat var = inv_sympd(var_inv);
+  arma::mat var = pinv(var_inv);
 
   arma::mat U, V;
   arma::vec s;

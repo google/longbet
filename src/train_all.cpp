@@ -36,7 +36,7 @@ using namespace chrono;
 // [[Rcpp::plugins(cpp11)]]
 // [[Rcpp::export]]
 Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
-                    arma::mat t_con, arma::mat t_mod,
+                    arma::mat t_con, arma::mat t_mod, arma::mat post_t,
                     size_t num_sweeps, size_t burnin = 1,
                     size_t max_depth = 1, size_t n_min = 5,
                     size_t num_cutpoints = 1,

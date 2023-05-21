@@ -134,12 +134,14 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix X_tau_std(N, p_trt);
     Rcpp::NumericMatrix tcon_std(t_con.n_rows, t_con.n_cols);
     Rcpp::NumericMatrix tmod_std(t_mod.n_rows, t_mod.n_cols);
+    Rcpp::NumericMatrix post_t_std(N, p_y);
 
     arma_to_rcpp(X, X_std);
     arma_to_rcpp(y, y_std);
     arma_to_rcpp(z, z_std);
     arma_to_rcpp(t_con, tcon_std);
     arma_to_rcpp(t_mod, tmod_std);
+    arma_to_rcpp(post_t, post_t_std);
     arma_to_std_ordered(X, Xorder_std);
     arma_to_std_ordered(t_con, torder_mu_std);
     arma_to_std_ordered(t_mod, torder_tau_std);
@@ -180,6 +182,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     double *zpointer = &z_std[0];
     double *tpointer_mu = &tcon_std[0];
     double *tpointer_tau = &tmod_std[0];
+    double *post_t_pointer = &post_t_std[0];
     // double *Xtestpointer = &Xtest_std[0];
 
     std::vector<matrix<double>> tauhats_xinfo(num_sweeps);

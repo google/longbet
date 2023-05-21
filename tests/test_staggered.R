@@ -86,14 +86,17 @@ ytrain <- y[, 1:t1]
 ztrain <- z_mat
 xtrain <- x
 
-# longbet -----------------------------------------------------------------
-t_longbet <- proc.time()
-longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
-                       num_sweeps = 60,
-                       num_trees_pr =  20, num_trees_trt = 20,
-                       pcat = ncol(x) - 3)
+post_trt_time <- t(apply(ztrain, 1, get_post_trt_time, t = 1:t1))
 
-longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
+
+# longbet -----------------------------------------------------------------
+# t_longbet <- proc.time()
+# longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
+#                        num_sweeps = 60,
+#                        num_trees_pr =  20, num_trees_trt = 20,
+#                        pcat = ncol(x) - 3)
+# 
+# longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
 
 
 # mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
@@ -104,103 +107,3 @@ longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
 # ate_longbet_fit <- apply(longbet.pred$tauhats, c(2, 3), mean)[t0:t1, ]
 # ate <- tau_mat %>% colMeans
 # ate_longbet <- ate_longbet_fit %>% rowMeans
-
-longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
-longbet.att <- get_att(longbet.pred, z = ztrain, alpha = 0.05)
-longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
-
-print(paste0("longbet CATE RMSE in-sample: ", sqrt(mean((as.vector(longbet.cate$cate[,t0:t1]) - as.vector(tau_mat[, t0:t1]))^2))))
-print(paste0("longbet CATE RMSE extrapolate: ", sqrt(mean((as.vector(longbet.cate$cate[,(t1 + 1):t1]) - as.vector(tau_mat[, (t1 + 1):t1]))^2))))
-
-ate <- tau_mat %>% colMeans
-print(paste0("longbet ATE RMSE in-sample: ", round( sqrt(mean((longbet.ate$ate[t0:t1] - ate[t0:t1])^2)), 2)))
-print(paste0("longbet ATE RMSE extrapolate: ", round( sqrt(mean((longbet.ate$ate[(t1 + 1):t1] - ate[(t1 + 1):t1])^2)), 2)))
-
-print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
-
-# visualize ---------------------------------------------------------------
-colors <- c("black", "#FFA500", "#00BFFF")
-labels <- c("True", "LongBet", "BART")
-names(colors) <- labels
-# ATE
-ate_df <- data.frame(
-  time = t0:t1,
-  true = ate[t0:t1],
-  longbet = longbet.ate$ate[t0:t1],
-  lower = longbet.ate$interval[1, t0:t1],
-  upper = longbet.ate$interval[2, t0:t1]
-)
-
-ate_plot <- 
-  ggplot(ate_df , aes(x = time, y = true)) +
-  geom_line(aes(y = true, color = "True")) +
-  geom_line(aes(y = longbet, color = "LongBet")) +
-  geom_ribbon(aes(ymin = lower, ymax = upper, fill = "LongBet"), alpha = 0.15, fill = colors[2]) +
-  geom_vline(xintercept = t1, linetype = "dashed", color = "grey") +
-  labs(x = "Time", y = "ATE", color = "Legend") +
-  scale_color_manual(name = "Legend", values = colors, labels = labels)
-print(ate_plot)
-readline(prompt="Press [enter] to continue")
-
-# CATE
-cate_df <- data.frame(
-  true = as.vector(t(tau_mat[, t0:t1])),
-  lonbet = as.vector(t(longbet.cate$cate[, t0:t1])),
-  time = rep(c(t0:t1), nrow(tau_mat)),
-  id = as.vector(sapply(1:n, rep, (t1 - t0 + 1)))
-)
-
-cate_plot <- cate_df %>%
-  gather("method", "cate", -time, -id) %>%
-  ggplot() +
-  geom_line(aes(time, cate, group = id, color = id)) +
-  geom_vline(xintercept = t1, linetype = "dashed", color = "grey") +
-  facet_wrap(~method, ncol = 1)
-print(cate_plot)
-
-# analyse tauhat ----------------------------------------------------------
-# library(reshape2)
-# beta_draws = as.data.frame(t(longbet.pred$beta_draws))
-# beta_draws$trial = rownames(beta_draws)
-# mdat = melt(beta_draws, id.vars="trial")
-# mdat$time = as.numeric(gsub("V", "", mdat$variable))
-# 
-# beta_draws_plot = ggplot(mdat, aes(x=time, y=value, group=trial)) +
-#   theme_bw() +
-#   theme(panel.grid=element_blank()) +
-#   geom_line(linewidth=0.5, alpha=0.5)
-# plot(beta_draws_plot)
-# 
-# # per sweep
-# tauhat <- longbet.pred$tauhats
-# tau_draws = as.data.frame(matrix(tauhat[,100], n,t1))
-# tau_draws$trial = rownames(tau_draws)
-# mdat = melt(tau_draws, id.vars="trial")
-# mdat$time = as.numeric(gsub("V", "", mdat$variable))
-# 
-# tau_draws_plot = ggplot(mdat, aes(x=time, y=value, group=trial)) +
-#   theme_bw() +
-#   theme(panel.grid=element_blank()) +
-#   geom_line(linewidth=0.5, alpha=0.5) + 
-#   labs(y = "Tauhat", title = "Tauhats at 100 sweep")
-# plot(tau_draws_plot)
-# 
-# num_sweeps <- longbet.fit$model_params$num_sweeps 
-# tau_draws <- matrix(NA, num_sweeps, t1)
-# for (i in 1:num_sweeps){
-#   temp <- matrix(tauhat[,i], n, t1)
-#   tau_draws[i, ] <- temp[1,]
-# }
-# tau_draws = as.data.frame(tau_draws)
-# tau_draws$trial = rownames(tau_draws)
-# mdat = melt(tau_draws, id.vars="trial")
-# mdat$time = as.numeric(gsub("V", "", mdat$variable))
-# 
-# tau_draws_plot = ggplot(mdat, aes(x=time, y=value, group=trial)) +
-#   theme_bw() +
-#   theme(panel.grid=element_blank()) +
-#   geom_line(linewidth=0.5, alpha=0.5) + 
-#   labs(y = "Tauhat", title = "Tauhats of 1 obs across sweeps")
-# plot(tau_draws_plot)
-
-

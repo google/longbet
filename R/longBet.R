@@ -214,3 +214,22 @@ longbet <- function(y, x, z, t, pcat,
     # obj$beta_draws = obj$beta_draws[, (num_burnin+1):num_sweeps]
     return(obj)
 }
+
+
+get_post_trt_time <- function(z_vec, t){
+    treated_period <- which(z_vec == 1)
+    if (length(treated_period) == 0){
+        # no treated period
+        return(rep(0, length(z_vec)))
+    } else {
+        if (treated_period[1] == 1){
+            # case: no untreated period for this unit
+            # assuming last untreated time point is lag 1
+            t0 <- t[1] - 1
+        } else {
+            t0 <- t[treated_period[1] - 1]
+        }
+        trt_time <- sapply(t, function(x, t0) max(0, x - t0), t0 = t0)
+        return(trt_time)
+    }
+}

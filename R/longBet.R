@@ -80,6 +80,9 @@ longbet <- function(y, x, z, t, pcat,
     }
     post_trt_time <- t(apply(z, 1, get_trt_time, t = t))
 
+
+    trt_time <- matrix(apply(z, 1, function(x) sum(x == 0)), nrow(z), 1)
+
     if (ncol(y) > 1) {
         post_t <- sort(unique_z_sum)[2]
         t0 <- t_con[ncol(y) - post_t]
@@ -170,6 +173,7 @@ longbet <- function(y, x, z, t, pcat,
                     t_con = t_con, 
                     t_mod = t_mod,
                     post_t = post_trt_time,
+                    trt_time = trt_time,
                     num_sweeps = num_sweeps, 
                     burnin = num_burnin,
                     max_depth = max_depth, 

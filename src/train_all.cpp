@@ -36,7 +36,7 @@ using namespace chrono;
 // [[Rcpp::plugins(cpp11)]]
 // [[Rcpp::export]]
 Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
-                    arma::mat t_con, arma::mat t_mod, arma::mat post_t,
+                    arma::mat t_con, arma::mat t_mod, arma::mat post_t, arma::mat trt_time,
                     size_t num_sweeps, size_t burnin = 1,
                     size_t max_depth = 1, size_t n_min = 5,
                     size_t num_cutpoints = 1,
@@ -135,6 +135,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix tcon_std(t_con.n_rows, t_con.n_cols);
     Rcpp::NumericMatrix tmod_std(t_mod.n_rows, t_mod.n_cols);
     Rcpp::NumericMatrix post_t_std(N, p_y);
+    Rcpp::NumericMatrix trt_time_std(N, 1);
 
     arma_to_rcpp(X, X_std);
     arma_to_rcpp(y, y_std);
@@ -142,6 +143,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     arma_to_rcpp(t_con, tcon_std);
     arma_to_rcpp(t_mod, tmod_std);
     arma_to_rcpp(post_t, post_t_std);
+    arma_to_rcpp(trt_time, trt_time_std);
     arma_to_std_ordered(X, Xorder_std);
     arma_to_std_ordered(t_con, torder_mu_std);
     arma_to_std_ordered(t_mod, torder_tau_std);

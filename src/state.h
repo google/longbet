@@ -57,6 +57,7 @@ public:
     const double *y_std;  // pointer to y data
     const double *z;            // the scaled treatment vector            TODO: move to xbcfState
     const double *trt_time;
+    size_t beta_size;
     
     std::vector<size_t> n_trt;                     // the number of treated individuals      TODO: check if it's used anywhere after restructuring
     matrix<double> mu_fit;       // total mu_fit                           TODO: move to xbcfState
@@ -273,6 +274,12 @@ class longBetState : public State
 
         ini_matrix(this->mu_fit, p_y, N);
         ini_matrix(this->tau_fit, p_y, N);
+
+        size_t min_trt_time = p_y;
+        for (size_t i = 0; i < N; i++){
+            if(*(trt_time + i) < min_trt_time) {min_trt_time = *(trt_time + i);}
+        }
+        beta_size = p_y - min_trt_time + 1;
         this->beta_t = std::vector<double>(p_y, 1);
 
         // those are for XBCF, initialize at a length 1 vector

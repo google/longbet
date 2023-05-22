@@ -547,7 +547,7 @@ const size_t &tree_ind, bool control_split_t)
     size_t ind;
     size_t split_var;
     size_t split_point;
-    // cout << "grow_from_root" << ", N_x = " << N_Xorder << ", N_t" << N_torder << ", p = " << p << endl;
+    // cout << "grow_from_root" << ", N_x = " << N_Xorder << ", N_t " << N_torder << ", p = " << p << endl;
 
     this->N = N_Xorder;
 

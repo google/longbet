@@ -27,7 +27,7 @@ z_mat <- cbind(matrix(0, n, (t0 - 1)),  matrix(rep(z, t1 - t0 + 1), n, t1 - t0 +
 t_longbet <- proc.time()
 longbet.fit <- longbet(y = y, x = x, z = z_mat, t = 1:t1, pcat = 1,
 num_trees_pr =  50, num_trees_trt = 50)
-longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
+longbet.pred <- predict.longBet(longbet.fit, x, z_mat)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
 longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
 t_longbet <- proc.time() - t_longbet

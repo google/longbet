@@ -2,12 +2,12 @@
 #'
 #' @param model A trained longbet model.
 #' @param x An input matrix for size n by p1. Column order matters: continuos features should all bgo before of categorical.
-#' @param t time variable (post-treatment time for treatment term will be infered based on input t and z).
+#' @param z n by p_y treatment matrix indicating whether each unit get treated at each step, should match the training period
 #' @param gp bool, predict time coefficient beta using gaussian process
 #'
 #' @return A matrix for predicted prognostic effect and a matrix for predicted treatment effect. 
 #' @export
-predict.longBet <- function(model, x, t, sigma = NULL, lambda = NULL, ...) {
+predict.longBet <- function(model, x, z, sigma = NULL, lambda = NULL, ...) {
 
     print(dim(x))
     if(!("matrix" %in% class(x))) {
@@ -21,7 +21,13 @@ predict.longBet <- function(model, x, t, sigma = NULL, lambda = NULL, ...) {
         ' columns; trying to predict on x with ', ncol(x),' columns.'))
     }
 
-    t_con <- as.matrix(t)
+    if(!("matrix" %in% class(z))) {
+        cat("Msg: input z is not a matrix, try to convert type.\n")
+        z = as.matrix(z)
+    }
+
+    t_con <- as.matrix(1:ncol(z))
+    # t_mod <- as.matrix(rep(0, ncol(z)))
     t_mod <- as.matrix(sapply(t_con, function(x) max(x - model$t0, 0)))
     # print("Adjusted treatment time to predict:")
     # print(t_mod)
@@ -30,17 +36,25 @@ predict.longBet <- function(model, x, t, sigma = NULL, lambda = NULL, ...) {
 
     obj_tau = .Call(`_longBet_predict`, x, t_mod, model$model_list$tree_pnt_trt)
 
+    # Match post treatment periods
+    n <- nrow(z)
+    p <- ncol(z)
 
-    # print("t_values") 
-    # print(model$gp_info$t_values)
+    num_sweeps <- ncol(model$tauhats)
+    num_burnin <- model$model_params$burnin
 
-    # Match t_mod and t_values
-    idx <- match(t_mod, model$gp_info$t_values)
+    if(num_burnin >= num_sweeps) {
+        stop(paste0('burnin (',num_burnin,') cannot exceed or match the total number of sweeps (',num_sweeps,')'))
+    }
 
-    beta <- matrix(model$beta_values[idx, ], length(idx), ncol(model$beta_values))
-    t_mod_new <- as.matrix(t_mod[which(is.na(idx))])
-    if (length(t_mod_new) > 0) 
-    {
+
+    post_trt <- t(apply(z, 1, cumsum)) + 1
+    beta_preds <- array(NA, dim = c(n, p, num_sweeps))
+
+    max_post_trt <- max(post_trt)
+    if (max_post_trt > nrow(longbet.fit$beta_draws)){
+        # predict beta
+        stop("TODO: update extrapolation code for staggered adoption, \n")
         if (is.null(sigma)) { 
             if (nrow(model$beta_draws) > t0 + 1){
                 # if the training has more than 1 treatment period
@@ -51,21 +65,15 @@ predict.longBet <- function(model, x, t, sigma = NULL, lambda = NULL, ...) {
         }
         if (is.null(lambda)) { lambda = (nrow(model$beta_draws) - t0) / 2}
         print(paste("predict beta with GP, sigma = ", sigma, ", lambda = ", lambda, sep = ""))
-        obj_beta = .Call(`_longBet_predict_beta`, t_mod_new, 
-            model$gp_info$t_values, model$gp_info$resid, model$gp_info$A_diag, model$gp_info$Sig_diag,
-            sigma, lambda)
-        beta[is.na(idx), ] <- obj_beta$beta
+
+        # obj_beta = .Call(`_longBet_predict_beta`, as.matrix(nrow(model$beta_draws)), 
+        #     model$gp_info$t_values, model$gp_info$resid, model$gp_info$A_diag, model$gp_info$Sig_diag,
+        #     sigma, lambda)
+        # beta[is.na(idx), ] <- obj_beta$beta
     }
-
-    num_sweeps <- ncol(model$tauhats)
-    num_burnin <- model$model_params$burnin
-
-    if(num_burnin >= num_sweeps) {
-        stop(paste0('burnin (',num_burnin,') cannot exceed or match the total number of sweeps (',num_sweeps,')'))
+    for (i in 1:num_sweeps){
+        beta_preds[,,i] <- t(apply(post_trt, 1, function(x, beta) beta[x], beta = model$beta_draws[,i]))
     }
-
-    n <- nrow(x)
-    p <- length(t)
 
     obj_mu$preds <- obj_mu$preds * model$sdy
     obj_tau$preds <- obj_tau$preds * model$sdy
@@ -73,16 +81,15 @@ predict.longBet <- function(model, x, t, sigma = NULL, lambda = NULL, ...) {
 
     obj <- list()
     class(obj) = "longBet.pred"
-
     
     obj$muhats <- array(NA, dim = c(n, p, num_sweeps - num_burnin))
     obj$tauhats <- array(NA, dim = c(n, p, num_sweeps - num_burnin))
     seq <- (num_burnin+1):num_sweeps
     for (i in seq) {
-        obj$muhats[,, i - num_burnin] = matrix(obj_mu$preds[,i], n, p) * (model$a_draws[i]) + model$meany +  matrix(obj_tau$preds[,i], n, p) *  model$b_draws[i,1] * t(matrix(rep(beta[, i], n), p, n))
-        obj$tauhats[,, i - num_burnin] = matrix(obj_tau$preds[,i], n, p) * (model$b_draws[i,2] - model$b_draws[i,1]) * t(matrix(rep(beta[, i], n), p, n))
+        obj$muhats[,, i - num_burnin] = matrix(obj_mu$preds[,i], n, p) * (model$a_draws[i]) + model$meany +  matrix(obj_tau$preds[,i], n, p) *  model$b_draws[i,1] * beta_preds[,,i]
+        obj$tauhats[,, i - num_burnin] = matrix(obj_tau$preds[,i], n, p) * (model$b_draws[i,2] - model$b_draws[i,1]) * beta_preds[,,i]
     }
-    
+    obj$beta_preds <- beta_preds
     # obj$beta_draws = beta
     return(obj)
 }

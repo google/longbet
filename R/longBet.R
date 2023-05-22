@@ -162,7 +162,7 @@ longbet <- function(y, x, z, t, pcat,
     kap_mod = 16; s_mod = 4
     trt_scale = FALSE
     verbose = FALSE; parallel = TRUE
-    set_random_seed = FALSE; random_seed = 0
+    set_random_seed = TRUE; random_seed = 0
     sample_weights_flag = TRUE
     a_scaling = TRUE; b_scaling = TRUE
 

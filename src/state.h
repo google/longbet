@@ -56,6 +56,7 @@ public:
     const double *X_std;  // pointer to original data
     const double *y_std;  // pointer to y data
     const double *z;            // the scaled treatment vector            TODO: move to xbcfState
+    const double *trt_time;
     
     std::vector<size_t> n_trt;                     // the number of treated individuals      TODO: check if it's used anywhere after restructuring
     matrix<double> mu_fit;       // total mu_fit                           TODO: move to xbcfState
@@ -251,7 +252,7 @@ class longBetState : public State
     size_t n_min, size_t n_cutpoints, bool parallel, size_t mtry_pr,
     size_t mtry_trt, const double *X_std, size_t num_sweeps,
     bool sample_weights_flag, const double *y_std,
-    const double *z,
+    const double *z, const double *trt_time,
     std::vector<double> sigma_vec, std::vector<double> b_vec, size_t max_depth,
     double ini_var_yhat, size_t burnin, size_t dim_suffstat) :
     State(Xpointer, Xorder_std, N, p, p_tau, p_y, num_trees_vec,
@@ -265,6 +266,7 @@ class longBetState : public State
         this->n_trt = n_trt;
         this->num_trees_vec = num_trees_vec;
         this->z = z;
+        this->trt_time = trt_time;
         this->a = 1;  // initialize a at 1 for now
 
         this->dim_suffstat = dim_suffstat;

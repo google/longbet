@@ -185,6 +185,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     double *tpointer_mu = &tcon_std[0];
     double *tpointer_tau = &tmod_std[0];
     double *post_t_pointer = &post_t_std[0];
+    double *trt_time_pointer = &trt_time_std[0];
     // double *Xtestpointer = &Xtest_std[0];
 
     std::vector<matrix<double>> tauhats_xinfo(num_sweeps);
@@ -239,7 +240,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     n_trt, p_pr, p_trt, p_y, num_trees, p_categorical_pr, p_categorical_trt,
     p_continuous_pr, p_continuous_trt, set_random_seed, random_seed, n_min,
     num_cutpoints, parallel, mtry_pr, mtry_trt, Xpointer, num_sweeps,
-    sample_weights_flag, ypointer, zpointer, sigma_vec, b_vec, max_depth, y_mean,
+    sample_weights_flag, ypointer, zpointer, trt_time_pointer, sigma_vec, b_vec, max_depth, y_mean,
     burnin, model_trt->dim_suffstat));
 
     // initialize X_struct for the prognostic term

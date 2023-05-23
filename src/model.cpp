@@ -419,61 +419,28 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   // }
 
   std::vector<size_t> t_counts(t_size, 0);
-  for (size_t i = 0; i < t_size; i++)
-  {
-    for (size_t j = 0; j < x_struct->t_counts[i]; j++)
-    {
-      t_idx = torder_std[0][counts];
-      counts++;
-      idx[t_idx] = i;
-      z_pointer = state->z + state->n_y * t_idx;
-      y_pointer = state->y_std + state->n_y * t_idx;
-      for (size_t k = 0; k < state->n_y; k++)
-      {
-        if (*(z_pointer + k) == 0)
-        {
-          res_ctrl[0] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
-          diag_ctrl[0] += state->tau_fit[k][t_idx];
-          sig[0] += sig02;
-          t_counts[0] += 1;
-        } else {
-          res_trt[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
-          diag_trt[i] += state->tau_fit[k][t_idx];
-          sig[i] += sig12;
-          t_counts[i] += 1;
-        }
+
+  for (size_t i = 0; i < state->n_y; i++){
+    for (size_t j = 0; j < state->p_y; j++){
+      s = j - *(state->trt_time + i) + 1 > 0 ? j - *(state->trt_time + i) + 1: 0; 
+      t_counts[s] += 1;
+      if (*(state->z + state->n_y * j + i) == 0){
+        res_ctrl[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
+        diag_ctrl[s] += state->tau_fit[i][j];
+        sig[s] += sig02;
+      } else {
+        res_trt[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
+        diag_trt[s] += state->tau_fit[i][j];
+        sig[s] += sig12;
       }
     }
   }
+
   for (size_t i = 0; i < t_size; i++){
     resid[i] = (res_trt[i] + res_ctrl[i]) / t_counts[i];
     diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/ t_counts[i];
     sig[i] = sig[i] / pow(t_counts[i], 2) ;
   }
-  
-  // std::vector<size_t> t_counts(t_size, 0);
-
-  // for (size_t i = 0; i < state->n_y; i++){
-  //   for (size_t j = 0; j < state->p_y; j++){
-  //     s = j - *(state->trt_time + i) + 1 > 0 ? j - *(state->trt_time + i) + 1: 0; 
-  //     t_counts[s] += 1;
-  //     if (*(state->z + state->n_y + j + i) == 0){
-  //       res_ctrl[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
-  //       diag_ctrl[s] += state->tau_fit[i][j];
-  //       sig[s] += sig02;
-  //     } else {
-  //       res_trt[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
-  //       diag_trt[s] += state->tau_fit[i][j];
-  //       sig[s] += sig12;
-  //     }
-  //   }
-  // }
-
-  // for (size_t i = 0; i < t_size; i++){
-  //   resid[i] = (res_trt[i] + res_ctrl[i]) / t_counts[i];
-  //   diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i]) / t_counts[i];
-  //   sig[i] = sig[i] / pow(t_counts[i], 2);
-  // }
 
   // solve by var = (Sigma0^-1 + Sigma^-1)^-1
   // Sigma0 = A*cov_kernel*A'

@@ -155,20 +155,20 @@ print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
 #   
 # 
 # # CATE
-#   cate_df <- data.frame(
-#     true = as.vector(t(tau_mat)),
-#     lonbet = as.vector(t(tau_longbet)),
-#     bart = as.vector(t(tau_bart)),
-#     time = rep(c(t0:t1), nrow(tau_mat)),
-#     id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
-#   )
-#   
-#   cate_df %>%
-#     gather("method", "cate", -time, -id) %>%
-#     ggplot() +
-#     geom_line(aes(time, cate, group = id, color = id)) +
-#     facet_wrap(~method)
-#   
+  cate_df <- data.frame(
+    true = as.vector(t(tau_mat)),
+    lonbet = as.vector(t(tau_longbet)),
+    bart = as.vector(t(tau_bart)),
+    time = rep(c(t0:t1), nrow(tau_mat)),
+    id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
+  )
+
+  cate_df %>%
+    gather("method", "cate", -time, -id) %>%
+    ggplot() +
+    geom_line(aes(time, cate, group = id, color = id)) +
+    facet_wrap(~method)
+
 # # CATE error
 #   cate_error <- data.frame(
 #     lonbet = as.vector(t(tau_longbet - tau_mat)),

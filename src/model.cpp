@@ -57,9 +57,10 @@ void longBetModel::incSuffStat(std::unique_ptr<State> &state,
 size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
 {
   double gp = *(state->z + index_next_t * state->n_y + index_next_obs);
+  size_t s = index_next_t - *(state->trt_time + index_next_obs) + 1 > 0 ? index_next_t - *(state->trt_time + index_next_obs) + 1 : 0;
   double resid = *(state->y_std + state->n_y * index_next_t + index_next_obs) -
   state->a * state->mu_fit[index_next_obs][index_next_t] - state->b_vec[gp] *
-  state->beta_t[index_next_t] * state->tau_fit[index_next_obs][index_next_t];
+  state->beta_t[s] * state->tau_fit[index_next_obs][index_next_t];
 
   if (state->fl == 0)  // suff stat for prognostic trees
   {
@@ -85,11 +86,11 @@ size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
     if (gp == 1)
     {
       // beta_t^2 * r / b / beta_t = beta_t * r / b
-      suffstats[1] += state->beta_t[index_next_t] * resid / state->b_vec[1];
-      suffstats[3] += pow(state->beta_t[index_next_t], 2);
+      suffstats[1] += state->beta_t[s] * resid / state->b_vec[1];
+      suffstats[3] += pow(state->beta_t[s], 2);
     } else {
-      suffstats[0] += state->beta_t[index_next_t] * resid / state->b_vec[0];
-      suffstats[2] += pow(state->beta_t[index_next_t], 2);
+      suffstats[0] += state->beta_t[s] * resid / state->b_vec[0];
+      suffstats[2] += pow(state->beta_t[s], 2);
     }
   }
 
@@ -308,21 +309,23 @@ void longBetModel::update_a_value(std::unique_ptr<State> &state)
   double muressum_trt = 0;
   double s0 = pow(state->sigma_vec[0], 2);
   double s1 = pow(state->sigma_vec[1], 2);
+  size_t s = 0;
 
   // compute the residual y-b*beta_t*tau(x)
   for (size_t i = 0; i < state->n_y; i++)
   {
     for (size_t j = 0; j < state->p_y; j++){
+      s = j - *(state->trt_time + i) + 1 > 0 ? j - *(state->trt_time + i) + 1: 0;
       if ((*(state->z + j * state->n_y + i)) == 1)
       {
         state->residual[i][j] = *(state->y_std + state->n_y * j + i) -
-        state->b_vec[1] * state->beta_t[j] * state->tau_fit[i][j];
+        state->b_vec[1] * state->beta_t[s] * state->tau_fit[i][j];
 
         mu2sum_trt += state->mu_fit[i][j] * state->mu_fit[i][j];
         muressum_trt += state->mu_fit[i][j] * state->residual[i][j];
       } else {
         state->residual[i][j] = *(state->y_std + state->n_y * j + i) -
-        state->b_vec[0] * state->beta_t[j] * state->tau_fit[i][j];
+        state->b_vec[0] * state->beta_t[s] * state->tau_fit[i][j];
 
         mu2sum_ctrl += state->mu_fit[i][j] * state->mu_fit[i][j];
         muressum_ctrl += state->mu_fit[i][j] * state->residual[i][j];
@@ -351,22 +354,23 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
   double tauressum_trt = 0;
   double s0 = pow(state->sigma_vec[0], 2);
   double s1 = pow(state->sigma_vec[1], 2);
-
+  size_t s = 0;
 
   for (size_t i = 0; i < state->n_y; i++)
   {
     for (size_t j = 0; j < state->p_y; j++){
       state->residual[i][j] = *(state->y_std + state->n_y * j + i) -
       state->a * state->mu_fit[i][j];
+      s = j - *(state->trt_time + i) + 1 > 0 ? j - *(state->trt_time + i) + 1: 0;
 
       if (*(state->z + j * state->n_y + i) == 1)
       {
-        tau2sum_trt += pow(state->tau_fit[i][j] * state->beta_t[j], 2);
-        tauressum_trt += state->beta_t[j] * state->tau_fit[i][j] *
+        tau2sum_trt += pow(state->tau_fit[i][j] * state->beta_t[s], 2);
+        tauressum_trt += state->beta_t[s] * state->tau_fit[i][j] *
         state->residual[i][j];
       } else {
-        tau2sum_ctrl += pow(state->tau_fit[i][j] * state->beta_t[j], 2);
-        tauressum_ctrl += state->beta_t[j] * state->tau_fit[i][j] *
+        tau2sum_ctrl += pow(state->tau_fit[i][j] * state->beta_t[s], 2);
+        tauressum_ctrl += state->beta_t[s] * state->tau_fit[i][j] *
         state->residual[i][j];
       }
     }
@@ -391,7 +395,6 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   matrix<size_t> &torder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig, std::vector<double> &beta)
 {  
   // get total number of time
-  // double t_size = x_struct->t_values.size();
   double t_size = state->beta_size;
   double n = state->n_y;  // n obs per period. TODO: need update
   std::vector<double> res_ctrl(t_size, 0);  // residuals
@@ -410,6 +413,7 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   std::vector<size_t> idx(state->p_y);  // keep track of t-values
   size_t t_idx;
   size_t counts = 0;
+  size_t s;
   const double *z_pointer;
   const double *y_pointer;
 
@@ -418,6 +422,30 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   //   throw;
   // }
 
+  // for (size_t i = 0; i < t_size; i++)
+  // {
+  //   for (size_t j = 0; j < x_struct->t_counts[i]; j++)
+  //   {
+  //     t_idx = torder_std[0][counts];
+  //     counts++;
+  //     idx[t_idx] = i;
+  //     z_pointer = state->z + state->n_y * t_idx;
+  //     y_pointer = state->y_std + state->n_y * t_idx;
+  //     for (size_t k = 0; k < state->n_y; k++)
+  //     {
+  //       if (*(z_pointer + k) == 0)
+  //       {
+  //         res_ctrl[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
+  //         diag_ctrl[i] += state->tau_fit[k][t_idx];
+  //         sig[i] += sig02;
+  //       } else {
+  //         res_trt[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
+  //         diag_trt[i] += state->tau_fit[k][t_idx];
+  //         sig[i] += sig12;
+  //       }
+  //     }
+  //   }
+  // }
   std::vector<size_t> t_counts(t_size, 0);
 
   for (size_t i = 0; i < state->n_y; i++){
@@ -461,10 +489,10 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   arma::mat var = pinv(var_inv);
 
   arma::mat U, V;
-  arma::vec s;
-  svd(U, s, V, var);
+  arma::vec scale;
+  svd(U, scale, V, var);
 
-  arma::mat L = U * diagmat(s);
+  arma::mat L = U * diagmat(scale);
   // mean
   arma::mat res_vec(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
@@ -482,22 +510,13 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   // arma::mat beta(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
     beta[i] = beta_tilde(i, 0) / diag[i];
+    state->beta_t[i] = beta[i];
   }
 
-  // for (size_t i = 0; i < x_struct->t_values.size(); i++)
-  // {
-  //   for (size_t j = 0; j < x_struct->t_counts[i]; j++)
-  //   {
-  //     t_idx = torder_std[0][counts];
-  //     counts++;
-  //     idx[t_idx] = i;
-  //   }
+  // // match beta to beta_t
+  // for (size_t i = 0; i < state->p_y; i++){
+  //   state->beta_t[i] = beta[idx[i]];
   // }
-
-  // match beta to beta_t
-  for (size_t i = 0; i < state->p_y; i++){
-    state->beta_t[i] = beta[idx[i]];
-  }
 }
 
 

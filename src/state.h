@@ -52,12 +52,12 @@ public:
     size_t mtry;
     size_t n_y;  // number of total data points in root node
     size_t p_y;  // dimension of response variables
+    size_t beta_size; // unique post-treatment period
 
     const double *X_std;  // pointer to original data
     const double *y_std;  // pointer to y data
     const double *z;            // the scaled treatment vector            TODO: move to xbcfState
     const double *trt_time;
-    size_t beta_size;
     
     std::vector<size_t> n_trt;                     // the number of treated individuals      TODO: check if it's used anywhere after restructuring
     matrix<double> mu_fit;       // total mu_fit                           TODO: move to xbcfState
@@ -97,9 +97,11 @@ public:
 
     void update_residuals()
     {
+        // cout << "update_residuals in state.h need to be updated for staggered adoption" << endl;
         size_t index_trt;
         size_t index_ctrl;
         const double *temp_pointer;
+        size_t s;
 
         for (size_t j = 0; j < this->p_y; j++){
             index_trt = 0;
@@ -108,14 +110,15 @@ public:
 
             for (size_t i = 0; i < this->n_y; i++)
             {
+                s = j - *(this->trt_time + i) + 1 > 0 ? j - *(this->trt_time + i) + 1: 0; // assuming time is converted to steps 0, 1, 2, ....
                 if (*(temp_pointer + i) == 1)
                 {
-                    this->full_residual_trt[j][index_trt] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[1] * this->beta_t[j] * this->tau_fit[i][j];
+                    this->full_residual_trt[j][index_trt] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[1] * this->beta_t[s] * this->tau_fit[i][j];
                     index_trt++;
                 }
                 else
                 {
-                    this->full_residual_ctrl[j][index_ctrl] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[0] * this->beta_t[j] * this->tau_fit[i][j];
+                    this->full_residual_ctrl[j][index_ctrl] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[0] * this->beta_t[s] * this->tau_fit[i][j];
                     index_ctrl++;
                 }
             }
@@ -259,7 +262,7 @@ class longBetState : public State
     State(Xpointer, Xorder_std, N, p, p_tau, p_y, num_trees_vec,
     p_categorical_pr, p_categorical_trt, p_continuous_pr, p_continuous_trt,
     set_random_seed, random_seed, n_min, n_cutpoints, parallel, mtry_pr,
-    mtry_trt, X_std, num_sweeps, sample_weights_flag, y_std, z,
+    mtry_trt, X_std, num_sweeps, sample_weights_flag, y_std, z, 
     sigma_vec, b_vec, max_depth, ini_var_yhat, burnin)
     {
         this->sigma_vec = sigma_vec;
@@ -274,13 +277,14 @@ class longBetState : public State
 
         ini_matrix(this->mu_fit, p_y, N);
         ini_matrix(this->tau_fit, p_y, N);
+        // TODO: Shrink beta_t size to max trt_time in state.h
 
         size_t min_trt_time = p_y;
         for (size_t i = 0; i < N; i++){
             if(*(trt_time + i) < min_trt_time) {min_trt_time = *(trt_time + i);}
         }
         beta_size = p_y - min_trt_time + 1;
-        this->beta_t = std::vector<double>(p_y, 1);
+        this->beta_t = std::vector<double>(beta_size, 1);
 
         // those are for XBCF, initialize at a length 1 vector
         // this->residual = std::vector<double>(N, 0);

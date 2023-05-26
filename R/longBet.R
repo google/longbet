@@ -60,6 +60,10 @@ longbet <- function(y, x, z, t, pcat,
         t_con = t
     }
 
+    if (split_time_trt){
+        stop("Can not handle split time on treatment tree with staggered adoption yet. \n")
+    }
+
     # get post-treatment time matrix
     get_trt_time <- function(z_vec, t){
         treated_period <- which(z_vec == 1)

@@ -87,7 +87,10 @@ num_trees_pr =  50, num_trees_trt = 50 ,
 pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 2)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
-longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
+# assume all unit get treated at t0 for test set to get CATE
+z_test <- c(rep(0, t0 - 1), rep(1, t1 - t0 + 1)) %>% rep(times = n) %>%  matrix(nrow = t1, ncol = n) %>% t
+
+longbet.pred <- predict.longBet(longbet.fit, x, z_test)
 mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
 tau_hat_longbet <- apply(longbet.pred$tauhats, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t1]
@@ -139,22 +142,22 @@ print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
 
 
 # # visualize ---------------------------------------------------------------
-# # ATE
-#   ate_df <- data.frame(
-#     time = t0:t1,
-#     true = ate,
-#     bart = ate_bart,
-#     longbet = ate_longbet
-#   )
-#   
-#   ate_df %>% 
-#     gather("method", "ate", -time) %>%
-#     ggplot(aes(time, ate)) + 
-#     geom_line(aes(color = method)) + 
-#     ylab(labs(title = "Average Treatment Effect"))
-#   
-# 
-# # CATE
+# ATE
+  ate_df <- data.frame(
+    time = t0:t1,
+    true = ate,
+    bart = ate_bart,
+    longbet = ate_longbet
+  )
+
+  ate_df %>%
+    gather("method", "ate", -time) %>%
+    ggplot(aes(time, ate)) +
+    geom_line(aes(color = method)) +
+    ylab(labs(title = "Average Treatment Effect"))
+
+
+# CATE
   cate_df <- data.frame(
     true = as.vector(t(tau_mat)),
     lonbet = as.vector(t(tau_longbet)),
@@ -169,20 +172,20 @@ print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
     geom_line(aes(time, cate, group = id, color = id)) +
     facet_wrap(~method)
 
-# # CATE error
-#   cate_error <- data.frame(
-#     lonbet = as.vector(t(tau_longbet - tau_mat)),
-#     bart = as.vector(t(tau_bart - tau_mat)),
-#     time = rep(c(t0:t1), nrow(tau_mat)),
-#     id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
-#   )
-#   
-#   cate_error %>%
-#     gather("method", "cate", -time, -id) %>%
-#     ggplot() +
-#     geom_line(aes(time, cate, group = id, color = id)) +
-#     facet_wrap(~method)
-#   
-#   
-# 
-# 
+# CATE error
+  cate_error <- data.frame(
+    lonbet = as.vector(t(tau_longbet - tau_mat)),
+    bart = as.vector(t(tau_bart - tau_mat)),
+    time = rep(c(t0:t1), nrow(tau_mat)),
+    id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
+  )
+
+  cate_error %>%
+    gather("method", "cate", -time, -id) %>%
+    ggplot() +
+    geom_line(aes(time, cate, group = id, color = id)) +
+    facet_wrap(~method)
+
+
+
+

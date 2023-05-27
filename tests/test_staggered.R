@@ -86,8 +86,6 @@ ytrain <- y[, 1:t1]
 ztrain <- z_mat
 xtrain <- x
 
-post_trt_time <- t(apply(ztrain, 1, get_post_trt_time, t = 1:t1))
-
 
 # longbet -----------------------------------------------------------------
 t_longbet <- proc.time()
@@ -95,14 +93,64 @@ longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
                        num_sweeps = 60,
                        num_trees_pr =  20, num_trees_trt = 20,
                        pcat = ncol(x) - 3)
+
 longbet.pred <- predict.longBet(longbet.fit, x, ztrain)
+longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
+longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
+
+#TODO estimate CATT
+# post_trt_time <- t(apply(ztrain, 1, get_post_trt_time, t = 1:t1))
+treatment_period <- t1 - t0 + 1
+# Align treatment effect 
+align_te <- matrix(NA, nrow = n, ncol = treatment_period)
+align_catt <- matrix(NA, nrow = n, ncol = treatment_period)
+
+for (i in 1:n){
+  if (sum(ztrain[i,]) == 0) {next}
+  post_t <- 1:sum(ztrain[i,])
+  align_te[i, post_t] = te[i, ztrain[i,] == 1]
+  align_catt[i, post_t] = longbet.cate$cate[i, ztrain[i,] == 1]
+} 
+
+att <- colMeans(align_te, na.rm = T)
+att_hat <- colMeans(align_catt, na.rm = T)
+
+print(paste0("longBet ATT RMSE: ", sqrt(mean(( att - att_hat)^2))))
+print(paste0("longBet CATT RMSE: ", sqrt(mean((align_te - align_catt)^2, na.rm = T))))
+print("longbet CATT RMSE by time: ")
+print(sqrt(colMeans( (align_te - align_catt)^2, na.rm = T)))
+print(paste0("longBet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 
 
-# mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
-# tau_hat_longbet <- apply(longbet.pred$tauhats, c(1, 2), mean)
-# tau_longbet <- tau_hat_longbet[,t0:t1]
-# t_longbet <- proc.time() - t_longbet
-# 
-# ate_longbet_fit <- apply(longbet.pred$tauhats, c(2, 3), mean)[t0:t1, ]
-# ate <- tau_mat %>% colMeans
-# ate_longbet <- ate_longbet_fit %>% rowMeans
+# Visualize ---------------------------------------------------------------
+# ATE
+att_df <- data.frame(
+  time = t0:t1,
+  true = att,
+  longbet = att_hat
+)
+
+plot_att <- att_df %>%
+  gather("method", "att", -time) %>%
+  ggplot(aes(time, att)) +
+  geom_line(aes(color = method)) +
+  ylab(labs(title = "Average Treatment Effect on Treated"))
+print(plot_att)
+
+# CATE
+catt_df <- data.frame(
+  true = as.vector(t(align_te)),
+  lonbet = as.vector(t(align_catt)),
+  time = rep(c(t0:t1), nrow(tau_mat)),
+  id = as.vector(sapply(1:nrow(align_te), rep, (t1 - t0 + 1)))
+)
+
+plot_catt <- catt_df %>%
+  filter(id < 100) %>%
+  gather("method", "cate", -time, -id) %>%
+  ggplot() +
+  geom_line(aes(time, cate, group = id, color = id)) +
+  facet_wrap(~method)
+print(plot_catt)
+
+

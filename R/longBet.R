@@ -48,10 +48,10 @@ longbet <- function(y, x, z, t, pcat,
 
     # check if treatment all start at the same time
     # number of treated periods per unit should only be 0 or t1 - t0 + 1
-    unique_z_sum <- unique(rowSums(z))
-    if (length(unique_z_sum) != 2) {
-        stop("Current version can only handle treamtments occured at the same time. \n")
-    }
+    # unique_z_sum <- unique(rowSums(z))
+    # if (length(unique_z_sum) != 2) {
+    #     stop("Current version can only handle treamtments occured at the same time. \n")
+    # }
 
     # get post-treatment time variable
     if (is.null(t)){
@@ -88,9 +88,12 @@ longbet <- function(y, x, z, t, pcat,
     trt_time <- matrix(apply(z, 1, function(x) sum(x == 0)), nrow(z), 1)
 
     if (ncol(y) > 1) {
-        post_t <- sort(unique_z_sum)[2]
-        t0 <- t_con[ncol(y) - post_t]
-        t_mod <- sapply(t_con, function(x) max(x - t0, 0))
+        # unique_z_sum <- unique(rowSums(z))
+        # post_t <- sort(unique_z_sum)[2]
+        # t0 <- t_con[ncol(y) - post_t]
+        # t_mod <- sapply(t_con, function(x) max(x - t0, 0))
+        post_t <- max(rowSums(z))
+        t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)
         print("Adjusted treatment time:")
         print(t_mod)
         # t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)

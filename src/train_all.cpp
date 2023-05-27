@@ -251,7 +251,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     std::vector<double> initial_theta_trt(1, 0);
     std::unique_ptr<X_struct> x_struct_trt(new X_struct(Xpointer_tau, ypointer, tpointer_tau, N, p_y, Xorder_tau_std, torder_tau_std, p_categorical_trt, p_continuous_trt, &initial_theta_trt, num_trees_trt, sig_knl, lambda_knl));
 
-    size_t t_size = x_struct_trt->t_values.size();
+    size_t t_size = state->beta_size;
     matrix<double> resid_info;
     ini_matrix(resid_info, t_size, num_sweeps);
 

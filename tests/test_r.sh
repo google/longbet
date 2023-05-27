@@ -5,4 +5,4 @@ R CMD REMOVE longBet
 R CMD INSTALL longBet
 cd longbet/tests/
 echo Testing R
-Rscript longbet_example.R
+Rscript test_staggered.R

@@ -417,35 +417,6 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   const double *z_pointer;
   const double *y_pointer;
 
-  // if(t_size <= 1){
-  //   cout << "unique t values need to be greater than 1" << endl;
-  //   throw;
-  // }
-
-  // for (size_t i = 0; i < t_size; i++)
-  // {
-  //   for (size_t j = 0; j < x_struct->t_counts[i]; j++)
-  //   {
-  //     t_idx = torder_std[0][counts];
-  //     counts++;
-  //     idx[t_idx] = i;
-  //     z_pointer = state->z + state->n_y * t_idx;
-  //     y_pointer = state->y_std + state->n_y * t_idx;
-  //     for (size_t k = 0; k < state->n_y; k++)
-  //     {
-  //       if (*(z_pointer + k) == 0)
-  //       {
-  //         res_ctrl[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
-  //         diag_ctrl[i] += state->tau_fit[k][t_idx];
-  //         sig[i] += sig02;
-  //       } else {
-  //         res_trt[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
-  //         diag_trt[i] += state->tau_fit[k][t_idx];
-  //         sig[i] += sig12;
-  //       }
-  //     }
-  //   }
-  // }
   std::vector<size_t> t_counts(t_size, 0);
 
   for (size_t i = 0; i < state->n_y; i++){
@@ -463,6 +434,9 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
       }
     }
   }
+  // cout << "res_ctrl " << res_ctrl << endl;
+  // cout << "resd_trt " << res_trt << endl;
+  // cout << "t_counts " << t_counts << endl;
 
   for (size_t i = 0; i < t_size; i++){
     resid[i] = (res_trt[i] + res_ctrl[i]) / t_counts[i];

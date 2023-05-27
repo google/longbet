@@ -90,13 +90,12 @@ post_trt_time <- t(apply(ztrain, 1, get_post_trt_time, t = 1:t1))
 
 
 # longbet -----------------------------------------------------------------
-# t_longbet <- proc.time()
-# longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
-#                        num_sweeps = 60,
-#                        num_trees_pr =  20, num_trees_trt = 20,
-#                        pcat = ncol(x) - 3)
-# 
-# longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
+t_longbet <- proc.time()
+longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
+                       num_sweeps = 60,
+                       num_trees_pr =  20, num_trees_trt = 20,
+                       pcat = ncol(x) - 3)
+longbet.pred <- predict.longBet(longbet.fit, x, ztrain)
 
 
 # mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)

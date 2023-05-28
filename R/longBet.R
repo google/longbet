@@ -64,25 +64,26 @@ longbet <- function(y, x, z, t, pcat,
         stop("Can not handle split time on treatment tree with staggered adoption yet. \n")
     }
 
-    # get post-treatment time matrix
-    get_trt_time <- function(z_vec, t){
-        treated_period <- which(z_vec == 1)
-        if (length(treated_period) == 0){
-            # no treated period
-            return(rep(0, length(z_vec)))
-        } else {
-            if (treated_period[1] == 1){
-                # case: no untreated period for this unit
-                # assuming last untreated time point is lag 1
-                t0 <- t[1] - 1
-            } else {
-                t0 <- t[treated_period[1] - 1]
-            }
-            trt_time <- sapply(t, function(x, t0) max(0, x - t0), t0 = t0)
-            return(trt_time)
-        }
-    }
-    post_trt_time <- t(apply(z, 1, get_trt_time, t = t))
+    # # get post-treatment time matrix
+    # get_trt_time <- function(z_vec, t){
+    #     treated_period <- which(z_vec == 1)
+    #     if (length(treated_period) == 0){
+    #         # no treated period
+    #         return(rep(0, length(z_vec)))
+    #     } else {
+    #         if (treated_period[1] == 1){
+    #             # case: no untreated period for this unit
+    #             # assuming last untreated time point is lag 1
+    #             t0 <- t[1] - 1
+    #         } else {
+    #             t0 <- t[treated_period[1] - 1]
+    #         }
+    #         trt_time <- sapply(t, function(x, t0) max(0, x - t0), t0 = t0)
+    #         return(trt_time)
+    #     }
+    # }
+    # post_trt_time <- t(apply(z, 1, get_trt_time, t = t))
+    post_trt_time <- z
 
 
     trt_time <- matrix(apply(z, 1, function(x) sum(x == 0)), nrow(z), 1)
@@ -93,7 +94,8 @@ longbet <- function(y, x, z, t, pcat,
         # t0 <- t_con[ncol(y) - post_t]
         # t_mod <- sapply(t_con, function(x) max(x - t0, 0))
         post_t <- max(rowSums(z))
-        t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)
+        t0 <- ncol(y) - post_t + 1
+        t_mod <- c(rep(0, t0 - 1), 1:post_t)
         print("Adjusted treatment time:")
         print(t_mod)
         # t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)

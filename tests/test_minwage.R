@@ -97,7 +97,7 @@ get_z <- function(first.treat){
   if (first.treat == 0) {
     return(rep(0, 5))
   } else {
-      return(first.treat < c(2003:2007))}
+      return(first.treat <= c(2003:2007))}
 }
 ztrain <- sapply(data$first.treat, get_z) %>% t 
 
@@ -115,7 +115,10 @@ n <- dim(longbet.pred$tauhats)[1]
 t <- dim(longbet.pred$tauhats)[2]
 num_sweeps <- dim(longbet.pred$tauhats)[3]
 
-tauhats <- longbet.pred$tauhats %>% matrix(nrow = n * num_sweeps, ncol = t, byrow = TRUE) %>% data.frame
+tauhats <- longbet.pred$tauhats %>% 
+  aperm(perm = c(1,3,2)) %>% 
+  matrix(nrow = n * num_sweeps, ncol = t, byrow = F) %>%
+  data.frame
 colnames(tauhats) <- c(2003:2007)
 tauhats$group <- rep(data$first.treat, num_sweeps)
 tauhats$sweeps <- sapply(1:num_sweeps, rep, times = n) %>% as.vector

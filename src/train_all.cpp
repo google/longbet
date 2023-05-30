@@ -242,6 +242,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     num_cutpoints, parallel, mtry_pr, mtry_trt, Xpointer, num_sweeps,
     sample_weights_flag, ypointer, zpointer, trt_time_pointer, sigma_vec, b_vec, max_depth, y_mean,
     burnin, model_trt->dim_suffstat));
+    cout << "state->beta_size = " << state->beta_size << endl;
 
     // initialize X_struct for the prognostic term
     std::vector<double> initial_theta_pr(1, y_mean / (double)num_trees_pr);

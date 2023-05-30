@@ -62,7 +62,7 @@ for (year in gp_year){
   }
   lambda_knl = 1
   
-  longbet.pred <- predict.longBet(longbet.fit, xtrain, ttrain, sigma = sigma_knl, lambda = lambda_knl)
+  longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain, sigma = sigma_knl, lambda = lambda_knl)
   t_longbet <- proc.time() - t_longbet
   
   treated <- ztrain[,ncol(ztrain)]
@@ -86,6 +86,49 @@ for (year in gp_year){
   }
   longbet_att <- rbind(longbet_att, att_df)
 }
+
+
+# longbet staggered adoption ----------------------------------------------
+data <- mpdta %>%  spread(key = "year", value = "lemp")
+
+xtrain <- as.matrix(data$lpop)
+ytrain <- as.matrix(data[, c("2003", "2004", "2005", "2006", "2007")])
+get_z <- function(first.treat){
+  if (first.treat == 0) {
+    return(rep(0, 5))
+  } else {
+      return(first.treat < c(2003:2007))}
+}
+ztrain <- sapply(data$first.treat, get_z) %>% t 
+
+longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
+                       num_sweeps = 60,
+                       num_trees_pr =  20, num_trees_trt = 20,
+                       pcat = 0)
+
+longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
+longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
+longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
+
+# reshape tauhats to get att credible interval per group
+n <- dim(longbet.pred$tauhats)[1]
+t <- dim(longbet.pred$tauhats)[2]
+num_sweeps <- dim(longbet.pred$tauhats)[3]
+
+tauhats <- longbet.pred$tauhats %>% matrix(nrow = n * num_sweeps, ncol = t, byrow = TRUE) %>% data.frame
+colnames(tauhats) <- c(2003:2007)
+tauhats$group <- rep(data$first.treat, num_sweeps)
+tauhats$sweeps <- sapply(1:num_sweeps, rep, times = n) %>% as.vector
+
+staggered_att <- 
+  tauhats %>% 
+  filter(group != 0) %>%
+  gather(key = "t", value = "catt", -group, -sweeps) %>%
+  group_by(group, t, sweeps) %>%
+  summarise(catt = mean(catt))%>%
+  ungroup() %>%
+  group_by(group, t) %>%
+  summarise(att = mean(catt), upper = quantile(catt, 0.975), lower = quantile(catt, 0.025))
 
 # did ---------------------------------------------------------------------
 
@@ -115,13 +158,15 @@ did_att$se <- NULL
 require(ggplot2)
 # Plot ggdid with longbet results
 longbet_att$method <- rep("LongBet", nrow(longbet_att))
+staggered_att$method <- rep("Staggered", nrow = (staggered_att))
 did_att$method <- rep("DiD", nrow(did_att))
 
-att_plot <- rbind(longbet_att, did_att) %>%
+
+att_plot <- rbind(did_att, staggered_att) %>% #longbet_att
   ggplot(aes(x = t, y = att)) +
   geom_point(aes(color = method), position = position_dodge(.3)) +
   geom_errorbar(aes(ymin = lower, ymax = upper, color = method), width = .2,  position = position_dodge(.3)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "grey")+
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
   facet_wrap(~group, ncol = 1) +
   labs(y = "ATT")
 plot(att_plot)

@@ -92,7 +92,7 @@ t_longbet <- proc.time()
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
                        num_sweeps = 60,
                        num_trees_pr =  20, num_trees_trt = 20,
-                       pcat = ncol(x) - 3)
+                       pcat = ncol(xtrain) - 3)
 
 longbet.pred <- predict.longBet(longbet.fit, x, ztrain)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)

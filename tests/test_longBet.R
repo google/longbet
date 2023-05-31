@@ -84,7 +84,7 @@ expand_z_mat <- cbind(matrix(0, n, (t0 - 1)), z_mat)
 t_longbet <- proc.time()
 longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
 num_trees_pr =  50, num_trees_trt = 50 ,
-pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 2)
+pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 # assume all unit get treated at t0 for test set to get CATE
@@ -172,3 +172,22 @@ cate_plot <-  cate_df %>%
     geom_line(aes(time, cate, group = id, color = id)) +
     facet_wrap(~method)
 plot(cate_plot)
+
+# CATE error
+cate_error <- data.frame(
+  lonbet = as.vector(t(tau_longbet - tau_mat)),
+  bart = as.vector(t(tau_bart - tau_mat)),
+  time = rep(c(t0:t1), nrow(tau_mat)),
+  id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
+)
+
+error_plot <- cate_error %>%
+  gather("method", "cate", -time, -id) %>%
+  ggplot() +
+  geom_line(aes(time, cate, group = id, color = id)) +
+  facet_wrap(~method)
+plot(error_plot)
+
+
+
+

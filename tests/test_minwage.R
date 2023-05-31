@@ -104,7 +104,7 @@ ztrain <- sapply(data$first.treat, get_z) %>% t
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
                        num_sweeps = 60,
                        num_trees_pr =  20, num_trees_trt = 20,
-                       pcat = 0)
+                       pcat = 0, lambda_knl = 2)
 
 longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
@@ -131,8 +131,8 @@ staggered_att <-
   summarise(catt = mean(catt))%>%
   ungroup() %>%
   group_by(group, t) %>%
-  summarise(att = mean(catt), upper = quantile(catt, 0.975), lower = quantile(catt, 0.025))
-
+  summarise(att = mean(catt), upper = quantile(catt, 0.975), lower = quantile(catt, 0.025)) %>%
+  filter(t >= group)
 # did ---------------------------------------------------------------------
 
 out <- att_gt(yname = "lemp",

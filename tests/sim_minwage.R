@@ -30,7 +30,7 @@ trt_idx[trt_idx < 0] <- 0
 trt_idx <- trt_idx + 1
 
 trt_effect <- c(0, -0.1, -0.3, -0.1, 0.1)
-trt_factor <- cos(data$lpop / max(data$lpop) - 1)
+trt_factor <- 2 * cos(data$lpop / max(data$lpop) - 1)
 trt_mat <- apply(trt_idx, 1, function(idx, te) te[idx], te = trt_effect) %>% t
 trt_mat <- trt_factor * trt_mat
 trt_mat <- trt_mat + 0.1*mean(trt_mat) * rnorm(trt_mat)
@@ -50,86 +50,86 @@ true_att <- cbind(trt_df) %>%
   filter(group != 0) %>%
   group_by(group, t) %>%
   summarise(att = mean(att))
-
-# longbet need update-----------------------------------------------------------------
-alpha <- 0.05
-gp_year <- c(2004, 2006, 2007)
-longbet_att <- data.frame(
-  group = numeric(),
-  t = numeric(),
-  att = numeric(),
-  upper = numeric(),
-  lower = numeric()
-)
-for (year in gp_year){
-  data <- mpdta[(mpdta$first.treat == 0) | (mpdta$first.treat == year), ]
-  data$treat[data$first.treat > data$year] = 0
-  
-  t0 <- max(data$first.treat) - 2003 + 1 
-  t1 <- length(unique(data$year))
-  ttrain <- as.numeric(unique(data$year))
-  ttreated <- ttrain[t0:t1]
-  
-  xtrain <- data[, c("countyreal", "lpop")] %>% 
-    group_by(countyreal) %>%
-    summarise(lpop = mean(lpop))
-  
-  ytrain <- data[, c("year", "lemp", "countyreal")] %>%
-    spread(key = "year", value = "lemp")
-  
-  ztrain <- data[, c("year", "treat", "countyreal")] %>%
-    spread(key = "year", value = "treat")
-  
-  # check x, y, z id are correct
-  all(xtrain$countyreal == ytrain$countyreal)
-  all(xtrain$countyreal == ztrain$countyreal)
-  countyreal <- xtrain$countyreal
-  xtrain$countyreal <- NULL
-  ytrain$countyreal <- NULL
-  ztrain$countyreal <- NULL
-  
-  xtrain <- as.matrix(xtrain)
-  ytrain <- as.matrix(ytrain)
-  ztrain <- as.matrix(ztrain)
-  
-  t_longbet <- proc.time()
-  longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = ttrain,
-                         num_sweeps = 100,
-                         num_trees_pr =  20, num_trees_trt = 20,
-                         pcat = 0,  sig_knl = 1, lambda_knl = 1)
-  # TODO: lambda_knl is quite sensitve, need better understanding
-  if (t1 > t0){
-    sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
-  } else {
-    sigma_knl = 1
-  }
-  lambda_knl = 1
-  
-  longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain, sigma = sigma_knl, lambda = lambda_knl)
-  t_longbet <- proc.time() - t_longbet
-  
-  treated <- ztrain[,ncol(ztrain)]
-  att_longbet_fit <- apply(longbet.pred$tauhats[treated,,], c(2, 3), mean)[t0:t1, ]
-  if (t1 > t0){
-    att_df <- data.frame(
-      group = rep(year, length(ttreated)),
-      t = ttreated,
-      att = att_longbet_fit %>% rowMeans,
-      upper = apply(att_longbet_fit, 1, quantile, probs = 1 - alpha / 2),
-      lower = apply(att_longbet_fit, 1, quantile, probs = alpha / 2)
-    )
-  } else {
-    att_df <- data.frame(
-      group = rep(year, length(ttreated)),
-      t = ttreated,
-      att = att_longbet_fit %>% mean,
-      upper = quantile(att_longbet_fit, probs = 1 - alpha / 2),
-      lower = quantile(att_longbet_fit, probs = alpha / 2)
-    )
-  }
-  longbet_att <- rbind(longbet_att, att_df)
-}
-
+# 
+# # longbet need update-----------------------------------------------------------------
+# alpha <- 0.05
+# gp_year <- c(2004, 2006, 2007)
+# longbet_att <- data.frame(
+#   group = numeric(),
+#   t = numeric(),
+#   att = numeric(),
+#   upper = numeric(),
+#   lower = numeric()
+# )
+# for (year in gp_year){
+#   data <- mpdta[(mpdta$first.treat == 0) | (mpdta$first.treat == year), ]
+#   data$treat[data$first.treat > data$year] = 0
+#   
+#   t0 <- max(data$first.treat) - 2003 + 1 
+#   t1 <- length(unique(data$year))
+#   ttrain <- as.numeric(unique(data$year))
+#   ttreated <- ttrain[t0:t1]
+#   
+#   xtrain <- data[, c("countyreal", "lpop")] %>% 
+#     group_by(countyreal) %>%
+#     summarise(lpop = mean(lpop))
+#   
+#   ytrain <- data[, c("year", "lemp", "countyreal")] %>%
+#     spread(key = "year", value = "lemp")
+#   
+#   ztrain <- data[, c("year", "treat", "countyreal")] %>%
+#     spread(key = "year", value = "treat")
+#   
+#   # check x, y, z id are correct
+#   all(xtrain$countyreal == ytrain$countyreal)
+#   all(xtrain$countyreal == ztrain$countyreal)
+#   countyreal <- xtrain$countyreal
+#   xtrain$countyreal <- NULL
+#   ytrain$countyreal <- NULL
+#   ztrain$countyreal <- NULL
+#   
+#   xtrain <- as.matrix(xtrain)
+#   ytrain <- as.matrix(ytrain)
+#   ztrain <- as.matrix(ztrain)
+#   
+#   t_longbet <- proc.time()
+#   longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = ttrain,
+#                          num_sweeps = 100,
+#                          num_trees_pr =  20, num_trees_trt = 20,
+#                          pcat = 0,  sig_knl = 1, lambda_knl = 1)
+#   # TODO: lambda_knl is quite sensitve, need better understanding
+#   if (t1 > t0){
+#     sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
+#   } else {
+#     sigma_knl = 1
+#   }
+#   lambda_knl = 1
+#   
+#   longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain, sigma = sigma_knl, lambda = lambda_knl)
+#   t_longbet <- proc.time() - t_longbet
+#   
+#   treated <- ztrain[,ncol(ztrain)]
+#   att_longbet_fit <- apply(longbet.pred$tauhats[treated,,], c(2, 3), mean)[t0:t1, ]
+#   if (t1 > t0){
+#     att_df <- data.frame(
+#       group = rep(year, length(ttreated)),
+#       t = ttreated,
+#       att = att_longbet_fit %>% rowMeans,
+#       upper = apply(att_longbet_fit, 1, quantile, probs = 1 - alpha / 2),
+#       lower = apply(att_longbet_fit, 1, quantile, probs = alpha / 2)
+#     )
+#   } else {
+#     att_df <- data.frame(
+#       group = rep(year, length(ttreated)),
+#       t = ttreated,
+#       att = att_longbet_fit %>% mean,
+#       upper = quantile(att_longbet_fit, probs = 1 - alpha / 2),
+#       lower = quantile(att_longbet_fit, probs = alpha / 2)
+#     )
+#   }
+#   longbet_att <- rbind(longbet_att, att_df)
+# }
+# 
 
 # longbet staggered adoption ----------------------------------------------
 data <- mpdta %>%  spread(key = "year", value = "lemp")
@@ -145,9 +145,9 @@ get_z <- function(first.treat){
 ztrain <- sapply(data$first.treat, get_z) %>% t 
 
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
-                       num_sweeps = 60,
-                       num_trees_pr =  20, num_trees_trt = 20,
-                       pcat = 0, lambda_knl = 2)
+                       num_sweeps = 60, num_burnin = 20,
+                       num_trees_pr =  50, num_trees_trt = 50,
+                       pcat = 0, lambda_knl = 1)
 
 longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
@@ -203,7 +203,7 @@ did_att$se <- NULL
 
 require(ggplot2)
 # Plot ggdid with longbet results
-longbet_att$method <- rep("LongBet", nrow(longbet_att))
+# longbet_att$method <- rep("LongBet", nrow(longbet_att))
 staggered_att$method <- rep("Staggered", nrow = (staggered_att))
 did_att$method <- rep("DiD", nrow(did_att))
 

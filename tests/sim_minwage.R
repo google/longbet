@@ -8,6 +8,7 @@ library(did)
 library(tidyr)
 library(dplyr)
 data(mpdta)
+set.seed(0)
 
 # simulate data-----------------------------------------------------------------
 data <- mpdta %>%  spread(key = "year", value = "lemp")

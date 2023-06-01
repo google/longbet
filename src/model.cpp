@@ -57,10 +57,9 @@ void longBetModel::incSuffStat(std::unique_ptr<State> &state,
 size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
 {
   double gp = *(state->z + index_next_t * state->n_y + index_next_obs);
-  size_t s = index_next_t - *(state->trt_time + index_next_obs) + 1 > 0 ? index_next_t - *(state->trt_time + index_next_obs) + 1 : 0;
   double resid = *(state->y_std + state->n_y * index_next_t + index_next_obs) -
   state->a * state->mu_fit[index_next_obs][index_next_t] - state->b_vec[gp] *
-  state->beta_t[s] * state->tau_fit[index_next_obs][index_next_t];
+  state->beta_fit[index_next_obs][index_next_t] * state->tau_fit[index_next_obs][index_next_t];
 
   if (state->fl == 0)  // suff stat for prognostic trees
   {
@@ -86,11 +85,11 @@ size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
     if (gp == 1)
     {
       // beta_t^2 * r / b / beta_t = beta_t * r / b
-      suffstats[1] += state->beta_t[s] * resid / state->b_vec[1];
-      suffstats[3] += pow(state->beta_t[s], 2);
+      suffstats[1] += state->beta_fit[index_next_obs][index_next_t] * resid / state->b_vec[1];
+      suffstats[3] += pow(state->beta_fit[index_next_obs][index_next_t], 2);
     } else {
-      suffstats[0] += state->beta_t[s] * resid / state->b_vec[0];
-      suffstats[2] += pow(state->beta_t[s], 2);
+      suffstats[0] += state->beta_fit[index_next_obs][index_next_t] * resid / state->b_vec[0];
+      suffstats[2] += pow(state->beta_fit[index_next_obs][index_next_t], 2);
     }
   }
 
@@ -315,17 +314,16 @@ void longBetModel::update_a_value(std::unique_ptr<State> &state)
   for (size_t i = 0; i < state->n_y; i++)
   {
     for (size_t j = 0; j < state->p_y; j++){
-      s = j - *(state->trt_time + i) + 1 > 0 ? j - *(state->trt_time + i) + 1: 0;
       if ((*(state->z + j * state->n_y + i)) == 1)
       {
         state->residual[i][j] = *(state->y_std + state->n_y * j + i) -
-        state->b_vec[1] * state->beta_t[s] * state->tau_fit[i][j];
+        state->b_vec[1] * state->beta_fit[i][j] * state->tau_fit[i][j];
 
         mu2sum_trt += state->mu_fit[i][j] * state->mu_fit[i][j];
         muressum_trt += state->mu_fit[i][j] * state->residual[i][j];
       } else {
         state->residual[i][j] = *(state->y_std + state->n_y * j + i) -
-        state->b_vec[0] * state->beta_t[s] * state->tau_fit[i][j];
+        state->b_vec[0] * state->beta_fit[i][j] * state->tau_fit[i][j];
 
         mu2sum_ctrl += state->mu_fit[i][j] * state->mu_fit[i][j];
         muressum_ctrl += state->mu_fit[i][j] * state->residual[i][j];
@@ -361,16 +359,15 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
     for (size_t j = 0; j < state->p_y; j++){
       state->residual[i][j] = *(state->y_std + state->n_y * j + i) -
       state->a * state->mu_fit[i][j];
-      s = j - *(state->trt_time + i) + 1 > 0 ? j - *(state->trt_time + i) + 1: 0;
 
       if (*(state->z + j * state->n_y + i) == 1)
       {
-        tau2sum_trt += pow(state->tau_fit[i][j] * state->beta_t[s], 2);
-        tauressum_trt += state->beta_t[s] * state->tau_fit[i][j] *
+        tau2sum_trt += pow(state->tau_fit[i][j] * state->beta_fit[i][j], 2);
+        tauressum_trt += state->beta_fit[i][j] * state->tau_fit[i][j] *
         state->residual[i][j];
       } else {
-        tau2sum_ctrl += pow(state->tau_fit[i][j] * state->beta_t[s], 2);
-        tauressum_ctrl += state->beta_t[s] * state->tau_fit[i][j] *
+        tau2sum_ctrl += pow(state->tau_fit[i][j] * state->beta_fit[i][j], 2);
+        tauressum_ctrl += state->beta_fit[i][j] * state->tau_fit[i][j] *
         state->residual[i][j];
       }
     }
@@ -421,7 +418,7 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
 
   for (size_t i = 0; i < state->n_y; i++){
     for (size_t j = 0; j < state->p_y; j++){
-      s = j - *(state->trt_time + i) + 1 > 0 ? j - *(state->trt_time + i) + 1: 0; 
+      s = *(state->post_trt_time + j * state->n_y + i);
       t_counts[s] += 1;
       if (*(state->z + state->n_y * j + i) == 0){
         res_ctrl[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
@@ -487,10 +484,13 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
     state->beta_t[i] = beta[i];
   }
 
-  // // match beta to beta_t
-  // for (size_t i = 0; i < state->p_y; i++){
-  //   state->beta_t[i] = beta[idx[i]];
-  // }
+  // // match beta_t to beta_fit
+  for (size_t i = 0; i < state->n_y; i++){
+    for (size_t j = 0; j < state->p_y; j++){
+      state->beta_fit[i][j] = state->beta_t[*(state->post_trt_time + j * state->n_y + i)];
+    }
+  }
+
 }
 
 

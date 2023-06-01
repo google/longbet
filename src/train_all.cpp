@@ -36,7 +36,7 @@ using namespace chrono;
 // [[Rcpp::plugins(cpp11)]]
 // [[Rcpp::export]]
 Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
-                    arma::mat t_con, arma::mat t_mod, arma::mat post_t, arma::mat trt_time,
+                    arma::mat t_con, arma::mat t_mod, arma::mat post_t, size_t beta_size,
                     size_t num_sweeps, size_t burnin = 1,
                     size_t max_depth = 1, size_t n_min = 5,
                     size_t num_cutpoints = 1,
@@ -135,7 +135,6 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix tcon_std(t_con.n_rows, t_con.n_cols);
     Rcpp::NumericMatrix tmod_std(t_mod.n_rows, t_mod.n_cols);
     Rcpp::NumericMatrix post_t_std(N, p_y);
-    Rcpp::NumericMatrix trt_time_std(N, 1);
 
     arma_to_rcpp(X, X_std);
     arma_to_rcpp(y, y_std);
@@ -143,7 +142,6 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     arma_to_rcpp(t_con, tcon_std);
     arma_to_rcpp(t_mod, tmod_std);
     arma_to_rcpp(post_t, post_t_std);
-    arma_to_rcpp(trt_time, trt_time_std);
     arma_to_std_ordered(X, Xorder_std);
     arma_to_std_ordered(t_con, torder_mu_std);
     arma_to_std_ordered(t_mod, torder_tau_std);
@@ -185,7 +183,6 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     double *tpointer_mu = &tcon_std[0];
     double *tpointer_tau = &tmod_std[0];
     double *post_t_pointer = &post_t_std[0];
-    double *trt_time_pointer = &trt_time_std[0];
     // double *Xtestpointer = &Xtest_std[0];
 
     std::vector<matrix<double>> tauhats_xinfo(num_sweeps);
@@ -240,9 +237,9 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     n_trt, p_pr, p_trt, p_y, num_trees, p_categorical_pr, p_categorical_trt,
     p_continuous_pr, p_continuous_trt, set_random_seed, random_seed, n_min,
     num_cutpoints, parallel, mtry_pr, mtry_trt, Xpointer, num_sweeps,
-    sample_weights_flag, ypointer, zpointer, trt_time_pointer, sigma_vec, b_vec, max_depth, y_mean,
+    sample_weights_flag, ypointer, zpointer, post_t_pointer, beta_size, sigma_vec, b_vec, max_depth, y_mean,
     burnin, model_trt->dim_suffstat));
-    cout << "state->beta_size = " << state->beta_size << endl;
+    // cout << "state->beta_size = " << state->beta_size << endl;
 
     // initialize X_struct for the prognostic term
     std::vector<double> initial_theta_pr(1, y_mean / (double)num_trees_pr);

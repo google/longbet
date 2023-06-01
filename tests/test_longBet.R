@@ -84,7 +84,7 @@ expand_z_mat <- cbind(matrix(0, n, (t0 - 1)), z_mat)
 t_longbet <- proc.time()
 longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
 num_trees_pr =  50, num_trees_trt = 50 ,
-pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 0.5)
+pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 # assume all unit get treated at t0 for test set to get CATE

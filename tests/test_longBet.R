@@ -83,14 +83,16 @@ expand_z_mat <- cbind(matrix(0, n, (t0 - 1)), z_mat)
 # longbet -----------------------------------------------------------------
 t_longbet <- proc.time()
 longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
-num_trees_pr =  50, num_trees_trt = 50 ,
-pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
+                       num_trees_pr =  50, num_trees_trt = 50 ,
+                       num_sweeps = 200, num_burnin = 100,
+                       pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 # assume all unit get treated at t0 for test set to get CATE
 z_test <- c(rep(0, t0 - 1), rep(1, t1 - t0 + 1)) %>% rep(times = n) %>%  matrix(nrow = t1, ncol = n) %>% t
 
 longbet.pred <- predict.longBet(longbet.fit, x, z_test)
+# longbet.pred <- predict.longBet(longbet.fit, x, 1:t1)
 mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
 tau_hat_longbet <- apply(longbet.pred$tauhats, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t1]
@@ -99,7 +101,6 @@ t_longbet <- proc.time() - t_longbet
 # results -----------------------------------------------------------------
 # check ate
 ate <- tau_mat %>% colMeans
-ate_bart <- tau_bart %>% colMeans
 ate_longbet <- tau_longbet %>% colMeans
 
 print(paste0("longbet CATE RMSE: ", round( sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2)), 2 ) ))
@@ -109,32 +110,32 @@ print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"
 
 # # visualize ---------------------------------------------------------------
 # ATE
-  ate_df <- data.frame(
-    time = t0:t1,
-    true = ate,
-    longbet = ate_longbet
-  )
+ate_df <- data.frame(
+  time = t0:t1,
+  true = ate,
+  longbet = ate_longbet
+)
 
-  ate_df %>%
-    gather("method", "ate", -time) %>%
-    ggplot(aes(time, ate)) +
-    geom_line(aes(color = method)) +
-    ylab(labs(title = "Average Treatment Effect"))
+ate_df %>%
+  gather("method", "ate", -time) %>%
+  ggplot(aes(time, ate)) +
+  geom_line(aes(color = method)) +
+  ylab(labs(title = "Average Treatment Effect"))
 
 
 # CATE
-  cate_df <- data.frame(
-    true = as.vector(t(tau_mat)),
-    lonbet = as.vector(t(tau_longbet)),
-    time = rep(c(t0:t1), nrow(tau_mat)),
-    id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
-  )
+cate_df <- data.frame(
+  true = as.vector(t(tau_mat)),
+  lonbet = as.vector(t(tau_longbet)),
+  time = rep(c(t0:t1), nrow(tau_mat)),
+  id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
+)
 
 cate_plot <-  cate_df %>%
-    gather("method", "cate", -time, -id) %>%
-    ggplot() +
-    geom_line(aes(time, cate, group = id, color = id)) +
-    facet_wrap(~method)
+  gather("method", "cate", -time, -id) %>%
+  ggplot() +
+  geom_line(aes(time, cate, group = id, color = id)) +
+  facet_wrap(~method)
 plot(cate_plot)
 
 # CATE error
@@ -151,6 +152,46 @@ error_plot <- cate_error %>%
   facet_wrap(~method)
 plot(error_plot)
 
+# check convergence 
+beta_df <- longbet.fit$beta_draws %>% t %>% data.frame
+beta_df$index <- 1:nrow(beta_df)
+converge_plot <- beta_df %>%
+  ggplot(aes(index, X8)) +
+  geom_point() +
+  geom_line()
+plot(converge_plot)
+
+treated <- which(z==1)[1]
+tau_df <- longbet.pred$tauhats[treated,t0, ] %>% data.frame
+colnames(tau_df) <- c("tauhat")
+tau_df$index <- 1:nrow(tau_df)
+converge_plot <- tau_df %>%
+  ggplot(aes(index, tauhat)) +
+  geom_point() +
+  geom_line() + 
+  geom_hline(yintercept = tau_mat[treated, 1])
+plot(converge_plot)
 
 
+treated <- which(z==0)[3]
+tau_df <- longbet.pred$tauhats[treated, t0, ] %>% data.frame
+colnames(tau_df) <- c("tauhat")
+tau_df$index <- 1:nrow(tau_df)
+converge_plot <- tau_df %>%
+  ggplot(aes(index, tauhat)) +
+  geom_point() +
+  geom_line() + 
+  geom_hline(yintercept = tau_mat[treated, 7])
+plot(converge_plot)
+
+# rmse convergence?
+n_sweeps <- dim(longbet.pred$tauhats)[3]
+rmse <- rep(NA, n_sweeps)
+for(i in 1:n_sweeps){
+  rmse[i] <- round( sqrt(mean((as.vector(longbet.pred$tauhats[,,i]) - as.vector(tau_mat))^2)), 2)
+}
+rmse_df <- data.frame(rmse = rmse, sweeps = 1:n_sweeps) 
+rmse_trace <- rmse_df %>% 
+  ggplot(aes(sweeps, rmse)) + geom_point() + geom_line()
+plot(rmse_trace)
 

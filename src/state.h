@@ -112,7 +112,8 @@ public:
             {
                 if (*(temp_pointer + i) == 1)
                 {
-                    this->full_residual_trt[j][index_trt] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[1] * this->beta_t[j] * this->tau_fit[i][j];
+                    // this->full_residual_trt[j][index_trt] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[1] * this->beta_t[j] * this->tau_fit[i][j];
+                    this->full_residual_trt[j][index_trt] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[1] * this->beta_fit[i][j] * this->tau_fit[i][j];
                     index_trt++;
 
                     // Unknown bug: the correct full residual should use beta_fit not beta_t.
@@ -120,7 +121,8 @@ public:
                 }
                 else
                 {
-                    this->full_residual_ctrl[j][index_ctrl] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[0] * this->beta_t[j] * this->tau_fit[i][j];
+                    // this->full_residual_ctrl[j][index_ctrl] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[0] * this->beta_t[j] * this->tau_fit[i][j];
+                    this->full_residual_ctrl[j][index_ctrl] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[0] * this->beta_fit[i][j] * this->tau_fit[i][j];
                     index_ctrl++;
                 }
             }

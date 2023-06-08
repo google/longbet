@@ -352,33 +352,32 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
   double tauressum_trt = 0;
   double s0 = pow(state->sigma_vec[0], 2);
   double s1 = pow(state->sigma_vec[1], 2);
-  size_t s = 0;
+  double n1 = std::accumulate(state->n_trt.begin(), state->n_trt.end(), 0.0);
+  double n0 = state->n_y * state->p_y - n1;
 
   for (size_t i = 0; i < state->n_y; i++)
   {
     for (size_t j = 0; j < state->p_y; j++){
-      state->residual[i][j] = *(state->y_std + state->n_y * j + i) -
-      state->a * state->mu_fit[i][j];
+      state->residual[i][j] = (*(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j]) / state->tau_fit[i][j] / state->beta_fit[i][j];
 
       if (*(state->z + j * state->n_y + i) == 1)
       {
-        tau2sum_trt += pow(state->tau_fit[i][j] * state->beta_fit[i][j], 2);
-        tauressum_trt += state->beta_fit[i][j] * state->tau_fit[i][j] *
-        state->residual[i][j];
+        tau2sum_trt += 1 / pow(state->tau_fit[i][j] * state->beta_fit[i][j], 2);
+        tauressum_trt += state->residual[i][j];
       } else {
-        tau2sum_ctrl += pow(state->tau_fit[i][j] * state->beta_fit[i][j], 2);
-        tauressum_ctrl += state->beta_fit[i][j] * state->tau_fit[i][j] *
-        state->residual[i][j];
+        tau2sum_ctrl += 1 / pow(state->tau_fit[i][j] * state->beta_fit[i][j], 2);
+        tauressum_ctrl +=  state->residual[i][j];
       }
     }
   }
 
   // update parameters
-  double v0 = 1 / (2 + tau2sum_ctrl / s0);
-  double v1 = 1 / (2 + tau2sum_trt / s1);
+  double v0 = 1 / (2 * s0 * tau2sum_ctrl / pow(n0, 2) + 1);
+  double v1 = 1 / (2 * s1 * tau2sum_trt / pow(n1, 2) + 1);
 
-  double m0 = v0 * (tauressum_ctrl) / s0;
-  double m1 = v1 * (tauressum_trt) / s1;
+  double m0 = v0 * (tauressum_ctrl) / n0;
+  double m1 = v1 * (tauressum_trt) / n1;
+
 
   // sample b0, b1
   double b0 = m0 + sqrt(v0) * normal_samp(state->gen);

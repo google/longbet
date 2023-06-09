@@ -99,18 +99,6 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
       state->update_split_counts(tree_ind, 0);  // update split counts for mu 
     }
 
-    if (sweeps != 0)
-    {
-      if (a_scaling)  // in case b_scaling on, we update b0 and b1
-      {
-        model_ps->update_a_value(state);
-      }
-      if (b_scaling)  // in case b_scaling on, we update b0 and b1
-      {
-        model_trt->update_b_values(state);
-      }
-    }
-
     model_ps->set_state_status(state, 1, X_tau_std, Xorder_tau_std, x_struct_trt->t_std);
     
     ////////////// Treatment term loop
@@ -154,16 +142,18 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
       model_trt->state_sweep(tree_ind, state->tau_fit, x_struct_trt); // update total tau_fit by adding just fitted values
 
       state->update_split_counts(tree_ind, 1); // update split counts for tau
-      if (sweeps != 0)
+      
+    }
+
+    if (sweeps != 0)
+    {
+      if (a_scaling) // in case b_scaling on, we update b0 and b1
       {
-        if (a_scaling) // in case b_scaling on, we update b0 and b1
-        {
-          model_ps->update_a_value(state);
-        }
-        if (b_scaling) // in case b_scaling on, we update b0 and b1
-        {
-          model_trt->update_b_values(state);
-        }
+        model_ps->update_a_value(state);
+      }
+      if (b_scaling) // in case b_scaling on, we update b0 and b1
+      {
+        model_trt->update_b_values(state);
       }
     }
 

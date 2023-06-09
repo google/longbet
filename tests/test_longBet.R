@@ -177,7 +177,7 @@ plot(rmse_trace)
 sigma0 <- longbet.fit$sigma0_draws %>% as.vector
 sigma1 <- longbet.fit$sigma1_draws %>% as.vector
 sigma_df <- data.frame(iter = 1:length(sigma0), sigma0 = sigma0, sigma1 = sigma1)
-sigma_tarce <- sigma_df %>% gather(key = "param", value = "value", -iter) %>%
+sigma_trace <- sigma_df %>% gather(key = "param", value = "value", -iter) %>%
   ggplot(aes(iter, value, color = param)) + geom_point() + geom_line()
 plot(sigma_trace)
 

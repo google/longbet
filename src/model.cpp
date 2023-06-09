@@ -338,6 +338,33 @@ void longBetModel::update_a_value(std::unique_ptr<State> &state)
 
   // sample a
   state->a = m1 + sqrt(v1) * normal_samp(state->gen);
+
+    // double n = state->n_y * state->p_y;
+
+  // // compute the residual y-b*beta_t*tau(x)
+  // for (size_t i = 0; i < state->n_y; i++)
+  // {
+  //   for (size_t j = 0; j < state->p_y; j++){
+  //     if ((*(state->z + j * state->n_y + i)) == 1)
+  //     {
+  //       state->residual[i][j] = (*(state->y_std + state->n_y * j + i) - state->b_vec[1] * state->beta_fit[i][j] * state->tau_fit[i][j]) / state->mu_fit[i][j];
+
+  //       mu2sum_trt += 1 / pow(state->mu_fit[i][j], 2);
+  //       muressum_trt += state->residual[i][j];
+  //     } else {
+  //       state->residual[i][j] = (*(state->y_std + state->n_y * j + i) - state->b_vec[0] * state->beta_fit[i][j] * state->tau_fit[i][j]) / state->mu_fit[i][j];
+
+  //       mu2sum_ctrl += 1 / pow(state->mu_fit[i][j], 2);
+  //       muressum_ctrl += state->residual[i][j];
+  //     }
+  //   }
+  // }
+
+  // // update parameters
+  // double tilde_sigma = (s0 * mu2sum_ctrl + s1 * mu2sum_trt) / pow(n, 2);
+  // double m1 = (muressum_ctrl + muressum_trt) / n / (tilde_sigma + 1);
+  // double v1 = 1 / (1 + 1 / tilde_sigma);
+  
 }
 
 // updates parameters b0, b1

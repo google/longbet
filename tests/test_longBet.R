@@ -161,28 +161,6 @@ converge_plot <- beta_df %>%
   geom_line()
 plot(converge_plot)
 
-treated <- which(z==1)[1]
-tau_df <- longbet.pred$tauhats[treated,t0, ] %>% data.frame
-colnames(tau_df) <- c("tauhat")
-tau_df$index <- 1:nrow(tau_df)
-converge_plot <- tau_df %>%
-  ggplot(aes(index, tauhat)) +
-  geom_point() +
-  geom_line() + 
-  geom_hline(yintercept = tau_mat[treated, 1])
-plot(converge_plot)
-
-
-treated <- which(z==0)[3]
-tau_df <- longbet.pred$tauhats[treated, t0, ] %>% data.frame
-colnames(tau_df) <- c("tauhat")
-tau_df$index <- 1:nrow(tau_df)
-converge_plot <- tau_df %>%
-  ggplot(aes(index, tauhat)) +
-  geom_point() +
-  geom_line() + 
-  geom_hline(yintercept = tau_mat[treated, 7])
-plot(converge_plot)
 
 # rmse convergence?
 n_sweeps <- dim(longbet.pred$tauhats)[3]
@@ -194,4 +172,24 @@ rmse_df <- data.frame(rmse = rmse, sweeps = 1:n_sweeps)
 rmse_trace <- rmse_df %>% 
   ggplot(aes(sweeps, rmse)) + geom_point() + geom_line()
 plot(rmse_trace)
+
+# sigma convergence
+sigma0 <- longbet.fit$sigma0_draws %>% as.vector
+sigma1 <- longbet.fit$sigma1_draws %>% as.vector
+sigma_df <- data.frame(iter = 1:length(sigma0), sigma0 = sigma0, sigma1 = sigma1)
+sigma_tarce <- sigma_df %>% gather(key = "param", value = "value", -iter) %>%
+  ggplot(aes(iter, value, color = param)) + geom_point() + geom_line()
+plot(sigma_trace)
+
+
+param_df <- data.frame(iter = 1:longbet.fit$model_params$num_sweeps, 
+                       a = as.vector(longbet.fit$a_draws),
+                       b0 = as.vector(longbet.fit$b_draws[,1]),
+                       b1 = as.vector(longbet.fit$b_draws[,2]))
+param_trace <- param_df %>% gather(key = "param", value = "value", -iter) %>%
+  ggplot(aes(iter, value, color = param)) + geom_point() + geom_line()
+plot(param_trace)
+
+
+
 

@@ -422,11 +422,11 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
       t_counts[s] += 1;
       if (*(state->z + state->n_y * j + i) == 0){
         res_ctrl[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
-        diag_ctrl[s] += state->b_vec[0] * state->tau_fit[i][j];
+        diag_ctrl[s] += state->tau_fit[i][j];
         sig[s] += sig02;
       } else {
         res_trt[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
-        diag_trt[s] += state->b_vec[1] * state->tau_fit[i][j];
+        diag_trt[s] += state->tau_fit[i][j];
         sig[s] += sig12;
       }
     }

@@ -173,7 +173,7 @@ longbet <- function(y, x, z, t, pcat,
     verbose = FALSE; parallel = TRUE
     set_random_seed = TRUE; random_seed = 0
     sample_weights_flag = TRUE
-    a_scaling = TRUE; b_scaling = TRUE
+    a_scaling = TRUE; b_scaling = FALSE
 
     obj = longBet_cpp(y = y,
                     X = x, 

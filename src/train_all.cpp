@@ -154,8 +154,15 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     sigma_vec[0] = 1.0;
     sigma_vec[1] = 1.0;
 
-    double bscale0 = -0.5;
-    double bscale1 = 0.5;
+    double bscale0, bscale1;
+    if (b_scaling){
+        bscale0 = -0.5;
+        bscale1 = 0.5;
+    } else {
+        bscale0 = 0.1;
+        bscale1 = 1;
+    }
+    
 
     std::vector<double> b_vec(2);  // vector of sigma0, sigma1
     b_vec[0] = bscale0;

@@ -84,7 +84,7 @@ expand_z_mat <- cbind(matrix(0, n, (t0 - 1)), z_mat)
 t_longbet <- proc.time()
 longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
                        num_trees_pr =  50, num_trees_trt = 50 ,
-                       num_sweeps = 200, num_burnin = 100,
+                       num_sweeps = 100, num_burnin = 20,
                        pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
@@ -138,57 +138,34 @@ cate_plot <-  cate_df %>%
   facet_wrap(~method)
 plot(cate_plot)
 
-# CATE error
-cate_error <- data.frame(
-  lonbet = as.vector(t(tau_longbet - tau_mat)),
-  time = rep(c(t0:t1), nrow(tau_mat)),
-  id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
-)
-
-error_plot <- cate_error %>%
-  gather("method", "cate", -time, -id) %>%
-  ggplot() +
-  geom_line(aes(time, cate, group = id, color = id)) +
-  facet_wrap(~method)
-plot(error_plot)
-
 # check convergence 
-beta_df <- longbet.fit$beta_draws %>% t %>% data.frame
-beta_df$index <- 1:nrow(beta_df)
-converge_plot <- beta_df %>%
-  ggplot(aes(index, X8)) +
-  geom_point() +
-  geom_line()
-plot(converge_plot)
-
-
 # rmse convergence?
 n_sweeps <- dim(longbet.pred$tauhats)[3]
 rmse <- rep(NA, n_sweeps)
 for(i in 1:n_sweeps){
-  rmse[i] <- round( sqrt(mean((as.vector(longbet.pred$tauhats[,,i]) - as.vector(tau_mat))^2)), 2)
+  rmse[i] <- round( sqrt(mean((as.vector(longbet.pred$tauhats[,t0:t1,i]) - as.vector(tau_mat))^2)), 2)
 }
 rmse_df <- data.frame(rmse = rmse, sweeps = 1:n_sweeps) 
 rmse_trace <- rmse_df %>% 
   ggplot(aes(sweeps, rmse)) + geom_point() + geom_line()
 plot(rmse_trace)
 
-# sigma convergence
-sigma0 <- longbet.fit$sigma0_draws %>% as.vector
-sigma1 <- longbet.fit$sigma1_draws %>% as.vector
-sigma_df <- data.frame(iter = 1:length(sigma0), sigma0 = sigma0, sigma1 = sigma1)
-sigma_trace <- sigma_df %>% gather(key = "param", value = "value", -iter) %>%
-  ggplot(aes(iter, value, color = param)) + geom_point() + geom_line()
-plot(sigma_trace)
-
-
-param_df <- data.frame(iter = 1:longbet.fit$model_params$num_sweeps, 
-                       a = as.vector(longbet.fit$a_draws),
-                       b0 = as.vector(longbet.fit$b_draws[,1]),
-                       b1 = as.vector(longbet.fit$b_draws[,2]))
-param_trace <- param_df %>% gather(key = "param", value = "value", -iter) %>%
-  ggplot(aes(iter, value, color = param)) + geom_point() + geom_line()
-plot(param_trace)
+# # sigma convergence
+# sigma0 <- longbet.fit$sigma0_draws %>% as.vector
+# sigma1 <- longbet.fit$sigma1_draws %>% as.vector
+# sigma_df <- data.frame(iter = 1:length(sigma0), sigma0 = sigma0, sigma1 = sigma1)
+# sigma_trace <- sigma_df %>% gather(key = "param", value = "value", -iter) %>%
+#   ggplot(aes(iter, value, color = param)) + geom_point() + geom_line()
+# plot(sigma_trace)
+# 
+# 
+# param_df <- data.frame(iter = 1:longbet.fit$model_params$num_sweeps, 
+#                        a = as.vector(longbet.fit$a_draws),
+#                        b0 = as.vector(longbet.fit$b_draws[,1]),
+#                        b1 = as.vector(longbet.fit$b_draws[,2]))
+# param_trace <- param_df %>% gather(key = "param", value = "value", -iter) %>%
+#   ggplot(aes(iter, value, color = param)) + geom_point() + geom_line()
+# plot(param_trace)
 
 
 

@@ -145,7 +145,7 @@ get_z <- function(first.treat){
 ztrain <- sapply(data$first.treat, get_z) %>% t 
 
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
-                       num_sweeps = 60, num_burnin = 20,
+                       num_sweeps = 100, num_burnin = 20,
                        num_trees_pr =  50, num_trees_trt = 50,
                        pcat = 0, lambda_knl = 1)
 

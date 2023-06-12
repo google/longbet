@@ -159,7 +159,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         bscale0 = -0.5;
         bscale1 = 0.5;
     } else {
-        bscale0 = 0.1;
+        bscale0 = 1;
         bscale1 = 1;
     }
     

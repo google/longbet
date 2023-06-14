@@ -138,15 +138,31 @@ cate_plot <-  cate_df %>%
   facet_wrap(~method)
 plot(cate_plot)
 
+# # muhat
+# y0hat <- longbet.pred$muhats %>% apply(MARGIN = c(1, 2), mean) %>% data.frame
+# y0_df <- data.frame(
+#   true = as.vector(t(mu_mat)),
+#   lonbet = as.vector(t(y0hat)),
+#   time = rep(c(1:t1), nrow(mu_mat)),
+#   id = as.vector(sapply(1:nrow(y0hat), rep, (t1)))
+# )
+# 
+# y0_plot <-  y0_df %>%
+#   gather("method", "cate", -time, -id) %>%
+#   ggplot() +
+#   geom_line(aes(time, cate, group = id, color = id)) +
+#   facet_wrap(~method)
+# plot(y0_plot)
+
+
 # check convergence 
-# rmse convergence?
 n_sweeps <- dim(longbet.pred$tauhats)[3]
 rmse <- rep(NA, n_sweeps)
 for(i in 1:n_sweeps){
   rmse[i] <- round( sqrt(mean((as.vector(longbet.pred$tauhats[,t0:t1,i]) - as.vector(tau_mat))^2)), 2)
 }
-rmse_df <- data.frame(rmse = rmse, sweeps = 1:n_sweeps) 
-rmse_trace <- rmse_df %>% 
+rmse_df <- data.frame(rmse = rmse, sweeps = 1:n_sweeps)
+rmse_trace <- rmse_df %>%
   ggplot(aes(sweeps, rmse)) + geom_point() + geom_line()
 plot(rmse_trace)
 

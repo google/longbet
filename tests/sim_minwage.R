@@ -221,3 +221,44 @@ att_plot <- rbind(did_att, staggered_att, true_att) %>% #longbet_att
   facet_wrap(~group, ncol = 1) +
   labs(y = "ATT")
 plot(att_plot)
+
+
+
+# Plot estimated muhat and tauhat of each group, compare to ground truth
+muhat <- longbet.pred$muhats %>% apply(MARGIN = c(1, 2), mean) %>% data.frame
+tauhat <- longbet.pred$tauhats %>% apply(MARGIN = c(1, 2), mean) %>% data.frame
+yhat <- muhat + tauhat
+colnames(muhat) <- c(2003:2007)
+colnames(yhat) <- c(2003:2007)
+muhat$group <-data$first.treat %>% as.factor
+yhat$group <- data$first.treat %>% as.factor
+
+mu_df <- muhat %>% 
+  gather(key = "year", value = "lemp", -group) %>%
+  group_by(group, year) %>% summarise(lemp = mean(lemp))
+mu_df$year <- as.numeric(mu_df$year)
+
+yhat_df <- yhat %>% 
+  gather(key = "year", value = "lemp", -group) %>%
+  group_by(group, year) %>% summarise(lemp = mean(lemp))
+yhat_df$year <- as.numeric(mu_df$year)
+
+ground_truth <- data %>%
+  select('first.treat', '2003', '2004', '2005', '2006', '2007') %>%
+  gather(key = "year", value = "lemp", -first.treat) %>%
+  group_by(first.treat, year) %>%
+  summarise(lemp = mean(lemp))
+ground_truth$group <- as.factor(ground_truth$first.treat)
+ground_truth$year <- as.numeric(ground_truth$year)
+ground_truth$first.treat <- NULL
+
+ground_truth$label <- "true"
+mu_df$label <- "y0hat"
+yhat_df$label <- "y1hat"
+
+yhat_plot <- rbind(ground_truth, mu_df, yhat_df) %>% 
+  ggplot(aes(x = year, y = lemp, color = label)) +
+  geom_point() +  geom_line() + 
+  facet_wrap(~group)
+plot(yhat_plot)
+

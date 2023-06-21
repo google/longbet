@@ -92,6 +92,7 @@ longbet_att <- data.frame(
 data <- mpdta %>%  spread(key = "year", value = "lemp")
 
 xtrain <- as.matrix(data$lpop)
+xtrain <- cbind(xtrain, as.numeric(data$first.treat))
 ytrain <- as.matrix(data[, c("2003", "2004", "2005", "2006", "2007")])
 get_z <- function(first.treat){
   if (first.treat == 0) {
@@ -104,7 +105,7 @@ ztrain <- sapply(data$first.treat, get_z) %>% t
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
                        num_sweeps = 100, num_burnin = 20, 
                        num_trees_pr =  50, num_trees_trt = 50,
-                       pcat = 0, lambda_knl = 1)
+                       pcat = 1, lambda_knl = 1)
 
 longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)

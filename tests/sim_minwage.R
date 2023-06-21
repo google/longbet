@@ -135,6 +135,7 @@ true_att <- cbind(trt_df) %>%
 data <- mpdta %>%  spread(key = "year", value = "lemp")
 
 xtrain <- as.matrix(data$lpop)
+xtrain <- cbind(xtrain, as.numeric(data$first.treat))
 ytrain <- as.matrix(data[, c("2003", "2004", "2005", "2006", "2007")])
 get_z <- function(first.treat){
   if (first.treat == 0) {
@@ -147,7 +148,7 @@ ztrain <- sapply(data$first.treat, get_z) %>% t
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
                        num_sweeps = 100, num_burnin = 20,
                        num_trees_pr =  50, num_trees_trt = 50,
-                       pcat = 0, lambda_knl = 1)
+                       pcat = 1, lambda_knl = 1)
 
 longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
@@ -252,11 +253,22 @@ ground_truth$group <- as.factor(ground_truth$first.treat)
 ground_truth$year <- as.numeric(ground_truth$year)
 ground_truth$first.treat <- NULL
 
-ground_truth$label <- "true"
+y0_df <- cbind(data$`2003`, mu_mat) %>% data.frame
+colnames(y0_df) <- c(2003:2007)
+y0_df$group <- data$first.treat
+y0_df <- y0_df %>%
+  gather(key = "year", value = "lemp", -group)%>%
+  group_by(group, year) %>%
+  summarise(lemp = mean(lemp))
+y0_df$group <- as.factor(y0_df$group)
+y0_df$year <- as.numeric(y0_df$year)
+
+y0_df$label <- "y0"
+ground_truth$label <- "y1"
 mu_df$label <- "y0hat"
 yhat_df$label <- "y1hat"
 
-yhat_plot <- rbind(ground_truth, mu_df, yhat_df) %>% 
+yhat_plot <- rbind(y0_df, ground_truth, mu_df, yhat_df) %>% 
   ggplot(aes(x = year, y = lemp, color = label)) +
   geom_point() +  geom_line() + 
   facet_wrap(~group)

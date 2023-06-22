@@ -20,12 +20,13 @@ control_diff <- data %>%
   apply(MARGIN = 1, diff) %>% 
   t() %>%
   colMeans()
+control_diff <- c(0, control_diff)
 
 mu_factor <- sin(data$lpop / max(data$lpop) + 2)
 mu_mat <- data[, c("2003")] + outer(mu_factor, control_diff)
 mu_mat <- mu_mat + 0.1 * mean(mu_mat) * rnorm(mu_mat) 
 
-trt_idx <- sapply(data$first.treat, function(x) 2004:2007 - x + 1) %>% t
+trt_idx <- sapply(data$first.treat, function(x) 2003:2007 - x + 1) %>% t
 trt_idx[trt_idx>2003] <- 0
 trt_idx[trt_idx < 0] <- 0
 trt_idx <- trt_idx + 1
@@ -34,16 +35,16 @@ trt_effect <- c(0, -0.1, -0.3, -0.1, 0.1)
 trt_factor <- 2 * cos(data$lpop / max(data$lpop) - 1)
 trt_mat <- apply(trt_idx, 1, function(idx, te) te[idx], te = trt_effect) %>% t
 trt_mat <- trt_factor * trt_mat
-trt_mat <- trt_mat + 0.1*mean(trt_mat) * rnorm(trt_mat)
+trt_mat[trt_mat > 0] <- trt_mat[trt_mat > 0] + 0.1*mean(trt_mat) * rnorm(sum(trt_mat > 0))
 
-data[, sapply(2004:2007, toString)] <- mu_mat + trt_mat
+data[, sapply(2003:2007, toString)] <- mu_mat + trt_mat
 
 mpdta <- data %>% gather(key = "year", value = "lemp", -countyreal, -lpop, -first.treat, -treat)
 mpdta <- mpdta[, c("year", "countyreal", "lpop", "lemp", "first.treat", "treat")]
 mpdta$year <- as.numeric(mpdta$year)
 
 trt_df <- trt_mat %>% data.frame
-colnames(trt_df) <- sapply(2004:2007, toString)
+colnames(trt_df) <- sapply(2003:2007, toString)
 trt_df$group <- data$first.treat
 trt_df <- trt_df %>% gather(key = "t", value = "att", -group)
 
@@ -152,13 +153,16 @@ fit.ps <- XBART.multinomial(y = matrix(yclass), num_class = 4, X = xtrain,
                             # num_trees = 20, num_sweeps = 100, burnin = 20,
                             p_categorical = 0)
 ps.hat <- predict.XBARTmultinomial(fit.ps, xtrain)
-# xtrain <- matrix(data$lpop)
+xtrain <- matrix(data$lpop)
+
+# xtrain <- matrix(rnorm(nrow(ytrain)))
 xtrain <- cbind(ps.hat$prob[,2:4], xtrain)
+
 
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
                        num_sweeps = 100, num_burnin = 20,
                        num_trees_pr =  50, num_trees_trt = 50,
-                       pcat = 1, lambda_knl = 1)
+                       pcat = 0, lambda_knl = 1)
 
 longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
@@ -263,7 +267,7 @@ ground_truth$group <- as.factor(ground_truth$first.treat)
 ground_truth$year <- as.numeric(ground_truth$year)
 ground_truth$first.treat <- NULL
 
-y0_df <- cbind(data$`2003`, mu_mat) %>% data.frame
+y0_df <- mu_mat %>% data.frame
 colnames(y0_df) <- c(2003:2007)
 y0_df$group <- data$first.treat
 y0_df <- y0_df %>%
@@ -283,4 +287,12 @@ yhat_plot <- rbind(y0_df, ground_truth, mu_df, yhat_df) %>%
   geom_point() +  geom_line() + 
   facet_wrap(~group)
 plot(yhat_plot)
+
+# RMSE --------------------------------------------------------------------
+
+treated <- ztrain %>% as.logical
+catt.hat <- longbet.cate$cate[treated]
+catt <- trt_mat[treated]
+rmse <- (catt - catt.hat)^2 %>% mean %>% sqrt %>% round(digits = 3)
+print(paste("Longbet CATT RMSE", rmse))
 

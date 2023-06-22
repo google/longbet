@@ -23,7 +23,8 @@ longbet <- function(y, x, z, t, pcat,
                     num_trees_pr = 20, num_trees_trt = 20,
                     mtry = 0L, n_min = 10,
                     sig_knl = 1, lambda_knl = 1,
-                    split_time_ps = TRUE, split_time_trt = FALSE) {
+                    split_time_ps = TRUE, split_time_trt = FALSE,
+                    ps = NULL) {
 
     if(!("matrix" %in% class(x))){
         cat("Msg: input x is not a matrix, try to convert type.\n")
@@ -46,6 +47,21 @@ longbet <- function(y, x, z, t, pcat,
         stop("Lenght of input t should match the columns of y. \n")
     }
 
+    # if (!is.null(ps)){
+    #     if (!"matrix" %in% class(ps)){
+    #         ps = as.matrix(ps)
+    #     }
+    #     if (nrow(ps) != nrow(x)){
+    #         stop("Size of propsensity score vector should match x, \n")
+    #     } 
+    #     x_mod <- cbind(x, ps)
+    # }
+    # else {
+    #     x_mod <- x
+    #       # TODO: if propensity score is used in training, it should be provided in testing
+            # if it is not provided it should be estimated?
+    # }
+    
     # check if treatment all start at the same time
     # number of treated periods per unit should only be 0 or t1 - t0 + 1
     # unique_z_sum <- unique(rowSums(z))

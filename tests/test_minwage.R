@@ -4,6 +4,7 @@
 # required package: did https://github.com/bcallaway11/did
 
 library(longBet)
+library(XBART)
 library(did)
 library(tidyr)
 library(dplyr)
@@ -91,8 +92,8 @@ longbet_att <- data.frame(
 # longbet staggered adoption ----------------------------------------------
 data <- mpdta %>%  spread(key = "year", value = "lemp")
 
-xtrain <- as.matrix(data$lpop)
-xtrain <- cbind(xtrain, as.numeric(data$first.treat))
+xtrain <- as.matrix(data[, c("lpop", "countyreal")])
+# xtrain <- cbind(xtrain, as.numeric(data$first.treat))
 ytrain <- as.matrix(data[, c("2003", "2004", "2005", "2006", "2007")])
 get_z <- function(first.treat){
   if (first.treat == 0) {
@@ -102,10 +103,20 @@ get_z <- function(first.treat){
 }
 ztrain <- sapply(data$first.treat, get_z) %>% t 
 
+# get propensity score
+yclass <- factor(data$first.treat, labels = c(0, 1, 2, 3)) %>% as.numeric()
+yclass <- yclass - 1
+fit.ps <- XBART.multinomial(y = matrix(yclass), num_class = 4, X = xtrain,
+                          # num_trees = 20, num_sweeps = 100, burnin = 20,
+                          p_categorical = 0)
+ps.hat <- predict.XBARTmultinomial(fit.ps, xtrain)
+# xtrain <- matrix(data$lpop)
+xtrain <- cbind(ps.hat$prob[,2:4], xtrain)
+
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
                        num_sweeps = 100, num_burnin = 20, 
                        num_trees_pr =  50, num_trees_trt = 50,
-                       pcat = 1, lambda_knl = 1)
+                       pcat = 0, lambda_knl = 1)
 
 longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)

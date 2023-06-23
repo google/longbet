@@ -10,6 +10,12 @@ library(tidyr)
 library(dplyr)
 data(mpdta)
 
+income <- read.csv('income.csv') # https://www.kaggle.com/datasets/thedevastator/2013-irs-us-income-data-by-zip-code
+mpdta <- merge(mpdta, income, by = "countyreal", all.x = T)
+# fill missing value
+mpdta$income[is.na(mpdta$income)] <- mean(mpdta$income, na.rm = T)
+
+
 alpha <- 0.05
 gp_year <- c(2004, 2006, 2007)
 longbet_att <- data.frame(
@@ -92,7 +98,7 @@ longbet_att <- data.frame(
 # longbet staggered adoption ----------------------------------------------
 data <- mpdta %>%  spread(key = "year", value = "lemp")
 
-xtrain <- as.matrix(data[, c("lpop", "countyreal")])
+xtrain <- as.matrix(data[, c("lpop", "income")])
 # xtrain <- cbind(xtrain, as.numeric(data$first.treat))
 ytrain <- as.matrix(data[, c("2003", "2004", "2005", "2006", "2007")])
 get_z <- function(first.treat){
@@ -110,7 +116,6 @@ fit.ps <- XBART.multinomial(y = matrix(yclass), num_class = 4, X = xtrain,
                           # num_trees = 20, num_sweeps = 100, burnin = 20,
                           p_categorical = 0)
 ps.hat <- predict.XBARTmultinomial(fit.ps, xtrain)
-# xtrain <- matrix(data$lpop)
 xtrain <- cbind(ps.hat$prob[,2:4], xtrain)
 
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),

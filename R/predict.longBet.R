@@ -7,7 +7,7 @@
 #'
 #' @return A matrix for predicted prognostic effect and a matrix for predicted treatment effect. 
 #' @export
-predict.longBet <- function(model, x, z, sigma = NULL, lambda = NULL, ...) {
+predict.longBet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, ...) {
 
     print(dim(x))
     if(!("matrix" %in% class(x))) {
@@ -25,8 +25,12 @@ predict.longBet <- function(model, x, z, sigma = NULL, lambda = NULL, ...) {
         cat("Msg: input z is not a matrix, try to convert type.\n")
         z = as.matrix(z)
     }
+    
+    if (is.null(t)){
+        t = model$time
+    }
 
-    t_con <- as.matrix(1:ncol(z))
+    t_con <- t
     # t_mod <- as.matrix(rep(0, ncol(z)))
     t_mod <- as.matrix(sapply(t_con, function(x) max(x - model$t0, 0)))
     # print("Adjusted treatment time to predict:")

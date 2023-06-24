@@ -236,6 +236,7 @@ longbet <- function(y, x, z, t, pcat,
                     lambda_knl = lambda_knl)
     class(obj) = "longBet"
 
+    obj$time = t_con
     obj$t0 = t0
     obj$sdy = sdy
     obj$meany = meany

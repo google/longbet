@@ -4,12 +4,13 @@ library(dplyr)
 library(ggplot2)
 library(tidyr)
 library(longBet)
+library(forecast)
 # DATA GENERATION PROCESS -------------------------------------------------
 
 
 set.seed(1)
 n <- 2000
-t0 <- 3 # treatment start time
+t0 <- 6 # treatment start time
 t1 <- 12 # observed response period
 alpha = 0.05
 
@@ -18,44 +19,36 @@ x1 <- rnorm(n)
 x2 <- rnorm(n)
 x3 <- rnorm(n)
 x4 <- rbinom(n,1,0.5)
-x5 <- factor(sample(1:3,n,replace=TRUE,prob = c(0.4,0.3,0.3)))
+x5 <- factor(sample(1:3,n,replace=TRUE,prob = c(1/3, 1/3,1/3)))
 x <- cbind(x1, x2, x3, x4, x5)
 
 # define average time-varying treatment effect
 post_t <- 1:(t1 - t0 + 1) 
 beta_t <- dgamma(post_t, 2, 1)
 # define heterogeneous treatment effects
-tau <- 1 + 2 * abs(x[,2] * x[,5])
+gamma_i <- 1 + 2 * abs(x[,2] * x[,5])
 # time-varyiing heterogeneous treatment effect
-tau_mat <- 2 + 2 * outer(tau, beta_t , "*")
+tau_mat <- 2 * outer(gamma_i, beta_t , "*")
 # expand tau_mat
 tau_mat_full <- cbind(matrix(0, nrow = n, ncol = t0 - 1), tau_mat)
 
 # ## define prognostic function (RIC)
 mu = function(x){
-  lev = c(2, -1, -4)
-  result = -6 + lev[x[,5]] + 6 * abs(x[,3] - 1)
+  result =  2 * abs(x[,5] + 0.5 * x[,3] - 1)
   return(result)
 }
-# generate auto regressive time trend
-mu_t <- matrix(NA, n, t1)
-mu_t[, 1] <- 1
-alpha_t <- rnorm(t1, 0, 0.1) # generate pct change param
-for (i in 2:t1){
-  mu_t[, i] <- (1 + rnorm(n, alpha_t[i], 0.1)) * mu_t[, i-1]
-}
-mu_mat <- mu_t * matrix(rep(mu(x), t1), n, t1)
+arima_order <- c(1, 0, 1) 
+alpha_t <- arima.sim(model = list(order = arima_order, ar = 0.7, ma = -0.4), n = t1) + 1
+nu_i <- mu(x)
+mu_mat <- outer(nu_i, alpha_t, "*")
 
 # compute propensity scores and treatment assignment
 s <- sd(mu(x))
-pi <- 0.8 * pnorm(1 * mu(x) / s - 0.5 * x[,1]) + 0.05 + runif(n) / 10
-# z <- rbinom(n,1,pi)
-# z_mat <- matrix(rep(z, t1 - t0 + 1), n, t1 - t0 + 1)
-# higher propensity score means getting treated earlier
+pi <- 0.2 * pnorm(0.5* mu(x) - 0.5 * x[,1])^2 + runif(n) / 10
 z_mat <- matrix(0, n, t0 - 1)
 for (i in t0:t1){
   treated <- (z_mat[, i - 1] == 1)
-  treatment <- rbinom(n, 1, pi^2) # adjust the probability
+  treatment <- rbinom(n, 1, pi) # adjust the probability
   z <- apply(cbind(treatment, treated), 1, max) # draw new treatment for time i
   z_mat <- cbind(z_mat, z)
 }
@@ -136,6 +129,23 @@ plot_att <- att_df %>%
   geom_line(aes(color = method)) +
   ylab(labs(title = "Average Treatment Effect on Treated"))
 print(plot_att)
+
+# muhat
+y0hat <- longbet.pred$muhats %>% apply(MARGIN = c(1, 2), mean) %>% data.frame
+y0_df <- data.frame(
+  true = as.vector(t(mu_mat)),
+  lonbet = as.vector(t(y0hat)),
+  time = rep(c(1:t1), nrow(mu_mat)),
+  id = as.vector(sapply(1:nrow(y0hat), rep, (t1)))
+)
+
+y0_plot <-  y0_df %>%
+  gather("method", "y0", -time, -id) %>%
+  ggplot() +
+  geom_line(aes(time, y0, group = id, color = id)) +
+  facet_wrap(~method)
+plot(y0_plot)
+
 
 # CATE
 catt_df <- data.frame(

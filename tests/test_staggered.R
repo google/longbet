@@ -14,7 +14,7 @@ t0 <- 6 # treatment start time
 t1 <- 12 # observed response period
 alpha = 0.05
 
-# generate dcovariates
+# generate covariates
 x1 <- rnorm(n)
 x2 <- rnorm(n)
 x3 <- rnorm(n)

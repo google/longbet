@@ -1,0 +1,274 @@
+---
+title: "Comparing LongBet with baseline methods"
+author: "Maggie Wang"
+date:  "`r Sys.Date()`"
+output: rmarkdown::github_document
+---
+
+# Comparing LongBet with baseline methods on staggered adoption design
+
+**Note: this is not supposed to be an evaluation of the different estimators/packages.** Load packages.
+
+```{r setup, echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+devtools::install_github('MaggieWang0614/longbet')
+require(dplyr)
+require(ggplot2)
+require(tidyr)
+require(panelView)
+require(stringr)
+require(MetBrewer)
+# baseline approach
+require(did) # https://github.com/bcallaway11/did
+require(fixest)
+```
+
+First, we create a simulated data set, with pre-treatment covariates, staggered treatments, heterogeneous and dynamic treatment effects. The pre-treatment covariates and heterogeneity are based on dgp in the BCF paper. There are 5 pre-treatment covariates, three are continuous variables and two are categorical variables. The dynamic prognostic effect is simulated from an ARIMA(1, 0, 1) model and the dynamic treatment effect is a decaying function. The staggered adoption is sampled from propensity score.. Consider a total of 12 periods with 5 pre-treatment periods, the staggerd adoption starts at period 6.
+
+```{r sim data}
+dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-linear", trt_type = "heterogeneous"){
+  # screening
+  if (t0 > t1){
+    stop("Treatment start time (t0) can not be greater than t1")
+  }
+  if(!(pr_type %in% c("linear", "non-linear"))){
+    stop("pr_type should be either linear or non-linear")
+  }
+  if(!(trt_type %in% c("homogeneous", "heterogeneous"))){
+    stop("trt_type should be either homogeneous or heterogeneous")
+  }
+  
+  results <- list()
+  # generate covariates
+  x <- matrix(data = NA, nrow = n, ncol = 5)
+  x[,1] <- rnorm(n)
+  x[,2] <- rnorm(n)
+  x[,3] <- rnorm(n)
+  x[,4] <- rbinom(n,1,0.5)
+  x[,5] <- factor(sample(1:3,n,replace=TRUE,prob = c(1/3, 1/3, 1/3)))
+  results$x <- x
+  
+  # generate prognostic effect
+  f_t <- arima.sim(model = list(order = c(1, 0, 1), ar = 0.7, ma = -0.4), n = t1) + 1
+  g <- c(2, -1)
+  if(pr_type == "linear"){
+    gamma_x <- 1 + g[x[, 4] + 1] +  2 * x[, 3]
+  } else if (pr_type == "non-linear"){
+    gamma_x <- -6 + g[x[, 4] + 1] + 6 * x[, 1] * abs(x[, 3] - 1)
+  }
+  y0 <- outer(gamma_x, f_t, "*")
+  results$y0 <- y0
+  
+  # generate treatment effect 
+  s <- 1:(t1 - t0 + 1) 
+  h_s <- s * exp(-s)
+  if(trt_type == "homogeneous"){
+    nu_x <- rep(1, n)
+  } else if (trt_type == "heterogeneous"){
+    nu_x <- 1 + 5 * x[, 2] * x[, 5]
+  }
+  tau <- outer(nu_x, h_s , "*")
+  
+  # compute propensity scores and generate treatment assignment
+  pi <- 0.2 * pnorm(0.5* gamma_x - 0.5 * x[,1])^2 + runif(n) / 10
+  z <- matrix(0, n, t1)
+  for (i in t0:t1){
+    treated <- (z[, i - 1] == 1)
+    treatment <- rbinom(n, 1, pi) # draw new treatment for time i
+    z[, i] <- apply(cbind(treated, treatment), 1, max) 
+  }
+  results$z <- z
+  
+  # get post treatment time matrix
+  post_t <- t(apply(z, 1, cumsum))
+  
+  get_tau <- function(trt, post_t){
+    tau <- rep(0, length(post_t))
+    tau[post_t > 0] = trt[post_t[post_t > 0]]
+    return(tau)
+  }
+  tau <- t(mapply(get_tau, data.frame(t(tau)), data.frame(t(post_t))))
+  results$tau <- tau
+  
+  # generate outcome variable
+  results$y <-  y0 + tau + matrix(rnorm(n*t1, mean = 0, sd = 0.5), n, t1)
+  
+  return(results)
+}
+
+n = 2000
+t0 = 6
+t1 = 12
+pr_type = "non-linear"
+trt_type = "heterogeneous"
+alpha = 0.05
+data <- dgp(n, t0, t1, pr_type = pr_type, trt_type = trt_type)
+
+# get training data
+ytrain <- data$y
+ztrain <- data$z
+xtrain <- data$x
+
+# stack data
+first.treat <- t1 - rowSums(ztrain) + 1
+first.treat[first.treat == t1 + 1] <- 0
+panel.data <- data.frame(
+  ytrain = as.vector( t(ytrain) ),
+  ztrain = as.vector( t(ztrain) ),
+  first.treat = as.vector( sapply(first.treat, rep, t1)),
+  id = as.vector( sapply(1:n, rep, t1)),
+  time = rep(1:t1, n),
+  X1 = as.vector( sapply(xtrain[,1], rep, t1)),
+  X2 = as.vector( sapply(xtrain[,2], rep, t1)),
+  X3 = as.vector( sapply(xtrain[,3], rep, t1)),
+  X4 = as.vector( sapply(xtrain[,4], rep, t1)),
+  X5 = as.vector( sapply(xtrain[,5], rep, t1))
+)
+
+
+# align treatment effect
+align_tau <- matrix(NA, nrow = n, ncol = t1 - t0 + 1)
+for (i in 1:n){
+  if (sum(ztrain[i,]) == 0) {next}
+  align_tau[i, 1:sum(ztrain[i,])] = data$tau[i, ztrain[i,] == 1]
+} 
+
+att <- colMeans(align_tau, na.rm = T)
+att.df <- data.frame(
+  t = 0:(t1 - t0),
+  estimate = att,
+  conf.low = att,
+  conf.high = att,
+  method = rep("True", t1 - t0 + 1)
+)
+```
+
+We can plot the data and treatment status using Licheng Liu and Yiqing Xu's awesome `panelView` package [@liu.2021.panelview].
+
+```{r plot treatment, message=FALSE}
+panelview(ytrain ~ ztrain, data = panel.data, index = c("id","time"), xlab = "Time", ylab = "Unit", axis.lab.gap = 5, display.all = T)
+```
+
+First we estimate the treatment effect with LongBet
+
+```{r longbet}
+longbet.time <- proc.time()
+longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
+                       num_sweeps = 120,
+                       num_trees_pr =  20, num_trees_trt = 20,
+                       pcat = ncol(xtrain) - 3)
+
+longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
+# align catt
+num_sweeps <- dim(longbet.pred$tauhats)[3]
+align_catt <- array(NA, dim = c(n, t1 - t0 + 1, num_sweeps))
+for (i in 1:n){
+  if (sum(ztrain[i,]) == 0) {next}
+  align_catt[i, 1:sum(ztrain[i,]), ] = longbet.pred$tauhats[i, ztrain[i,] == 1, ]
+} 
+
+longbet.att <- align_catt %>%
+  apply(c(2, 3), mean, na.rm = T) %>% t() %>%
+  data.frame() %>%
+  gather("t", "CATT") %>%
+  mutate(t =  as.double(str_replace_all(t, c("X" = ""))) - 1) %>%
+  group_by(t) %>%
+  summarise(
+    estimate = mean(CATT),
+    conf.low = quantile(CATT, prob = alpha / 2),
+    conf.high = quantile(CATT, prob = 1 - alpha / 2),
+    method = "LongBet"
+  )
+```
+
+We then estimate the treatment effect using DiD with multiple periods.
+
+```{r did}
+did.time <- proc.time()
+did.out <- att_gt(yname = "ytrain",
+              gname = "first.treat",
+              idname = "id",
+              tname = "time",
+              xformla = ~ X1 + X3 + X2 + X4 + X5,
+              data = panel.data,
+              est_method = "dr",
+              control_group = "notyettreated"
+)
+DiD <- aggte(did.out, type = "dynamic", na.rm = TRUE) %>% 
+  tidy() %>% 
+  rename(t = event.time) %>% 
+  filter(t >= 0 & t < 8) %>% 
+  select(t, estimate, conf.low, conf.high) %>% 
+  mutate(method = "DiD")
+did.time <- proc.time() - did.time
+```
+
+We can also supply the DiD method with known relationship in covariates for non-linear prognostic effects.
+
+```{r did non-linear}
+did_nl.time <- proc.time()
+if (pr_type == "linear"){
+  did_nl.out <- att_gt(yname = "ytrain",
+                gname = "first.treat",
+                idname = "id",
+                tname = "time",
+                xformla = ~ X1 + X3 + X2 + X4 + X5,
+                data = panel.data,
+                est_method = "dr",
+                control_group = "notyettreated"
+  )
+} else {
+  did_nl.out <- att_gt(yname = "ytrain",
+              gname = "first.treat",
+              idname = "id",
+              tname = "time",
+              xformla = ~ X1 * X3 + X2 + X4 + X5,
+              data = panel.data,
+              est_method = "dr",
+              control_group = "notyettreated")
+}
+
+DiD_nl <- aggte(did_nl.out, type = "dynamic", na.rm = TRUE) %>% 
+  tidy() %>% 
+  rename(t = event.time) %>% 
+  filter(t >= 0 & t < 8) %>% 
+  select(t, estimate, conf.low, conf.high) %>% 
+  mutate(method = "Non-linear DiD")
+did_nl.time = proc.time() - did_nl.time
+```
+
+#### I would like to estimate the treatment effect with TWFE model but I don't know how to use the pre-treatment covariates in this setting.
+
+```{r twfe}
+panel.data$time_to_treatment <- panel.data$time - panel.data$first.treat
+panel.data$time_to_treatment[panel.data$first.treat==0] <- -1000
+# How can I add continuous pre-treatment covariates X1, X2, X3 in the fixed effect model?
+twfe <- panel.data %>% 
+  do(broom::tidy(feols(ytrain ~ + i(time_to_treatment, ref = c(-1, -1000)) | id + time + X4 + X5, 
+                       data = .), conf.int = TRUE)) %>% 
+  mutate(t =  as.double(str_replace_all(term, c("time_to_treatment::" = "", ":treated" = "")))) %>% 
+  filter(t >= 0 & t < 8) %>%
+  select(t, estimate, conf.low, conf.high) %>% 
+  # add in data for year -1
+  bind_rows(tibble(t = -1, estimate = 0, 
+                   conf.low = 0, conf.high = 0
+  )) %>% 
+  mutate(method = "TWFE")
+```
+
+```{r plot}
+# coefs <- bind_rows(att.df, longbet.att, DiD, DiD_nl)
+coefs <- bind_rows(att.df, longbet.att, DiD, DiD_nl, twfe)
+
+plot <- coefs %>% 
+  ggplot(aes(x = t, y = estimate, color = method)) + 
+  geom_point(aes(x = t, y = estimate), position = position_dodge2(width = 0.8), size = 1) +
+  geom_linerange(aes(x = t, ymin = conf.low, ymax = conf.high), position = position_dodge2(width = 0.8), size = 0.75) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = .25, alpha = 0.75) + 
+  geom_vline(xintercept = -0.5, linetype = "dashed", size = .25) +
+  scale_color_manual(name="Estimation Method", values= met.brewer("Cross", 8, "discrete")) +
+  theme(legend.position= 'bottom') +
+  labs(title = 'Event Time Estimates', y="ATT", x = "Relative Time") + 
+  guides(col = guide_legend(nrow = 3)) 
+print(plot)
+```

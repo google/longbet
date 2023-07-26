@@ -7,6 +7,7 @@
 require(longbet)
 require(dplyr)
 require(tidyr)
+require(stringr)
 require(forecast) # for data generating process
 require(did)
 

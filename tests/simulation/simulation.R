@@ -25,7 +25,7 @@ trt_types <- c("homogeneous", "heterogeneous")
 pcat <- 2    # number of categorical variable
 
 if (file.exists('att.csv') & file.exists('catt.csv')){
-  att.results <- read.cvs('att.csv')
+  att.results <- read.csv('att.csv')
   catt.results <- read.csv('catt.csv')
 } else {
   att.results <- data.frame(

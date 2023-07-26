@@ -16,6 +16,7 @@ mc <- 10 #1000 # monte carlo iterations
 n <- 2000      # number of observations
 t0 <- 6        # earliest treatment adoption time
 t1 <- 12       # total time period
+alpha <- 0.05
 pr_types <- c("linear", "non-linear")
 trt_types <- c("homogeneous", "heterogeneous")
 pcat <- 2    # number of categorical variable
@@ -63,6 +64,22 @@ for (pr in pr_types){
       ytrain <- data$y
       ztrain <- data$z
       
+      # panel view
+      first.treat <- t1 - rowSums(ztrain) + 1
+      first.treat[first.treat == t1 + 1] <- 0
+      panel.data <- data.frame(
+        ytrain = as.vector( t(ytrain) ),
+        ztrain = as.vector( t(ztrain) ),
+        first.treat = as.vector( sapply(first.treat, rep, t1)),
+        id = as.vector( sapply(1:n, rep, t1)),
+        time = rep(1:t1, n),
+        X1 = as.vector( sapply(xtrain[,1], rep, t1)),
+        X2 = as.vector( sapply(xtrain[,2], rep, t1)),
+        X3 = as.vector( sapply(xtrain[,3], rep, t1)),
+        X4 = as.vector( sapply(xtrain[,4], rep, t1)),
+        X5 = as.vector( sapply(xtrain[,5], rep, t1))
+      )
+      
       # align treatment effect
       align_tau <- matrix(NA, nrow = n, ncol = t1 - t0 + 1)
       for (i in 1:n){
@@ -88,7 +105,7 @@ for (pr in pr_types){
         longbet.catt.sweeps[i, 1:sum(ztrain[i,]), ] = longbet.pred$tauhats[i, ztrain[i,] == 1, ]
       } 
       
-      longbet.att <- align_catt %>%
+      longbet.att <- longbet.catt.sweeps %>%
         apply(c(2, 3), mean, na.rm = T) %>% t() %>%
         data.frame() %>%
         gather("t", "CATT") %>%
@@ -132,7 +149,7 @@ for (pr in pr_types){
       
       # Baseline: DiD Non-linear ------------------------------------------------
       did_nl.time <- proc.time()
-      if (pr_type == "linear"){
+      if (pr == "linear"){
         did_nl.out <- att_gt(yname = "ytrain",
                              gname = "first.treat",
                              idname = "id",

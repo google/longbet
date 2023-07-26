@@ -7,6 +7,7 @@
 require(longbet)
 require(dplyr)
 require(forecast) # for data generating process
+require(did)
 
 source('dgp.R') # script for data generating process
 

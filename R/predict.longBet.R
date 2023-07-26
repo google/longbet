@@ -7,7 +7,7 @@
 #'
 #' @return A matrix for predicted prognostic effect and a matrix for predicted treatment effect. 
 #' @export
-predict.longBet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, ...) {
+predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, ...) {
 
     print(dim(x))
     if(!("matrix" %in% class(x))) {
@@ -36,9 +36,9 @@ predict.longBet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
     # print("Adjusted treatment time to predict:")
     # print(t_mod)
     
-    obj_mu = .Call(`_longBet_predict`, x, t_con, model$model_list$tree_pnt_pr)
+    obj_mu = .Call(`_longbet_predict`, x, t_con, model$model_list$tree_pnt_pr)
 
-    obj_tau = .Call(`_longBet_predict`, x, t_mod, model$model_list$tree_pnt_trt)
+    obj_tau = .Call(`_longbet_predict`, x, t_mod, model$model_list$tree_pnt_trt)
 
     # Match post treatment periods
     n <- nrow(z)
@@ -70,7 +70,7 @@ predict.longBet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
         if (is.null(lambda)) { lambda = (nrow(model$beta_draws) - t0) / 2}
         print(paste("predict beta with GP, sigma = ", sigma, ", lambda = ", lambda, sep = ""))
 
-        # obj_beta = .Call(`_longBet_predict_beta`, as.matrix(nrow(model$beta_draws)), 
+        # obj_beta = .Call(`_longbet_predict_beta`, as.matrix(nrow(model$beta_draws)), 
         #     model$gp_info$t_values, model$gp_info$resid, model$gp_info$A_diag, model$gp_info$Sig_diag,
         #     sigma, lambda)
         # beta[is.na(idx), ] <- obj_beta$beta
@@ -84,7 +84,7 @@ predict.longBet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
 
 
     obj <- list()
-    class(obj) = "longBet.pred"
+    class(obj) = "longbet.pred"
     
     obj$muhats <- array(NA, dim = c(n, p, num_sweeps - num_burnin))
     obj$tauhats <- array(NA, dim = c(n, p, num_sweeps - num_burnin))
@@ -101,8 +101,8 @@ predict.longBet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
 }
 
 get_ate <- function(object, alpha = 0.05, ...) {
-    if(class(object) != "longBet.pred"){
-        stop("Input object should be output from predict.longBet function")    
+    if(class(object) != "longbet.pred"){
+        stop("Input object should be output from predict.longbet function")    
     }
     ate_full <- apply(object$tauhats, c(2, 3), mean)
     obj <- list()
@@ -113,8 +113,8 @@ get_ate <- function(object, alpha = 0.05, ...) {
 }
 
 get_att <- function(object, z, alpha = 0.05, ...){
-    if(class(object) != "longBet.pred"){
-        stop("Input object should be output from predict.longBet function")    
+    if(class(object) != "longbet.pred"){
+        stop("Input object should be output from predict.longbet function")    
     }
     att_full <- apply(object$tauhats[z,,], c(2, 3), mean)
     obj <- list()
@@ -125,8 +125,8 @@ get_att <- function(object, z, alpha = 0.05, ...){
 }
 
 get_cate <- function(object, alpha = 0.05, ...){
-    if(class(object) != "longBet.pred"){
-        stop("Input object should be output from predict.longBet function")    
+    if(class(object) != "longbet.pred"){
+        stop("Input object should be output from predict.longbet function")    
     }
     obj <- list()
     obj$cate <- apply(object$tauhats, c(1, 2), mean)

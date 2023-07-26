@@ -105,12 +105,12 @@ public:
 //////////////////////////////////////////////////////////////////////////////////////
 //
 //
-//  longBet Model
+//  longbet Model
 //
 //
 //////////////////////////////////////////////////////////////////////////////////////
 
-class longBetModel : public Model
+class longbetModel : public Model
 {
 public:
   size_t dim_suffstat = 4;
@@ -122,7 +122,7 @@ public:
   // prior on leaf parameter
   double tau;
 
-  longBetModel(double kap, double s, double tau, double alpha, double beta) : Model(1, 4)
+  longbetModel(double kap, double s, double tau, double alpha, double beta) : Model(1, 4)
   {
     this->kap = kap;
     this->s = s;
@@ -132,9 +132,9 @@ public:
     this->dim_residual = 1;
   }
 
-  longBetModel() : Model(1, 4) {}
+  longbetModel() : Model(1, 4) {}
 
-  Model *clone() { return new longBetModel(*this); }
+  Model *clone() { return new longbetModel(*this); }
 
   void incSuffStat(std::unique_ptr<State> &state, size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats);
 

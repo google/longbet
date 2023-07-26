@@ -4,7 +4,7 @@
 # and its baseline methods on panel data with staggered adoption
 
 # Required libraries ------------------------------------------------------
-require(longBet)
+require(longbet)
 require(dplyr)
 require(forecast) # for data generating process
 
@@ -78,7 +78,7 @@ for (pr in pr_types){
                              num_sweeps = 60, num_trees_pr =  20, num_trees_trt = 20,
                              pcat = pcat)
 
-      longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
+      longbet.pred <- predict.longbet(longbet.fit, xtrain, ztrain)
   
       # align catt
       num_sweeps <- dim(longbet.pred$tauhats)[3]

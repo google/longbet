@@ -23,7 +23,7 @@ install_github("google/longbet")
 
 ## Usage
 ```R
-longBet(y, x, z, pcat, 
+longbet(y, x, z, pcat, 
 num_sweeps = 60, num_burnin = 20,
 num_trees_pr = 50, num_trees_trt = 20,
 mtry = 0L, n_min = 1L,
@@ -32,7 +32,7 @@ sig_knl = 1, lambda_knl = 5)
 
 ### Arguments
 y: An n by t matrix of outcome variables.
-x: n by p input matrix of covariates. (If the covariates matrix is different for the prognostic and treatment term, please use longBet_full).
+x: n by p input matrix of covariates. (If the covariates matrix is different for the prognostic and treatment term, please use longbet_full).
 z: An n by t matrix of treatment assignments.
 t: time variable (post-treatment time for treatment term will be infered based on input t and z).
 pcat: The number of categorical inputs in matrix x.
@@ -46,12 +46,12 @@ sig_knl: variance parameter for squared exponential kernel (default is 1).
 lambda_knl: lengthscale parameter for squared exponential kernel (default is 5).
 
 ### See Also
-'longBet_full' for fitting with more hyperparameters.
+'longbet_full' for fitting with more hyperparameters.
 'predict' will be avaible in the next update.
 
 ### Example
 ```R
-require(longBet)
+require(longbet)
 
 set.seed(1)
 n <- 100
@@ -78,12 +78,12 @@ y <- z * y1 + (1 - z) * y0
 z_mat <- cbind(matrix(0, n, (t0 - 1)),  matrix(rep(z, t1 - t0 + 1), n, t1 - t0 + 1))
 
 t_longbet <- proc.time()
-longbet.fit <- longBet(y = y, x = x, z = z_mat, t = 1:t1, p_cat = 1,
+longbet.fit <- longbet(y = y, x = x, z = z_mat, t = 1:t1, p_cat = 1,
 num_trees_pr =  50, num_trees_trt = 50)
-tau_hat_longBet <- apply(longbet.fit$tauhats.adjusted, c(1, 2), mean)
+tau_hat_longbet <- apply(longbet.fit$tauhats.adjusted, c(1, 2), mean)
 t_longbet <- proc.time() - t_longbet
 
-print(paste0("longBet RMSE: ", sqrt(mean((as.vector(tau_longBet[, t0:t1]) - as.vector(te[,t0:t1]))^2))))
-print(paste0("longBet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
+print(paste0("longbet RMSE: ", sqrt(mean((as.vector(tau_longbet[, t0:t1]) - as.vector(te[,t0:t1]))^2))))
+print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 
 ```

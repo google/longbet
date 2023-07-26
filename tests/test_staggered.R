@@ -3,7 +3,7 @@ library(dbarts)
 library(dplyr)
 library(ggplot2)
 library(tidyr)
-library(longBet)
+library(longbet)
 library(forecast)
 # DATA GENERATION PROCESS -------------------------------------------------
 
@@ -87,7 +87,7 @@ longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
                        num_trees_pr =  20, num_trees_trt = 20,
                        pcat = ncol(xtrain) - 3)
 
-longbet.pred <- predict.longBet(longbet.fit, x, ztrain)
+longbet.pred <- predict.longbet(longbet.fit, x, ztrain)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
 longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
 
@@ -108,11 +108,11 @@ for (i in 1:n){
 att <- colMeans(align_te, na.rm = T)
 att_hat <- colMeans(align_catt, na.rm = T)
 
-print(paste0("longBet ATT RMSE: ", sqrt(mean(( att - att_hat)^2))))
-print(paste0("longBet CATT RMSE: ", sqrt(mean((align_te - align_catt)^2, na.rm = T))))
+print(paste0("longbet ATT RMSE: ", sqrt(mean(( att - att_hat)^2))))
+print(paste0("longbet CATT RMSE: ", sqrt(mean((align_te - align_catt)^2, na.rm = T))))
 print("longbet CATT RMSE by time: ")
 print(sqrt(colMeans( (align_te - align_catt)^2, na.rm = T)))
-print(paste0("longBet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
+print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 
 
 # Visualize ---------------------------------------------------------------

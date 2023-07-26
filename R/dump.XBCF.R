@@ -1,5 +1,5 @@
-dump.longBet <- function(model, file = "") {
-    json_str = .Call(`_longBet_r_to_json`, model$model_list$y_mean, model$model_list$tree_pnt)  # model$tree_pnt
+dump.longbet <- function(model, file = "") {
+    json_str = .Call(`_longbet_r_to_json`, model$model_list$y_mean, model$model_list$tree_pnt)  # model$tree_pnt
     if (file == "") {
         return(json_str)
     } else {

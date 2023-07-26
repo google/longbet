@@ -3,7 +3,7 @@ library(dbarts)
 library(dplyr)
 library(ggplot2)
 library(tidyr)
-library(longBet)
+library(longbet)
 # DATA GENERATION PROCESS -------------------------------------------------
 
 
@@ -87,7 +87,7 @@ longbet.fit <- longbet(y = ytrain, x = x, z = ztrain, t = 1:t1,
                        num_trees_pr =  20, num_trees_trt = 20,
                        pcat = ncol(x) - 3)
 
-longbet.pred <- predict.longBet(longbet.fit, x, 1:t2)
+longbet.pred <- predict.longbet(longbet.fit, x, 1:t2)
 # mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
 # tau_hat_longbet <- apply(longbet.pred$tauhats, c(1, 2), mean)
 # tau_longbet <- tau_hat_longbet[,t0:t2]

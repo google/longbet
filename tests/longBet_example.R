@@ -1,4 +1,4 @@
-require(longBet)
+require(longbet)
 
 set.seed(1)
 n <- 100
@@ -29,13 +29,13 @@ longbet.fit <- longbet(y = y, x = x, z = z_mat, t = 1:t1, pcat = 1,
 num_trees_pr =  50, num_trees_trt = 50)
 
 z_test <- cbind(matrix(0, n, t0 - 1), matrix(1, n, t1-t0+1))
-longbet.pred <- predict.longBet(longbet.fit, x, z_test)
+longbet.pred <- predict.longbet(longbet.fit, x, z_test)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
 longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
 t_longbet <- proc.time() - t_longbet
 
 ate <- colMeans(te)
-print(paste0("longBet CATE RMSE: ", sqrt(mean((as.vector(longbet.cate$cate[, t0:t1]) - as.vector(te[,t0:t1]))^2))))
-print(paste0("longBet ATE RMSE: ", sqrt(mean((as.vector(longbet.ate$ate[t0:t1]) - as.vector(ate[t0:t1]))^2))))
-print(paste0("longBet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
+print(paste0("longbet CATE RMSE: ", sqrt(mean((as.vector(longbet.cate$cate[, t0:t1]) - as.vector(te[,t0:t1]))^2))))
+print(paste0("longbet ATE RMSE: ", sqrt(mean((as.vector(longbet.ate$ate[t0:t1]) - as.vector(ate[t0:t1]))^2))))
+print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
 

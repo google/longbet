@@ -18,9 +18,9 @@ using namespace chrono;
 //                                                                    //
 ////////////////////////////////////////////////////////////////////////
 
-// FUNCTION longBet
+// FUNCTION longbet
 // preprocesses input received from R
-// feeds data into main loop function 'mcmc_loop_longBet'
+// feeds data into main loop function 'mcmc_loop_longbet'
 // returns the list of objects to later become the output in R
 // general attributes: y (vector of responses), X (matrix of covariates),
 //                     z (vector of treatment assignments),
@@ -35,7 +35,7 @@ using namespace chrono;
 //                     num_trees,
 // [[Rcpp::plugins(cpp11)]]
 // [[Rcpp::export]]
-Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
+Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
                     arma::mat t_con, arma::mat t_mod, arma::mat post_t, size_t beta_size,
                     size_t num_sweeps, size_t burnin = 1,
                     size_t max_depth = 1, size_t n_min = 5,
@@ -232,15 +232,15 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         (*trees_trt)[i] = vector<tree>(num_trees_trt);
     }
     // define the model for the prognostic term
-    longBetModel *model_pr = new longBetModel(kap_pr, s_pr, tau_pr, alpha_pr, beta_pr);
+    longbetModel *model_pr = new longbetModel(kap_pr, s_pr, tau_pr, alpha_pr, beta_pr);
     model_pr->setNoSplitPenality(no_split_penality);
 
     // define the model for the treatment term
-    longBetModel *model_trt = new longBetModel(kap_trt, s_trt, tau_trt, alpha_trt, beta_trt);
+    longbetModel *model_trt = new longbetModel(kap_trt, s_trt, tau_trt, alpha_trt, beta_trt);
     model_trt->setNoSplitPenality(no_split_penality);
 
     // State settings for the prognostic term
-    std::unique_ptr<State> state(new longBetState(Xpointer, Xorder_std, N,
+    std::unique_ptr<State> state(new longbetState(Xpointer, Xorder_std, N,
     n_trt, p_pr, p_trt, p_y, num_trees, p_categorical_pr, p_categorical_trt,
     p_continuous_pr, p_continuous_trt, set_random_seed, random_seed, n_min,
     num_cutpoints, parallel, mtry_pr, mtry_trt, Xpointer, num_sweeps,
@@ -271,7 +271,7 @@ Rcpp::List longBet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
 
     // cout << "mcmc loop" << endl;
     // mcmc_loop returns tauhat [N x sweeps] matrix
-    mcmc_loop_longBet(Xorder_std, Xorder_tau_std, Xpointer, Xpointer_tau, torder_mu_std, torder_tau_std, verbose, 
+    mcmc_loop_longbet(Xorder_std, Xorder_tau_std, Xpointer, Xpointer_tau, torder_mu_std, torder_tau_std, verbose, 
         sigma0_draw_xinfo, sigma1_draw_xinfo, b_xinfo, a_xinfo, beta_info, beta_xinfo, *trees_pr, *trees_trt, no_split_penality,
         state, model_pr, model_trt, x_struct_pr, x_struct_trt, a_scaling, b_scaling, split_time_ps, split_time_trt, 
         resid_info, A_diag_info, Sig_diag_info);

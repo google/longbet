@@ -3,7 +3,7 @@
 # did paper: https://reader.elsevier.com/reader/sd/pii/S0304407620303948?token=967C9A6B23A76EC6C271F99CC54C0CAC8829014C025C3AB9F600C1B5F39F0A7EB6CD905A583911978C1025A798AD05D6&originRegion=us-east-1&originCreation=20230425183217
 # required package: did https://github.com/bcallaway11/did
 
-library(longBet)
+library(longbet)
 library(XBART)
 library(did)
 library(tidyr)
@@ -69,7 +69,7 @@ longbet_att <- data.frame(
 #   }
 #   lambda_knl = 1
 #   
-#   longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain, sigma = sigma_knl, lambda = lambda_knl)
+#   longbet.pred <- predict.longbet(longbet.fit, xtrain, ztrain, sigma = sigma_knl, lambda = lambda_knl)
 #   t_longbet <- proc.time() - t_longbet
 #   
 #   treated <- ztrain[,ncol(ztrain)]
@@ -123,7 +123,7 @@ longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
                        num_trees_pr =  50, num_trees_trt = 50,
                        pcat = 0, lambda_knl = 1)
 
-longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
+longbet.pred <- predict.longbet(longbet.fit, xtrain, ztrain)
 longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
 longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
 

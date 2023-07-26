@@ -2,7 +2,7 @@
 require(dplyr)
 require(ggplot2)
 require(tidyr)
-require(longBet)
+require(longbet)
 require(panelView)
 require(stringr)
 require(MetBrewer)
@@ -83,7 +83,7 @@ longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
                        num_trees_pr =  20, num_trees_trt = 20,
                        pcat = ncol(xtrain) - 3)
 
-longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
+longbet.pred <- predict.longbet(longbet.fit, xtrain, ztrain)
 # align catt
 num_sweeps <- dim(longbet.pred$tauhats)[3]
 longbet.catt.sweeps <- array(NA, dim = c(n, t1 - t0 + 1, num_sweeps))

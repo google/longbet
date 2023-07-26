@@ -1,7 +1,7 @@
-#' longBet model
+#' longbet model
 #'
 #' @param y An n by t matrix of outcome variables.
-#' @param x n by p input matrix of covariates. (If the covariates matrix is different for the prognostic and treatment term, please use longBet_full).
+#' @param x n by p input matrix of covariates. (If the covariates matrix is different for the prognostic and treatment term, please use longbet_full).
 #' @param z An n by t matrix of treatment assignments.
 #' @param t time variable (post-treatment time for treatment term will be infered based on input t and z).
 #' @param pcat The number of categorical inputs in matrix x.
@@ -191,7 +191,7 @@ longbet <- function(y, x, z, t, pcat,
     sample_weights_flag = TRUE
     a_scaling = TRUE; b_scaling = FALSE
 
-    obj = longBet_cpp(y = y,
+    obj = longbet_cpp(y = y,
                     X = x, 
                     X_tau = x, 
                     z = z, 
@@ -234,7 +234,7 @@ longbet <- function(y, x, z, t, pcat,
                     split_time_trt = split_time_trt,
                     sig_knl = sig_knl, 
                     lambda_knl = lambda_knl)
-    class(obj) = "longBet"
+    class(obj) = "longbet"
 
     obj$time = t_con
     obj$t0 = t0

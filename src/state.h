@@ -135,12 +135,12 @@ public:
         this->sigma2 = pow(sigma, 2);
    }
 
-    // sigma update for longBetModel       TODO: move to xbcfClass
+    // sigma update for longbetModel       TODO: move to xbcfClass
     void update_sigma(double sigma, size_t ind)
     {
         this->sigma_vec[ind] = sigma;    }
 
-    // sigma update for longBetModel       TODO: move to xbcfClass
+    // sigma update for longbetModel       TODO: move to xbcfClass
     void update_bscales(double b0, double b1)
     {
         this->b_vec[0] = b0;  // sigma for the control group
@@ -249,10 +249,10 @@ public:
     }
 };
 
-class longBetState : public State
+class longbetState : public State
 {
  public:
-    longBetState(const double *Xpointer, matrix<size_t> &Xorder_std, size_t N,
+    longbetState(const double *Xpointer, matrix<size_t> &Xorder_std, size_t N,
     std::vector<size_t> n_trt, size_t p, size_t p_tau, size_t p_y,
     std::vector<size_t> num_trees_vec,
     size_t p_categorical_pr, size_t p_categorical_trt, size_t p_continuous_pr,

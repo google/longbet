@@ -8,7 +8,7 @@
 #include "X_struct.h"
 //#include "MH.h"
 
-void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_std,
+void mcmc_loop_longbet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_std,
                     const double *X_std, const double *X_tau_std,
                     matrix<size_t> &torder_mu_std,
                     matrix<size_t> &torder_tau_std,
@@ -24,8 +24,8 @@ void mcmc_loop_longBet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
                     double no_split_penality,
                     std::unique_ptr<State> &state,
                     //std::unique_ptr<State> &state_trt,
-                    longBetModel *model_ps,
-                    longBetModel *model_trt,
+                    longbetModel *model_ps,
+                    longbetModel *model_trt,
                     std::unique_ptr<X_struct> &x_struct_ps,
                     std::unique_ptr<X_struct> &x_struct_trt,
                     bool a_scaling,

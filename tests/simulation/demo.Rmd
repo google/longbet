@@ -1,8 +1,8 @@
 ---
 title: "Comparing LongBet with baseline methods"
 author: "Maggie Wang"
-date:  "`r Sys.Date()`"
-output: rmarkdown::github_document
+date: "`r Sys.Date()`"
+output: pdf_document
 ---
 
 # Comparing LongBet with baseline methods on staggered adoption design
@@ -12,6 +12,7 @@ output: rmarkdown::github_document
 ```{r setup, echo = FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 devtools::install_github('MaggieWang0614/longbet')
+require(longBet)
 require(dplyr)
 require(ggplot2)
 require(tidyr)
@@ -145,7 +146,7 @@ att.df <- data.frame(
 
 We can plot the data and treatment status using Licheng Liu and Yiqing Xu's awesome `panelView` package [@liu.2021.panelview].
 
-```{r plot treatment, message=FALSE}
+```{r plot treatment, warnings=FALSE}
 panelview(ytrain ~ ztrain, data = panel.data, index = c("id","time"), xlab = "Time", ylab = "Unit", axis.lab.gap = 5, display.all = T)
 ```
 

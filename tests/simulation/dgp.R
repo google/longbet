@@ -85,3 +85,42 @@ dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-linear", trt_type = "heteroge
   
   return(results)
 }
+
+
+# Calculate metrics -------------------------------------------------------
+att.metric <- function(att, estimate){
+  # check estimate has the right form
+  if (!is.data.frame(estimate)){
+    stop("Estimate needs to be a data frame")
+  }
+  if (!all(c("t", "estimate", "conf.low", "conf.high", "method")%in% colnames(estimate))){
+    stop("Estimate not having the right columns")
+  }
+  if (any (estimate$t != 0:(length(att) - 1))){
+    stop(paste0("Estimate t should be ", toString( 0:(length(att) - 1) ) ))
+  }
+  metrics <- c()
+  metrics['RMSE'] <- sqrt(mean( (att - estimate$estimate)^2 ))
+  metrics['Bias'] <- mean(abs(att - estimate$estimate))
+  metrics['Coverage'] <- mean( (att >= estimate$conf.low) & (att <= estimate$conf.high))
+  return(metrics)
+}
+
+catt.metric <- function(align_catt, estimate, conf.low, conf.high){
+  # check dimensions
+  if (any(dim(align_catt) != dim(estimate))){
+    stop("Dimension of estimate does not match aligned catt")
+  }
+  if (any(dim(align_catt) != dim(conf.low))){
+    stop("Dimension of conf.low does not match aligned catt")
+  }
+  if (any(dim(align_catt) != dim(conf.high))){
+    stop("Dimension of conf.high does not match aligned catt")
+  }
+  metrics <- c()
+  metrics['RMSE'] <- sqrt(mean((align_catt - estimate)^2, na.rm = T))
+  metrics['Bias'] <- mean( abs( align_catt - estimate ), na.rm = T)
+  metrics['Coverage'] <- mean( (align_catt >= conf.low) & (align_tau <= conf.high), na.rm = T )
+  return(metrics)
+}
+

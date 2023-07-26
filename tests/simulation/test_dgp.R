@@ -60,8 +60,6 @@ att.df <- data.frame(
   method = rep("True", t1 - t0 + 1)
 )
 
-panelview(ytrain ~ ztrain, data = panel.data, index = c("id","time"), xlab = "Time", ylab = "Unit", axis.lab.gap = 5, display.all = T)
-
 att.results <- data.frame(
   method = character(),
   RMSE = double(),
@@ -69,13 +67,14 @@ att.results <- data.frame(
   Coverage = double(),
   Time = double()
 )
+
 catt.results <- data.frame(
   method = character(),
   RMSE = double(),
   Bias = double(),
-  Coverage = double(),
-  Time = double()
+  Coverage = double()
 )
+
 
 # longbet -----------------------------------------------------------------
 longbet.time <- proc.time()
@@ -87,17 +86,17 @@ longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
 longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
 # align catt
 num_sweeps <- dim(longbet.pred$tauhats)[3]
-align_catt <- array(NA, dim = c(n, t1 - t0 + 1, num_sweeps))
+longbet.catt.sweeps <- array(NA, dim = c(n, t1 - t0 + 1, num_sweeps))
 for (i in 1:n){
   if (sum(ztrain[i,]) == 0) {next}
-  align_catt[i, 1:sum(ztrain[i,]), ] = longbet.pred$tauhats[i, ztrain[i,] == 1, ]
+  longbet.catt.sweeps[i, 1:sum(ztrain[i,]), ] = longbet.pred$tauhats[i, ztrain[i,] == 1, ]
 } 
 
 longbet.att <- align_catt %>%
   apply(c(2, 3), mean, na.rm = T) %>% t() %>%
   data.frame() %>%
   gather("t", "CATT") %>%
-  mutate(t =  as.double(str_replace_all(t, c("X" = "")))) %>%
+  mutate(t =  as.double(str_replace_all(t, c("X" = ""))) - 1) %>%
   group_by(t) %>%
   summarise(
     estimate = mean(CATT),
@@ -106,32 +105,13 @@ longbet.att <- align_catt %>%
     method = "LongBet"
   )
 
-longbet.catt <- apply(align_catt, c(1, 2), mean, na.rm = T)
-longbet.catt.lower <- apply(align_catt, c(1, 2), quantile, prob = alpha /2 , na.rm = T)
-longbet.catt.upper <- apply(align_catt, c(1, 2), quantile, prob = 1 - alpha /2 , na.rm = T)
-
+longbet.catt <- apply(longbet.catt.sweeps, c(1, 2), mean, na.rm = T)
+longbet.catt.low <- apply(longbet.catt.sweeps, c(1, 2), quantile, prob = alpha /2 , na.rm = T)
+longbet.catt.high <- apply(longbet.catt.sweeps, c(1, 2), quantile, prob = 1 - alpha /2 , na.rm = T)
 longbet.time <- proc.time() - longbet.time
 
-# longbet.results <- list()
-# longbet.results$method <- 'LongBet'
-# longbet.results$ATT.RMSE <-  sqrt(mean( (att - longbet.att)^2 ) )
-# longbet.results$ATT.Bias <- mean(abs(att - longbet.att))
-# longbet.results$ATT.Coverage <- mean( (att >= longbet.att.lower) & (att <= longbet.att.upper) )
-# 
-# longbet.results$CATT.RMSE <- sqrt(mean((align_tau - longbet.catt)^2, na.rm = T))
-# longbet.results$CATT.Bias <- mean( abs( align_tau - longbet.catt ), na.rm = T)
-# longbet.results$CATT.Coverage <- mean( (align_tau >= longbet.catt.lower) & (align_tau <= longbet.catt.upper), na.rm = T )
-# longbet.results$Time <- longbet.time[1]
-# print(data.frame(longbet.results))
-# reults <- rbind(results, data.frame(longbet.results))
-# 
-# longbet.results <- data.frame(
-#   t = 0:(t1 - t0),
-#   estimate = longbet.att,
-#   conf.low = longbet.att.lower,
-#   conf.high = longbet.att.upper,
-#   method = rep("LongBet", t1 - t0 + 1)
-# )
+att.results[nrow(att.results) + 1,] <- c('LongBet', att.metric(att, longbet.att), as.numeric(longbet.time[3]))
+catt.results[nrow(catt.results) + 1, ] <- c('LongBet', catt.metric(align_tau, longbet.catt, longbet.catt.low, longbet.catt.high))
 
 
 # Baseline: DiD with multiple periods --------------------------------------------------------------
@@ -145,33 +125,14 @@ did.out <- att_gt(yname = "ytrain",
               est_method = "dr",
               control_group = "notyettreated"
 )
-did.es <- aggte(did.out, type = "dynamic")
-did.att <- did.es$att.egt[did.es$egt >= 0]
-did.att.lower <- (did.es$att.egt + qnorm(alpha / 2) * did.es$se.egt)[did.es$egt >= 0]
-did.att.upper <- (did.es$att.egt + qnorm(1 - alpha / 2) * did.es$se.egt)[did.es$egt >= 0]
-# ggdid(es)
-did.time <- proc.time() - did.time
-
-# did.results <- list()
-# did.results$method <- 'DiD'
-# did.results$ATT.RMSE <-  sqrt(mean( (att - did.att)^2 ) )
-# did.results$ATT.Bias <- mean(abs(att - did.att))
-# did.results$ATT.Coverage <- mean( (att >= did.att.lower) & (att <= did.att.upper) )
-# 
-# did.results$CATT.RMSE <- NA
-# did.results$CATT.Bias <- NA
-# did.results$CATT.Coverage <- NA
-# did.results$Time <- did.time[1]
-# print(data.frame(did.results))
-# reults <- rbind(results, data.frame(did.results))
-
 DiD <- aggte(did.out, type = "dynamic", na.rm = TRUE) %>% 
   tidy() %>% 
   rename(t = event.time) %>% 
   filter(t >= 0 & t < 8) %>% 
   select(t, estimate, conf.low, conf.high) %>% 
   mutate(method = "DiD")
-
+did.time <- proc.time() - did.time
+att.results[nrow(att.results) + 1,] <- c('DiD', att.metric(att, DiD), as.numeric(did.time[3]))
 
 # Baseline: DiD Non-linear ------------------------------------------------
 did_nl.time <- proc.time()
@@ -203,6 +164,7 @@ DiD_nl <- aggte(did_nl.out, type = "dynamic", na.rm = TRUE) %>%
   select(t, estimate, conf.low, conf.high) %>% 
   mutate(method = "Non-linear DiD")
 did_nl.time = proc.time() - did_nl.time
+att.results[nrow(att.results) + 1,] <- c('Non-linear DiD', att.metric(att, DiD_nl), as.numeric(did_nl.time[3]))
 
 
 # Baseline: twfe ----------------------------------------------------------
@@ -223,6 +185,8 @@ twfe <- panel.data %>%
 
 
 # results -----------------------------------------------------------------
+print(att.results)
+print(catt.results)
 # coefs <- bind_rows(longbet.att, DiD, twfe)
 coefs <- bind_rows(att.df, longbet.att, DiD, DiD_nl)
 

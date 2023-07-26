@@ -12,42 +12,49 @@ source('dgp.R') # script for data generating process
 
 # Set up ------------------------------------------------------------------
 set.seed(100)
-mc <- 1 #1000 # monte carlo iterations
-n <- 5000      # number of observations
+mc <- 10 #1000 # monte carlo iterations
+n <- 2000      # number of observations
 t0 <- 6        # earliest treatment adoption time
 t1 <- 12       # total time period
 pr_types <- c("linear", "non-linear")
 trt_types <- c("homogeneous", "heterogeneous")
 pcat <- 2    # number of categorical variable
 
+if (file.exists('att.csv') & file.exists('catt.csv')){
+  att.results <- read.cvs('att.csv')
+  catt.results <- read.csv('catt.csv')
+} else {
+  att.results <- data.frame(
+    iter = double(),
+    pr = character(),
+    trt = character(),
+    method = character(),
+    RMSE = double(),
+    Bias = double(),
+    Coverage = double(),
+    Time = double()
+  )
+  
+  catt.results <- data.frame(
+    iter = double(),
+    pr = character(),
+    trt = character(),
+    method = character(),
+    RMSE = double(),
+    Bias = double(),
+    Coverage = double()
+  )
+}
 
 # simulation ---------------------------------------------------------------
 for (pr in pr_types){
   for (trt in trt_types){
-    # check if simulation results exist
-    filename <- paste(pr, " ", trt, ".csv", sep = "")
-    if (file.exists(filename)) {
-      results <- read.csv(filename)
-      max_iter <- max(results$iter)
-    } else { 
-      max_iter <- 0 
-      results <- data.frame(
-        iter = integer(),
-        method = character(),
-        ATT.RMSE = double(),
-        ATT.Bias = double(),
-        ATT.Coverage = double(),
-        CATT.RMSE = double(),
-        CATT.Bias = double(),
-        CATT.Coverage = double(),
-        Time = double()
-      )
-    }
-    
     for (iter in 1:mc){
-      if (iter <= max_iter){
-        # skip this iteration
-        break 
+      if (any((att.results$pr == pr) & (att.results$trt == trt))){
+        if ( iter <= max(att.results$iter[(att.results$pr == pr) & (att.results$trt == trt)]) ){
+          # skip this iteration
+          break 
+        }
       }
       
       # Data generating
@@ -66,49 +73,104 @@ for (pr in pr_types){
       
       
       # Longbet -----------------------------------------------------------------
-      t_longbet <- proc.time()
+      longbet.time <- proc.time()
       longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
                              num_sweeps = 60, num_trees_pr =  20, num_trees_trt = 20,
                              pcat = pcat)
 
       longbet.pred <- predict.longBet(longbet.fit, xtrain, ztrain)
-      
+  
       # align catt
       num_sweeps <- dim(longbet.pred$tauhats)[3]
-      align_catt <- array(NA, dim = c(n, t1 - t0 + 1, num_sweeps))
+      longbet.catt.sweeps <- array(NA, dim = c(n, t1 - t0 + 1, num_sweeps))
       for (i in 1:n){
         if (sum(ztrain[i,]) == 0) {next}
-        # align_catt[i, 1:sum(ztrain[i,])] = longbet.cate$cate[i, ztrain[i,] == 1]
-        align_catt[i, 1:sum(ztrain[i,]), ] = longbet.pred$tauhats[i, ztrain[i,] == 1, ]
+        longbet.catt.sweeps[i, 1:sum(ztrain[i,]), ] = longbet.pred$tauhats[i, ztrain[i,] == 1, ]
       } 
-      longbet.att.sweeps <- apply(align_catt, c(2, 3), mean, na.rm = T)
-      longbet.att <- longbet.att.sweeps %>% rowMeans(na.rm = T)
-      longbet.att.lower <- longbet.att.sweeps %>% apply(1, quantile, prob = alpha / 2, na.rm = T)
-      longbet.att.upper <- longbet.att.sweeps %>% apply(1, quantile, prob = 1 - alpha / 2, na.rm = T)
       
-      longbet.catt <- apply(align_catt, c(1, 2), mean, na.rm = T)
-      longbet.catt.lower <- apply(align_catt, c(1, 2), quantile, prob = alpha /2 , na.rm = T)
-      longbet.catt.upper <- apply(align_catt, c(1, 2), quantile, prob = 1 - alpha /2 , na.rm = T)
-      t_longbet <- proc.time() - t_longbet
+      longbet.att <- align_catt %>%
+        apply(c(2, 3), mean, na.rm = T) %>% t() %>%
+        data.frame() %>%
+        gather("t", "CATT") %>%
+        mutate(t =  as.double(str_replace_all(t, c("X" = ""))) - 1) %>%
+        group_by(t) %>%
+        summarise(
+          estimate = mean(CATT),
+          conf.low = quantile(CATT, prob = alpha / 2),
+          conf.high = quantile(CATT, prob = 1 - alpha / 2),
+          method = "LongBet"
+        )
       
-      longbet.results <- list()
-      longbet.results$iter <- iter
-      longbet.results$method <- 'LongBet'
-      longbet.results$ATT.RMSE <-  sqrt(mean( (att - longbet.att)^2 ) )
-      longbet.results$ATT.Bias <- mean(abs(att - longbet.att))
-      longbet.results$ATT.Coverage <- mean( (att >= longbet.att.lower) & (att <= longbet.att.upper) )
-
-      longbet.results$CATT.RMSE <- sqrt(mean((align_tau - longbet.catt)^2, na.rm = T))
-      longbet.results$CATT.Bias <- mean( abs( align_tau - longbet.catt ), na.rm = T)
-      longbet.results$CATT.Coverage <- mean( (align_tau >= longbet.catt.lower) & (align_tau <= longbet.catt.upper), na.rm = T )
-      results <- rbind(results, data.frame(longbet.results))
+      longbet.catt <- apply(longbet.catt.sweeps, c(1, 2), mean, na.rm = T)
+      longbet.catt.low <- apply(longbet.catt.sweeps, c(1, 2), quantile, prob = alpha /2 , na.rm = T)
+      longbet.catt.high <- apply(longbet.catt.sweeps, c(1, 2), quantile, prob = 1 - alpha /2 , na.rm = T)
+      longbet.time <- proc.time() - longbet.time
       
-      write.csv(results, file = filename, row.names= F)
+      att.results[nrow(att.results) + 1,] <- c(iter, pr, trt, 'LongBet', att.metric(att, longbet.att), as.numeric(longbet.time[3]))
+      catt.results[nrow(catt.results) + 1, ] <- c(iter, pr, trt, 'LongBet', catt.metric(align_tau, longbet.catt, longbet.catt.low, longbet.catt.high))
+      
+      
+      # Baseline: DiD with multiple periods --------------------------------------------------------------
+      did.time <- proc.time()
+      did.out <- att_gt(yname = "ytrain",
+                        gname = "first.treat",
+                        idname = "id",
+                        tname = "time",
+                        xformla = ~ X1 + X3 + X2 + X4 + X5,
+                        data = panel.data,
+                        est_method = "dr",
+                        control_group = "notyettreated"
+      )
+      DiD <- aggte(did.out, type = "dynamic", na.rm = TRUE) %>% 
+        tidy() %>% 
+        rename(t = event.time) %>% 
+        filter(t >= 0 & t < 8) %>% 
+        select(t, estimate, conf.low, conf.high) %>% 
+        mutate(method = "DiD")
+      did.time <- proc.time() - did.time
+      att.results[nrow(att.results) + 1,] <- c(iter, pr, trt, 'DiD', att.metric(att, DiD), as.numeric(did.time[3]))
+      
+      # Baseline: DiD Non-linear ------------------------------------------------
+      did_nl.time <- proc.time()
+      if (pr_type == "linear"){
+        did_nl.out <- att_gt(yname = "ytrain",
+                             gname = "first.treat",
+                             idname = "id",
+                             tname = "time",
+                             xformla = ~ X1 + X3 + X2 + X4 + X5,
+                             data = panel.data,
+                             est_method = "dr",
+                             control_group = "notyettreated"
+        )
+      } else {
+        did_nl.out <- att_gt(yname = "ytrain",
+                             gname = "first.treat",
+                             idname = "id",
+                             tname = "time",
+                             xformla = ~ X1 * X3 + X2 + X4 + X5,
+                             data = panel.data,
+                             est_method = "dr",
+                             control_group = "notyettreated")
+      }
+      
+      DiD_nl <- aggte(did_nl.out, type = "dynamic", na.rm = TRUE) %>% 
+        tidy() %>% 
+        rename(t = event.time) %>% 
+        filter(t >= 0 & t < 8) %>% 
+        select(t, estimate, conf.low, conf.high) %>% 
+        mutate(method = "Non-linear DiD")
+      did_nl.time = proc.time() - did_nl.time
+      att.results[nrow(att.results) + 1,] <- c(iter, pr, trt, 'Non-linear DiD', att.metric(att, DiD_nl), as.numeric(did_nl.time[3]))
+      
+      write.csv(att.results, file = 'att.csv', row.names= F)
+      write.csv(catt.results, file = 'catt.csv', row.names= F)
       
     }
   }
 }
 
+att.results <- read.csv('att.csv')
+print(att.results)
 
 
 

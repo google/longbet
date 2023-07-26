@@ -6,6 +6,7 @@
 # Required libraries ------------------------------------------------------
 require(longbet)
 require(dplyr)
+require(tidyr)
 require(forecast) # for data generating process
 require(did)
 

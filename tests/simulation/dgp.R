@@ -103,6 +103,7 @@ att.metric <- function(att, estimate){
   metrics['RMSE'] <- sqrt(mean( (att - estimate$estimate)^2 ))
   metrics['Bias'] <- mean(abs(att - estimate$estimate))
   metrics['Coverage'] <- mean( (att >= estimate$conf.low) & (att <= estimate$conf.high))
+  metrics['I.L'] <- mean(estimate$conf.high - estimate$conf.low)
   return(metrics)
 }
 
@@ -121,6 +122,7 @@ catt.metric <- function(align_catt, estimate, conf.low, conf.high){
   metrics['RMSE'] <- sqrt(mean((align_catt - estimate)^2, na.rm = T))
   metrics['Bias'] <- mean( abs( align_catt - estimate ), na.rm = T)
   metrics['Coverage'] <- mean( (align_catt >= conf.low) & (align_tau <= conf.high), na.rm = T )
+  metrics['I.L'] <- mean(conf.high - conf.low, na.rm = T)
   return(metrics)
 }
 

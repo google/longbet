@@ -65,6 +65,7 @@ att.results <- data.frame(
   RMSE = double(),
   Bias = double(),
   Coverage = double(),
+  I.L = double(),
   Time = double()
 )
 
@@ -72,14 +73,15 @@ catt.results <- data.frame(
   method = character(),
   RMSE = double(),
   Bias = double(),
-  Coverage = double()
+  Coverage = double(),
+  I.L = double()
 )
 
 
 # longbet -----------------------------------------------------------------
 longbet.time <- proc.time()
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
-                       num_sweeps = 120,
+                       num_sweeps = 500,
                        num_trees_pr =  20, num_trees_trt = 20,
                        pcat = ncol(xtrain) - 3)
 
@@ -92,7 +94,7 @@ for (i in 1:n){
   longbet.catt.sweeps[i, 1:sum(ztrain[i,]), ] = longbet.pred$tauhats[i, ztrain[i,] == 1, ]
 } 
 
-longbet.att <- align_catt %>%
+longbet.att <- longbet.catt.sweeps %>%
   apply(c(2, 3), mean, na.rm = T) %>% t() %>%
   data.frame() %>%
   gather("t", "CATT") %>%

@@ -1,0 +1,17 @@
+"pr","trt","method","RMSE.ATT","Bias.ATT","Coverage.ATT","RMSE.CATT","Bias.CATT","Coverage.CATT","Time"
+"linear","homogeneous","LongBet100",0.021,0.017,0.714,0.028,0.02,0.902,30.412
+"linear","homogeneous","LongBet500",0.025,0.019,0.825,0.031,0.022,0.968,139.533
+"linear","homogeneous","DiD",0.032,0.024,1,NA,NA,NA,10.329
+"linear","homogeneous","Non-linear DiD",0.032,0.024,1,NA,NA,NA,10.066
+"linear","heterogeneous","LongBet100",0.027,0.019,0.778,0.299,0.175,0.882,37.054
+"linear","heterogeneous","LongBet500",0.033,0.025,0.825,0.379,0.218,0.924,170.909
+"linear","heterogeneous","DiD",0.023,0.018,1,NA,NA,NA,10.386
+"linear","heterogeneous","Non-linear DiD",0.023,0.018,1,NA,NA,NA,10.755
+"non-linear","homogeneous","LongBet100",0.144,0.115,0.825,0.382,0.186,0.945,39.116
+"non-linear","homogeneous","LongBet500",0.126,0.103,0.905,0.345,0.15,0.987,190.522
+"non-linear","homogeneous","DiD",2.331,1.84,0.429,NA,NA,NA,12.804
+"non-linear","homogeneous","Non-linear DiD",0.574,0.462,0.952,NA,NA,NA,15.48
+"non-linear","heterogeneous","LongBet100",0.165,0.132,0.746,1.285,0.771,0.823,44.417
+"non-linear","heterogeneous","LongBet500",0.167,0.137,0.778,1.351,0.84,0.843,208.161
+"non-linear","heterogeneous","DiD",1.926,1.593,0.476,NA,NA,NA,12.336
+"non-linear","heterogeneous","Non-linear DiD",0.471,0.375,0.937,NA,NA,NA,15.545

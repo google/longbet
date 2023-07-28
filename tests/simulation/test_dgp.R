@@ -65,6 +65,7 @@ att.results <- data.frame(
   RMSE = double(),
   Bias = double(),
   Coverage = double(),
+  Cover0 = double(),
   I.L = double(),
   Time = double()
 )
@@ -74,6 +75,7 @@ catt.results <- data.frame(
   RMSE = double(),
   Bias = double(),
   Coverage = double(),
+  Cover0 = double(),
   I.L = double()
 )
 

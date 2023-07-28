@@ -36,6 +36,7 @@ if (file.exists('att.csv') & file.exists('catt.csv')){
     RMSE = double(),
     Bias = double(),
     Coverage = double(),
+    Cover0 = double(),
     I.L = double(),
     Time = double()
   )
@@ -48,6 +49,7 @@ if (file.exists('att.csv') & file.exists('catt.csv')){
     RMSE = double(),
     Bias = double(),
     Coverage = double(),
+    Cover0 = double(),
     I.L = double()
   )
 }
@@ -93,45 +95,6 @@ for (pr in pr_types){
       } 
       att <- colMeans(align_tau, na.rm = T)
       
-      
-      # Longbet -----------------------------------------------------------------
-      longbet.time <- proc.time()
-      longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
-                             num_sweeps = 100, num_trees_pr =  20, num_trees_trt = 20,
-                             pcat = pcat)
-
-      longbet.pred <- predict.longbet(longbet.fit, xtrain, ztrain)
-  
-      # align catt
-      num_sweeps <- dim(longbet.pred$tauhats)[3]
-      longbet.catt.sweeps <- array(NA, dim = c(n, t1 - t0 + 1, num_sweeps))
-      for (i in 1:n){
-        if (sum(ztrain[i,]) == 0) {next}
-        longbet.catt.sweeps[i, 1:sum(ztrain[i,]), ] = longbet.pred$tauhats[i, ztrain[i,] == 1, ]
-      } 
-      
-      longbet.att <- longbet.catt.sweeps %>%
-        apply(c(2, 3), mean, na.rm = T) %>% t() %>%
-        data.frame() %>%
-        gather("t", "CATT") %>%
-        mutate(t =  as.double(str_replace_all(t, c("X" = ""))) - 1) %>%
-        group_by(t) %>%
-        summarise(
-          estimate = mean(CATT),
-          conf.low = quantile(CATT, prob = alpha / 2),
-          conf.high = quantile(CATT, prob = 1 - alpha / 2),
-          method = "LongBet"
-        )
-      
-      longbet.catt <- apply(longbet.catt.sweeps, c(1, 2), mean, na.rm = T)
-      longbet.catt.low <- apply(longbet.catt.sweeps, c(1, 2), quantile, prob = alpha /2 , na.rm = T)
-      longbet.catt.high <- apply(longbet.catt.sweeps, c(1, 2), quantile, prob = 1 - alpha /2 , na.rm = T)
-      longbet.time <- proc.time() - longbet.time
-      
-      att.results[nrow(att.results) + 1,] <- c(iter, pr, trt, 'LongBet100', att.metric(att, longbet.att), as.numeric(longbet.time[3]))
-      catt.results[nrow(catt.results) + 1, ] <- c(iter, pr, trt, 'LongBet100', catt.metric(align_tau, longbet.catt, longbet.catt.low, longbet.catt.high))
-      
-      
       # Longbet 500 sweeps-----------------------------------------------------------------
       longbet.time <- proc.time()
       longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
@@ -166,8 +129,8 @@ for (pr in pr_types){
       longbet.catt.high <- apply(longbet.catt.sweeps, c(1, 2), quantile, prob = 1 - alpha /2 , na.rm = T)
       longbet.time <- proc.time() - longbet.time
       
-      att.results[nrow(att.results) + 1,] <- c(iter, pr, trt, 'LongBet500', att.metric(att, longbet.att), as.numeric(longbet.time[3]))
-      catt.results[nrow(catt.results) + 1, ] <- c(iter, pr, trt, 'LongBet500', catt.metric(align_tau, longbet.catt, longbet.catt.low, longbet.catt.high))
+      att.results[nrow(att.results) + 1,] <- c(iter, pr, trt, 'LongBet', att.metric(att, longbet.att), as.numeric(longbet.time[3]))
+      catt.results[nrow(catt.results) + 1, ] <- c(iter, pr, trt, 'LongBet', catt.metric(align_tau, longbet.catt, longbet.catt.low, longbet.catt.high))
       
       
       # Baseline: DiD with multiple periods --------------------------------------------------------------
@@ -230,7 +193,29 @@ for (pr in pr_types){
 }
 
 att.results <- read.csv('att.csv')
-print(att.results)
+att.summary <- att.results %>% 
+  group_by(pr, trt, method) %>%
+  summarise(RMSE = mean(RMSE),
+            Bias = mean(Bias),
+            Coverage = mean(Coverage),
+            Time = mean(Time)) 
 
+catt.results <- read.csv('catt.csv')
+catt.summary <- catt.results %>% 
+  group_by(pr, trt, method) %>%
+  summarise(RMSE = mean(RMSE),
+            Bias = mean(Bias),
+            Coverage = mean(Coverage)) 
+
+summary <- merge(att.summary, catt.summary, by = c('pr', 'trt', 'method'), 
+                 suffixes = c(".ATT",".CATT"), all.x = T) %>%
+  arrange(
+    factor(pr, levels = c("linear", 'non-linear')),
+    factor(trt, levels = c("homogeneous", "heterogeneous")),
+    factor(method, levels = c("LongBet", "DiD", "Non-linear DiD"))) %>%
+  relocate(Time, .after = last_col()) %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+print(summary)
+write.csv(summary, 'results.csv', row.names = F)
 
 

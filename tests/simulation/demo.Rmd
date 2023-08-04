@@ -11,7 +11,7 @@ output: pdf_document
 
 ```{r setup, echo = FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-devtools::install_github('MaggieWang0614/longbet')
+# devtools::install_github('MaggieWang0614/longbet')
 require(longbet)
 require(dplyr)
 require(ggplot2)
@@ -22,18 +22,20 @@ require(MetBrewer)
 # baseline approach
 require(did) # https://github.com/bcallaway11/did
 require(fixest)
+require(didimputation)
+require(plm)
 ```
 
-First, we create a simulated data set, with pre-treatment covariates, staggered treatments, heterogeneous and dynamic treatment effects. The pre-treatment covariates and heterogeneity are based on dgp in the BCF paper. There are 5 pre-treatment covariates, three are continuous variables and two are categorical variables. The dynamic prognostic effect is simulated from an ARIMA(1, 0, 1) model and the dynamic treatment effect is a decaying function. The staggered adoption is sampled from propensity score.. Consider a total of 12 periods with 5 pre-treatment periods, the staggerd adoption starts at period 6.
+First, we create a simulated data set, with pre-treatment covariates, staggered treatments, heterogeneous and dynamic treatment effects. The pre-treatment covariates and heterogeneity are based on dgp in the BCF paper. There are 5 pre-treatment covariates, three are continuous variables and two are categorical variables. The dynamic prognostic effect is simulated from an ARIMA(1, 0, 1) model and the dynamic treatment effect is a decaying function. The staggered adoption is sampled from propensity score. Consider a total of 12 periods with 5 pre-treatment periods, the staggerd adoption starts at period 6.
 
 ```{r sim data}
-dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-linear", trt_type = "heterogeneous"){
+dgp <- function(n, t0, t1, pr_type, trt_type){
   # screening
   if (t0 > t1){
     stop("Treatment start time (t0) can not be greater than t1")
   }
-  if(!(pr_type %in% c("linear", "non-linear"))){
-    stop("pr_type should be either linear or non-linear")
+  if(!(pr_type %in% c("parallel", "non-parallel"))){
+    stop("pr_type should be either parallel or non-parallel")
   }
   if(!(trt_type %in% c("homogeneous", "heterogeneous"))){
     stop("trt_type should be either homogeneous or heterogeneous")
@@ -52,21 +54,23 @@ dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-linear", trt_type = "heteroge
   # generate prognostic effect
   f_t <- arima.sim(model = list(order = c(1, 0, 1), ar = 0.7, ma = -0.4), n = t1) + 1
   g <- c(2, -1)
-  if(pr_type == "linear"){
-    gamma_x <- 1 + g[x[, 4] + 1] +  2 * x[, 3]
-  } else if (pr_type == "non-linear"){
-    gamma_x <- -6 + g[x[, 4] + 1] + 6 * x[, 1] * abs(x[, 3] - 1)
+  if(pr_type == "parallel"){
+    gamma_x <- 1 + g[x[, 4] + 1] +  5 * x[, 1] + 2 * x[, 3]
+    y0 <- t( matrix(rep(f_t, n), t1, n) ) + matrix(rep(gamma_x, t1), n, t1)
+  } else if (pr_type == "non-parallel"){
+    gamma_x <-  1 + g[x[, 4] + 1] + 6 * x[, 1] * abs(x[, 3] - 1)
+    y0 <- outer(gamma_x, f_t, "*")
   }
-  y0 <- outer(gamma_x, f_t, "*")
   results$y0 <- y0
   
   # generate treatment effect 
   s <- 1:(t1 - t0 + 1) 
   h_s <- s * exp(-s)
+  trt_type = "homogeneous"
   if(trt_type == "homogeneous"){
-    nu_x <- rep(1, n)
+    nu_x <- rep(2, n)
   } else if (trt_type == "heterogeneous"){
-    nu_x <- 1 + 5 * x[, 2] * x[, 5]
+    nu_x <- 2 + 5 * x[, 2] * x[, 5]
   }
   tau <- outer(nu_x, h_s , "*")
   
@@ -92,16 +96,15 @@ dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-linear", trt_type = "heteroge
   results$tau <- tau
   
   # generate outcome variable
-  results$y <-  y0 + tau + matrix(rnorm(n*t1, mean = 0, sd = 0.5), n, t1)
+  results$y <-  y0 + tau + matrix(rnorm(n*t1, mean = 0, sd = 0.2), n, t1)
   
   return(results)
 }
-
 n = 2000
 t0 = 6
 t1 = 12
-pr_type = "non-linear"
-trt_type = "heterogeneous"
+pr_type = "parallel"
+trt_type = "homogeneous"
 alpha = 0.05
 data <- dgp(n, t0, t1, pr_type = pr_type, trt_type = trt_type)
 
@@ -125,8 +128,6 @@ panel.data <- data.frame(
   X4 = as.vector( sapply(xtrain[,4], rep, t1)),
   X5 = as.vector( sapply(xtrain[,5], rep, t1))
 )
-
-
 # align treatment effect
 align_tau <- matrix(NA, nrow = n, ncol = t1 - t0 + 1)
 for (i in 1:n){
@@ -142,12 +143,26 @@ att.df <- data.frame(
   conf.high = att,
   method = rep("True", t1 - t0 + 1)
 )
+
 ```
 
 We can plot the data and treatment status using Licheng Liu and Yiqing Xu's awesome `panelView` package [@liu.2021.panelview].
 
 ```{r plot treatment, warnings=FALSE}
 panelview(ytrain ~ ztrain, data = panel.data, index = c("id","time"), xlab = "Time", ylab = "Unit", axis.lab.gap = 5, display.all = T)
+```
+
+Check parallel trend assumption
+```{r parallel}
+# Estimate a fixed-effects panel regression model for the untreated group only
+untreated_model <- plm(ytrain ~ time + time:ztrain, 
+                       data = panel.data[panel.data$ztrain == 0,], 
+                       index = c("id", "time"),
+                       model = "within")
+
+# View the summary of the untreated model
+summary(untreated_model)
+
 ```
 
 First we estimate the treatment effect with LongBet
@@ -238,28 +253,164 @@ DiD_nl <- aggte(did_nl.out, type = "dynamic", na.rm = TRUE) %>%
 did_nl.time = proc.time() - did_nl.time
 ```
 
-#### I would like to estimate the treatment effect with TWFE model but I don't know how to use the pre-treatment covariates in this setting.
-
+The following is an implementation of the did_imputation method kindly shared by Eray Turkel from Google. But since borusyak already have a package for did_impuation in R, we are not going to run the following method.
 ```{r twfe}
-panel.data$time_to_treatment <- panel.data$time - panel.data$first.treat
-panel.data$time_to_treatment[panel.data$first.treat==0] <- -1000
-# How can I add continuous pre-treatment covariates X1, X2, X3 in the fixed effect model?
-twfe <- panel.data %>% 
-  do(broom::tidy(feols(ytrain ~ + i(time_to_treatment, ref = c(-1, -1000)) | id + time + X4 + X5, 
-                       data = .), conf.int = TRUE)) %>% 
-  mutate(t =  as.double(str_replace_all(term, c("time_to_treatment::" = "", ":treated" = "")))) %>% 
-  filter(t >= 0 & t < 8) %>%
-  select(t, estimate, conf.low, conf.high) %>% 
-  # add in data for year -1
-  bind_rows(tibble(t = -1, estimate = 0, 
-                   conf.low = 0, conf.high = 0
-  )) %>% 
-  mutate(method = "TWFE")
+#Imputation approach from borusyak, jaravel, spiess 2021
+# Take your panel data set, divide it into two, one being the ‘untreated’ control #observations (including the pre-treatment data for the eventually treated #subset), and the #other one being the ‘treated’ # # observations. The expectation is #that #the ‘treated’ units #will appear in both data frames, their pre-treatment #observations will 
+#be in the #’control_obs’ and the post-treatment observations will be in the #‘treated_obs’
+#the two input data frames control_obs,
+#treated_obs should be ‘long’ data frames with
+#’uniq_id’ which is the unit id,
+#’panel_time’ which is the ‘absolute time’ variable for the panel ranging from 1 to the end #time,
+#’move_date’ which is the absolute time period which the treatment started, for each treated #observation
+#’event_time’ which is the ‘time past since treatment start’ for the treated observations.
+# and an ‘outcome’ for each time period, as well as any time constant covariates #’cov1,cov2,cov3’ etc.
+#Weights vec is the weighting vector for each observation- useful for bootstrap inference #down the line
+
+imp.data <- data.frame(
+  outcome = as.vector( t(ytrain) ),
+  treat_status = as.vector( t(ztrain) ),
+  uniq_id = as.vector( sapply(1:n, rep, t1)),
+  panel_time = rep(1:t1, n),
+  move_date = as.vector( sapply(first.treat, rep, t1)),
+  cov1 = as.vector( sapply(xtrain[,1], rep, t1)),
+  cov2 = as.vector( sapply(xtrain[,2], rep, t1)),
+  cov3 = as.vector( sapply(xtrain[,3], rep, t1)),
+  cov4 = as.vector( sapply(xtrain[,4], rep, t1)),
+  cov5 = as.vector( sapply(xtrain[,5], rep, t1))
+)
+imp.data$event_time <- sapply(imp.data$panel_time - imp.data$move_date + 1, function(x) max(x, 0))
+imp.data$event_time[imp.data$move_date == 0] <- 0
+
+imp.data$X1 <- cut(imp.data$cov1, breaks = 20, labels = 1:20)
+imp.data$X2 <- cut(imp.data$cov2, breaks = 20, labels = 1:20)
+imp.data$X3 <- cut(imp.data$cov3, breaks = 20, labels = 1:20)
+
+
+estimate_event_time_effects_weighted<-function(control_obs,treated_obs,weights_vec, include_cov){
+  control_ids<-unique(control_obs$uniq_id)
+  treated_ids<-unique(treated_obs$uniq_id)
+  
+  status_changers<-intersect(control_ids, treated_ids)
+  treated_obs%>%filter(uniq_id %in% status_changers)->imputed_group
+  
+  #Add more interactions of panel_time with covariates here as needed
+  if (include_cov){
+    fixed_effect_object<-fixest::feols(outcome ~ -1 | uniq_id + panel_time^cov4^cov5^X1^X2^X3, data=control_obs, weights = weights_vec)
+  } else{
+    fixed_effect_object<-fixest::feols(outcome ~ -1 | uniq_id + panel_time, data=control_obs, weights = weights_vec)
+  }
+  predicted_outcome<-predict(fixed_effect_object,newdata=imputed_group)
+  imputed_group$counterfactual_outcome<-predicted_outcome
+  imputed_group$tau_est<-imputed_group$outcome-imputed_group$counterfactual_outcome
+  
+  imputed_group%>%
+    group_by(event_time)%>%
+    summarise(period_effect=mean(tau_est,na.rm = TRUE))->event_time_estimates
+  
+  return(list(event=event_time_estimates,individual=imputed_group))
+}
+
+#Main function to do bootstrap inference for effects
+boot_BJS_effects<-function(dataset,period_number,boot_number, alpha, include_cov){
+  parentids<-unique(dataset$uniq_id)
+  individual_frame<-data.frame()
+  event_frame<-data.frame()
+  control_obs<-dataset[dataset$treat_status==0,]
+  treated_obs<-dataset[dataset$treat_status ==1,]
+  control_obs%>%arrange(uniq_id)->control_obs
+  control_obs%>%select(uniq_id)%>%table()->obs_counts
+  for(i in (1:boot_number)){
+    weight_vector<-rep(rexp(nrow(obs_counts)), obs_counts)
+    BJS_results<-estimate_event_time_effects_weighted(control_obs,treated_obs,weight_vector, include_cov)
+    event_study_estimates<-BJS_results$event
+    event_study_estimates$boot_id<-i
+    event_study_estimates<-dplyr::bind_rows(event_study_estimates,
+                                            data.frame(event_time=9999,period_effect=sum(event_study_estimates$period_effect)))
+    individual_estimates<-BJS_results$individual
+    individual_estimates$boot_id<-i
+    event_frame<-dplyr::bind_rows(event_frame,event_study_estimates)
+    individual_frame<-dplyr::bind_rows(individual_frame,individual_estimates)
+  }
+  
+  event_frame %>%
+    group_by(event_time) %>% 
+    summarise(conf.low=quantile(period_effect,alpha / 2,na.rm = TRUE),
+              estimate = mean(period_effect, na.rm = TRUE),
+              conf.high=quantile(period_effect, 1 - alpha / 2,na.rm = TRUE)) %>%
+    rename(t = event_time) %>%
+    mutate(method = "DiD Imputation FE")  %>%
+    mutate(t = t - 1) %>%
+    filter(t >= 0 & t < 999) ->event_effects
+  
+  # individual_frame%>%group_by(move_date,event_time)%>%summarise(low=quantile(tau_est,alpha / 2,na.rm = TRUE),
+  #                                                               high=quantile(tau_est,1-alpha/2,na.rm = TRUE))->cohort_per_period_effects
+  # 
+  # individual_frame%>%group_by(move_date)%>%summarise(low=quantile(total_effect,alpha/2,na.rm = TRUE),
+  #                                                    high=quantile(total_effect,1-alpha/2,na.rm = TRUE))->cohort_total_effects
+  # 
+  # results_list=list(
+  #   event_times=event_effects,
+  #   cohort_period=cohort_per_period_effects,
+  #   cohort_total=cohort_total_effects
+  # )
+  return (event_effects)}
+
+did_imp_check <- boot_BJS_effects(imp.data, t1, 200, alpha, include_cov = FALSE)
+did_imp_check %>% mutate(method = "DiD Imputation Check")
+
+did_imp_fe <- boot_BJS_effects(imp.data, t1, 200, alpha, include_cov = TRUE)
+
 ```
 
+DiD imputation approach implemented in borusyak, jaravel, spiess 2021.
+```{r did impute}
+did_imp.fit <- did_imputation(data = panel.data, yname = "ytrain", gname = "first.treat",
+                          tname = "time", idname = "id", 
+                          first_stage = ~ 0 | id + time,
+                          horizon=TRUE) 
+print(did_imp.fit)
+did_imp <- did_imp.fit %>% 
+  select(t = term, estimate, std.error) %>%
+  mutate(
+    conf.low = estimate - 1.96 * std.error,
+    conf.high = estimate + 1.96 * std.error,
+    t = as.numeric(t)
+  ) %>%
+  mutate(method = "DiD Imputation") %>% 
+  select(c(t, estimate, conf.low, conf.high, method)) %>% 
+  filter(t >= 0 & t < 8)
+print(did_imp)
+```
+Although Susan Athey's paper discussed incorporating covariates with matrix completion method, the MCPanel package does not offer the option for covariates. And fitting without covariates can not get any reasonable estimation in this dgp.
+
+```{r matrix completion}
+# library(MCPanel)
+# ytrain.mask <- ytrain * ztrain
+# mcnnm.fit <- mcnnm_cv(ytrain, ztrain, to_estimate_u = 1, to_estimate_v = 1)
+# mcnnm.fit$est <- mcnnm.fit$L + replicate(t1,mcnnm.fit$u) + t(replicate(n,mcnnm.fit$v))
+# mcnnm.fit$catt <- matrix(NA, nrow = n, ncol = t1 - t0 + 1)
+# for (i in 1:n){
+#   if (sum(ztrain[i,]) == 0) {next}
+#   mcnnm.fit$catt[i, 1:sum(ztrain[i,])] = ytrain[i, ztrain[i, ] == 1] - mcnnm.fit$est[i, ztrain[i,] == 1]
+# }
+# 
+# mcnnm.att <- mcnnm.fit$catt %>%
+#   data.frame() %>%
+#   gather("t", "CATT") %>%
+#   mutate(t =  as.double(str_replace_all(t, c("X" = ""))) - 1) %>%
+#   group_by(t) %>%
+#   summarise(
+#     estimate = mean(CATT, na.rm = TRUE),
+#     method = "MC"
+#   )
+# mcnnm.att
+```
+
+Visualization
+
 ```{r plot}
-# coefs <- bind_rows(att.df, longbet.att, DiD, DiD_nl)
-coefs <- bind_rows(att.df, longbet.att, DiD, DiD_nl, twfe)
+coefs <- bind_rows(att.df, longbet.att, DiD, DiD_nl, did_imp, did_imp_fe, did_imp_check)
 
 plot <- coefs %>% 
   ggplot(aes(x = t, y = estimate, color = method)) + 

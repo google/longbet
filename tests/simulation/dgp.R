@@ -6,7 +6,7 @@ require(forecast)
 # n: number of observations
 # t0: treatment start time
 # t1: total time period
-# pr_type: prognostic effect types ("linear" or "non-linear")
+# pr_type: prognostic effect types ("parallel" or "non-parallel")
 # trt_type: treatment effect types ("homogeneous" or "heterogeneous")
 
 # Output: 
@@ -16,13 +16,13 @@ require(forecast)
 # y0: potential outcomes 
 # tau: treatment effect
 
-dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-linear", trt_type = "heterogeneous"){
+dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-parallel", trt_type = "heterogeneous"){
   # screening
   if (t0 > t1){
     stop("Treatment start time (t0) can not be greater than t1")
   }
-  if(!(pr_type %in% c("linear", "non-linear"))){
-    stop("pr_type should be either linear or non-linear")
+  if(!(pr_type %in% c("parallel", "non-parallel"))){
+    stop("pr_type should be either parallel or non-parallel")
   }
   if(!(trt_type %in% c("homogeneous", "heterogeneous"))){
     stop("trt_type should be either homogeneous or heterogeneous")
@@ -41,21 +41,23 @@ dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-linear", trt_type = "heteroge
   # generate prognostic effect
   f_t <- arima.sim(model = list(order = c(1, 0, 1), ar = 0.7, ma = -0.4), n = t1) + 1
   g <- c(2, -1)
-  if(pr_type == "linear"){
-    gamma_x <- 1 + g[x[, 4] + 1] +  2 * x[, 3]
-  } else if (pr_type == "non-linear"){
-    gamma_x <- -6 + g[x[, 4] + 1] + 6 * x[, 1] * abs(x[, 3] - 1)
+  if(pr_type == "parallel"){
+    gamma_x <- 1 + g[x[, 4] + 1] +  5 * x[, 1] + 2 * x[, 3]
+    y0 <- t( matrix(rep(f_t, n), t1, n) ) + matrix(rep(gamma_x, t1), n, t1)
+  } else if (pr_type == "non-parallel"){
+    gamma_x <-  1 + g[x[, 4] + 1] + 6 * x[, 1] * abs(x[, 3] - 1)
+    y0 <- outer(gamma_x, f_t, "*")
   }
-  y0 <- outer(gamma_x, f_t, "*")
   results$y0 <- y0
   
   # generate treatment effect 
   s <- 1:(t1 - t0 + 1) 
   h_s <- s * exp(-s)
+  trt_type = "homogeneous"
   if(trt_type == "homogeneous"){
-    nu_x <- rep(1, n)
+    nu_x <- rep(2, n)
   } else if (trt_type == "heterogeneous"){
-    nu_x <- 1 + 5 * x[, 2] * x[, 5]
+    nu_x <- 2 + 5 * x[, 2] * x[, 5]
   }
   tau <- outer(nu_x, h_s , "*")
   
@@ -81,7 +83,7 @@ dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-linear", trt_type = "heteroge
   results$tau <- tau
   
   # generate outcome variable
-  results$y <-  y0 + tau + matrix(rnorm(n*t1, mean = 0, sd = 0.5), n, t1)
+  results$y <-  y0 + tau + matrix(rnorm(n*t1, mean = 0, sd = 0.2), n, t1)
   
   return(results)
 }

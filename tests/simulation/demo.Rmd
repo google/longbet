@@ -29,82 +29,12 @@ require(plm)
 First, we create a simulated data set, with pre-treatment covariates, staggered treatments, heterogeneous and dynamic treatment effects. The pre-treatment covariates and heterogeneity are based on dgp in the BCF paper. There are 5 pre-treatment covariates, three are continuous variables and two are categorical variables. The dynamic prognostic effect is simulated from an ARIMA(1, 0, 1) model and the dynamic treatment effect is a decaying function. The staggered adoption is sampled from propensity score. Consider a total of 12 periods with 5 pre-treatment periods, the staggerd adoption starts at period 6.
 
 ```{r sim data}
-dgp <- function(n, t0, t1, pr_type, trt_type){
-  # screening
-  if (t0 > t1){
-    stop("Treatment start time (t0) can not be greater than t1")
-  }
-  if(!(pr_type %in% c("parallel", "non-parallel"))){
-    stop("pr_type should be either parallel or non-parallel")
-  }
-  if(!(trt_type %in% c("homogeneous", "heterogeneous"))){
-    stop("trt_type should be either homogeneous or heterogeneous")
-  }
-  
-  results <- list()
-  # generate covariates
-  x <- matrix(data = NA, nrow = n, ncol = 5)
-  x[,1] <- rnorm(n)
-  x[,2] <- rnorm(n)
-  x[,3] <- rnorm(n)
-  x[,4] <- rbinom(n,1,0.5)
-  x[,5] <- factor(sample(1:3,n,replace=TRUE,prob = c(1/3, 1/3, 1/3)))
-  results$x <- x
-  
-  # generate prognostic effect
-  f_t <- arima.sim(model = list(order = c(1, 0, 1), ar = 0.7, ma = -0.4), n = t1) + 1
-  g <- c(2, -1)
-  if(pr_type == "parallel"){
-    gamma_x <- 1 + g[x[, 4] + 1] +  5 * x[, 1] + 2 * x[, 3]
-    y0 <- t( matrix(rep(f_t, n), t1, n) ) + matrix(rep(gamma_x, t1), n, t1)
-  } else if (pr_type == "non-parallel"){
-    gamma_x <-  1 + g[x[, 4] + 1] + 6 * x[, 1] * abs(x[, 3] - 1)
-    y0 <- outer(gamma_x, f_t, "*")
-  }
-  results$y0 <- y0
-  
-  # generate treatment effect 
-  s <- 1:(t1 - t0 + 1) 
-  h_s <- s * exp(-s)
-  trt_type = "homogeneous"
-  if(trt_type == "homogeneous"){
-    nu_x <- rep(2, n)
-  } else if (trt_type == "heterogeneous"){
-    nu_x <- 2 + 5 * x[, 2] * x[, 5]
-  }
-  tau <- outer(nu_x, h_s , "*")
-  
-  # compute propensity scores and generate treatment assignment
-  pi <- 0.2 * pnorm(0.5* gamma_x - 0.5 * x[,1])^2 + runif(n) / 10
-  z <- matrix(0, n, t1)
-  for (i in t0:t1){
-    treated <- (z[, i - 1] == 1)
-    treatment <- rbinom(n, 1, pi) # draw new treatment for time i
-    z[, i] <- apply(cbind(treated, treatment), 1, max) 
-  }
-  results$z <- z
-  
-  # get post treatment time matrix
-  post_t <- t(apply(z, 1, cumsum))
-  
-  get_tau <- function(trt, post_t){
-    tau <- rep(0, length(post_t))
-    tau[post_t > 0] = trt[post_t[post_t > 0]]
-    return(tau)
-  }
-  tau <- t(mapply(get_tau, data.frame(t(tau)), data.frame(t(post_t))))
-  results$tau <- tau
-  
-  # generate outcome variable
-  results$y <-  y0 + tau + matrix(rnorm(n*t1, mean = 0, sd = 0.2), n, t1)
-  
-  return(results)
-}
+source('dgp.R')
 n = 2000
 t0 = 6
 t1 = 12
-pr_type = "parallel"
-trt_type = "homogeneous"
+pr_type = "non-parallel"
+trt_type = "heterogeneous"
 alpha = 0.05
 data <- dgp(n, t0, t1, pr_type = pr_type, trt_type = trt_type)
 
@@ -143,6 +73,24 @@ att.df <- data.frame(
   conf.high = att,
   method = rep("True", t1 - t0 + 1)
 )
+
+att.results <- data.frame(
+  method = character(),
+  RMSE = double(),
+  Bias = double(),
+  Coverage = double(),
+  Cover0 = double(),
+  I.L = double()
+)
+
+catt.results <- data.frame(
+    method = character(),
+    RMSE = double(),
+    Bias = double(),
+    Coverage = double(),
+    Cover0 = double(),
+    I.L = double()
+  )
 
 ```
 
@@ -195,6 +143,16 @@ longbet.att <- align_catt %>%
     conf.high = quantile(CATT, prob = 1 - alpha / 2),
     method = "LongBet"
   )
+
+longbet.catt <- apply(align_catt, c(1, 2), mean, na.rm = T)
+      longbet.catt.low <- apply(align_catt, c(1, 2), quantile, prob = alpha /2 , na.rm = T)
+      longbet.catt.high <- apply(align_catt, c(1, 2), quantile, prob = 1 - alpha /2 , na.rm = T)
+      
+att.results[nrow(att.results) + 1,] <- c('LongBet', att.metric(att, longbet.att))
+catt.results[nrow(catt.results) + 1, ] <- c('LongBet', catt.metric(align_tau, longbet.catt, longbet.catt.low, longbet.catt.high))
+
+print(att.results)
+      
 ```
 
 We then estimate the treatment effect using DiD with multiple periods.
@@ -217,6 +175,8 @@ DiD <- aggte(did.out, type = "dynamic", na.rm = TRUE) %>%
   select(t, estimate, conf.low, conf.high) %>% 
   mutate(method = "DiD")
 did.time <- proc.time() - did.time
+
+att.results[nrow(att.results) + 1,] <- c('DiD', att.metric(att, DiD))
 ```
 
 We can also supply the DiD method with known relationship in covariates for non-linear prognostic effects.
@@ -251,6 +211,8 @@ DiD_nl <- aggte(did_nl.out, type = "dynamic", na.rm = TRUE) %>%
   select(t, estimate, conf.low, conf.high) %>% 
   mutate(method = "Non-linear DiD")
 did_nl.time = proc.time() - did_nl.time
+
+att.results[nrow(att.results) + 1,] <- c('Non-linear DiD', att.metric(att, DiD_nl))
 ```
 
 The following is an implementation of the did_imputation method kindly shared by Eray Turkel from Google. But since borusyak already have a package for did_impuation in R, we are not going to run the following method.
@@ -356,10 +318,12 @@ boot_BJS_effects<-function(dataset,period_number,boot_number, alpha, include_cov
   # )
   return (event_effects)}
 
-did_imp_check <- boot_BJS_effects(imp.data, t1, 200, alpha, include_cov = FALSE)
-did_imp_check %>% mutate(method = "DiD Imputation Check")
+# did_imp_check <- boot_BJS_effects(imp.data, t1, 200, alpha, include_cov = FALSE)
+# did_imp_check %>% mutate(method = "DiD Imputation Check")
 
 did_imp_fe <- boot_BJS_effects(imp.data, t1, 200, alpha, include_cov = TRUE)
+
+att.results[nrow(att.results) + 1,] <- c('DiD Imputation Cov', att.metric(att, did_imp_fe))
 
 ```
 
@@ -380,7 +344,8 @@ did_imp <- did_imp.fit %>%
   mutate(method = "DiD Imputation") %>% 
   select(c(t, estimate, conf.low, conf.high, method)) %>% 
   filter(t >= 0 & t < 8)
-print(did_imp)
+att.results[nrow(att.results) + 1,] <- c('DiD Imputation', att.metric(att, did_imp))
+
 ```
 Although Susan Athey's paper discussed incorporating covariates with matrix completion method, the MCPanel package does not offer the option for covariates. And fitting without covariates can not get any reasonable estimation in this dgp.
 
@@ -410,7 +375,7 @@ Although Susan Athey's paper discussed incorporating covariates with matrix comp
 Visualization
 
 ```{r plot}
-coefs <- bind_rows(att.df, longbet.att, DiD, DiD_nl, did_imp, did_imp_fe, did_imp_check)
+coefs <- bind_rows(att.df, longbet.att, DiD, DiD_nl, did_imp, did_imp_fe)
 
 plot <- coefs %>% 
   ggplot(aes(x = t, y = estimate, color = method)) + 
@@ -423,4 +388,9 @@ plot <- coefs %>%
   labs(title = 'Event Time Estimates', y="ATT", x = "Relative Time") + 
   guides(col = guide_legend(nrow = 3)) 
 print(plot)
+```
+
+```{r}
+print(att.results)
+print(catt.results)
 ```

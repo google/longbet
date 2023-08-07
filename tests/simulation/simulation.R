@@ -20,7 +20,7 @@ source('dgp.R') # script for data generating process
 
 # Set up ------------------------------------------------------------------
 set.seed(100)
-mc <- 2 #1000 # monte carlo iterations
+mc <- 10 #1000 # monte carlo iterations
 n <- 2000      # number of observations
 t0 <- 6        # earliest treatment adoption time
 t1 <- 12       # total time period
@@ -300,11 +300,11 @@ for (pr in pr_types){
         # )
         return (event_effects)}
       
-      tm <- proc.time()
-      did_imp_check <- boot_BJS_effects(imp.data, t1, 500, alpha, include_cov = FALSE)
-      tm <- proc.time() - tm
-      did_imp_check %>% mutate(method = "DiD Imputation Check")
-      att.results[nrow(att.results) + 1,] <- c(iter, pr, trt, 'DiD Imputation Check', att.metric(att, did_imp_check), as.numeric(tm[3]))
+      # tm <- proc.time()
+      # did_imp_check <- boot_BJS_effects(imp.data, t1, 500, alpha, include_cov = FALSE)
+      # tm <- proc.time() - tm
+      # did_imp_check %>% mutate(method = "DiD Imputation Check")
+      # att.results[nrow(att.results) + 1,] <- c(iter, pr, trt, 'DiD Imputation Check', att.metric(att, did_imp_check), as.numeric(tm[3]))
       
       tm <- proc.time()
       did_imp_cov <- boot_BJS_effects(imp.data, t1, 500, alpha, include_cov = TRUE)
@@ -337,7 +337,7 @@ catt.summary <- catt.results %>%
 summary <- merge(att.summary, catt.summary, by = c('pr', 'trt', 'method'), 
                  suffixes = c(".ATT",".CATT"), all.x = T) %>%
   arrange(
-    factor(pr, levels = c("linear", 'non-linear')),
+    factor(pr, levels = c("parallel", 'non-parallel')),
     factor(trt, levels = c("homogeneous", "heterogeneous")),
     factor(method, levels = c("LongBet", "DiD", "Non-linear DiD"))) %>%
   relocate(Time, .after = last_col()) %>%

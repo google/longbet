@@ -42,10 +42,10 @@ dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-parallel", trt_type = "hetero
   f_t <- arima.sim(model = list(order = c(1, 0, 1), ar = 0.7, ma = -0.4), n = t1) + 1
   g <- c(2, -1)
   if(pr_type == "parallel"){
-    gamma_x <- 1 + g[x[, 4] + 1] +  5 * x[, 1] + 2 * x[, 3]
+    gamma_x <-  g[x[, 4] + 1] + 1 * x[, 1] * abs(x[, 3] - 1)
     y0 <- t( matrix(rep(f_t, n), t1, n) ) + matrix(rep(gamma_x, t1), n, t1)
   } else if (pr_type == "non-parallel"){
-    gamma_x <-  1 + g[x[, 4] + 1] + 6 * x[, 1] * abs(x[, 3] - 1)
+    gamma_x <-  g[x[, 4] + 1] + 1 * x[, 1] * abs(x[, 3] - 1)
     y0 <- outer(gamma_x, f_t, "*")
   }
   results$y0 <- y0
@@ -53,11 +53,10 @@ dgp <- function(n, t0 = 6, t1 = 12, pr_type = "non-parallel", trt_type = "hetero
   # generate treatment effect 
   s <- 1:(t1 - t0 + 1) 
   h_s <- s * exp(-s)
-  trt_type = "homogeneous"
   if(trt_type == "homogeneous"){
     nu_x <- rep(2, n)
   } else if (trt_type == "heterogeneous"){
-    nu_x <- 2 + 5 * x[, 2] * x[, 5]
+    nu_x <- 2 + x[, 2] * x[, 5]
   }
   tau <- outer(nu_x, h_s , "*")
   

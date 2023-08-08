@@ -160,26 +160,15 @@ for (pr in pr_types){
       
       # Baseline: DiD Non-linear ------------------------------------------------
       did_nl.time <- proc.time()
-      if (pr == "parallel"){
-        did_nl.out <- att_gt(yname = "ytrain",
-                             gname = "first.treat",
-                             idname = "id",
-                             tname = "time",
-                             xformla = ~ X1 + X3 + X2 + X4 + X5,
-                             data = panel.data,
-                             est_method = "dr",
-                             control_group = "notyettreated"
-        )
-      } else {
-        did_nl.out <- att_gt(yname = "ytrain",
-                             gname = "first.treat",
-                             idname = "id",
-                             tname = "time",
-                             xformla = ~ X1 * X3 + X2 + X4 + X5,
-                             data = panel.data,
-                             est_method = "dr",
-                             control_group = "notyettreated")
-      }
+      did_nl.out <- att_gt(yname = "ytrain",
+                           gname = "first.treat",
+                           idname = "id",
+                           tname = "time",
+                           xformla = ~ X1 * X3 + X2 + X4 + X5,
+                           data = panel.data,
+                           est_method = "dr",
+                           control_group = "notyettreated")
+      
       
       DiD_nl <- aggte(did_nl.out, type = "dynamic", na.rm = TRUE) %>% 
         tidy() %>% 

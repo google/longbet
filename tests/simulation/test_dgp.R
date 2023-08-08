@@ -12,14 +12,14 @@ require(didimputation)
 require(fixest)
 
 # DATA GENERATION PROCESS -------------------------------------------------
-set.seed(1)
+set.seed(3)
 n <- 2000
 t0 <- 6 # treatment start time
 t1 <- 12 # observed response period
 alpha <- 0.05
 
 source('dgp.R')
-pr_type = "non-linear"
+pr_type = "non-parallel"
 trt_type = "heterogeneous"
 data <- dgp(n, t0, t1, pr_type = pr_type, trt_type = trt_type)
 
@@ -83,7 +83,7 @@ catt.results <- data.frame(
 # longbet -----------------------------------------------------------------
 longbet.time <- proc.time()
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
-                       num_sweeps = 500,
+                       num_sweeps = 100,
                        num_trees_pr =  20, num_trees_trt = 20,
                        pcat = ncol(xtrain) - 3)
 
@@ -189,8 +189,6 @@ twfe <- panel.data %>%
 
 
 # results -----------------------------------------------------------------
-print(att.results)
-print(catt.results)
 # coefs <- bind_rows(longbet.att, DiD, twfe)
 coefs <- bind_rows(att.df, longbet.att, DiD, DiD_nl)
 
@@ -206,3 +204,7 @@ plot <- coefs %>%
   labs(title = 'Event Time Estimates', y="ATT", x = "Relative Time") + 
   guides(col = guide_legend(nrow = 3)) 
 print(plot)
+
+
+print(att.results)
+print(catt.results)

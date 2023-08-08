@@ -1286,15 +1286,26 @@ void calcSuffStat_time(std::vector<double> &temp_suff_stat,
 std::vector<size_t> &xorder, std::vector<size_t> &torder, size_t &start,
 size_t &end, Model *model, std::unique_ptr<State> &state)
 {
-    // calculate sufficient statistics for categorical variables
-
-    // compute sum of y[Xorder[start:end, var]]
-    for (size_t i = start; i <= end; i++)
-    {
-        for (size_t j = 0; j < xorder.size(); j++){
-            model->incSuffStat(state, xorder[j], torder[i],temp_suff_stat);
+    // calculate sufficient statistics for time variable
+    if (state->fl == 0){
+        for (size_t i = start; i <= end; i++)
+        {
+            for (size_t j = 0; j < xorder.size(); j++){
+                model->incSuffStat(state, xorder[j], torder[i],temp_suff_stat);
+            }
         }
+    } else {
+        for (size_t i = start; i <= end; i++)
+        {
+            // TODO: split based on s values for each observation
+            for (size_t j = 0; j < xorder.size(); j++){
+                // check how many s for the i-th individual.
+                model->incSuffStat(state, xorder[j], torder[i],temp_suff_stat);
+            }
+        }
+
     }
+   
 }
 
 void calcSuffStat_continuous(std::vector<double> &temp_suff_stat,

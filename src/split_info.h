@@ -367,6 +367,11 @@ public:
   std::unique_ptr<State> &state, std::vector<double> &suff_stat,
   std::vector<double> &left_suff_stat, std::vector<double> &right_suff_stat)
   {
+    // TODO: 
+    //      Restructure sindex as vector of vector with varying size.
+    //      All the splitting code need to be
+    // initialize X_struct for the treatment term
+
     // cout << "split_torder_std, split_var = " << split_var << ", split_point = " << split_point << endl;
     // split t as categorical variable
     // preserve order of other variables

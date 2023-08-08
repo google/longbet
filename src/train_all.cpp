@@ -36,7 +36,8 @@ using namespace chrono;
 // [[Rcpp::plugins(cpp11)]]
 // [[Rcpp::export]]
 Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
-                    arma::mat t_con, arma::mat t_mod, arma::mat post_t, size_t beta_size,
+                    arma::mat t_con, arma::mat t_mod, arma::mat post_t, arma::mat S,
+                    size_t beta_size,
                     size_t num_sweeps, size_t burnin = 1,
                     size_t max_depth = 1, size_t n_min = 5,
                     size_t num_cutpoints = 1,
@@ -123,6 +124,12 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     matrix<size_t> Xorder_tau_std;
     ini_matrix(Xorder_tau_std, N, p_trt);
 
+    matrix<size_t> Sorder_std;
+    ini_matrix(Sorder_std, p_y, N);
+    for (size_t i = 0; i < N; i++){
+        std::iota(Sorder_std[i].begin(), Sorder_std[i].end(), 0);
+    }
+
     // std::vector<double> y_std(N);
     // std::vector<size_t> z_std(N);
     // std::vector<double> time_std(N);
@@ -135,6 +142,7 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix tcon_std(t_con.n_rows, t_con.n_cols);
     Rcpp::NumericMatrix tmod_std(t_mod.n_rows, t_mod.n_cols);
     Rcpp::NumericMatrix post_t_std(N, p_y);
+    Rcpp::NumericMatrix S_std(p_y, N);
 
     arma_to_rcpp(X, X_std);
     arma_to_rcpp(y, y_std);
@@ -148,6 +156,8 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     arma_to_rcpp(X_tau, X_tau_std);
     arma_to_std_ordered(X_tau, Xorder_tau_std);
     y_mean = compute_mat_mean(y_std);
+    arma_to_rcpp(S, S_std);
+   
 
     ///////////////////////////////////////////////////////////////////
     std::vector<double> sigma_vec(2);  // vector of sigma0, sigma1
@@ -190,6 +200,7 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     double *tpointer_mu = &tcon_std[0];
     double *tpointer_tau = &tmod_std[0];
     double *post_t_pointer = &post_t_std[0];
+    double *Spointer = &S_std[0];
     // double *Xtestpointer = &Xtest_std[0];
 
     std::vector<matrix<double>> tauhats_xinfo(num_sweeps);
@@ -244,17 +255,16 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     n_trt, p_pr, p_trt, p_y, num_trees, p_categorical_pr, p_categorical_trt,
     p_continuous_pr, p_continuous_trt, set_random_seed, random_seed, n_min,
     num_cutpoints, parallel, mtry_pr, mtry_trt, Xpointer, num_sweeps,
-    sample_weights_flag, ypointer, zpointer, post_t_pointer, beta_size, sigma_vec, b_vec, max_depth, y_mean,
+    sample_weights_flag, ypointer, zpointer, post_t_pointer, Spointer, beta_size, sigma_vec, b_vec, max_depth, y_mean,
     burnin, model_trt->dim_suffstat));
     // cout << "state->beta_size = " << state->beta_size << endl;
 
     // initialize X_struct for the prognostic term
     std::vector<double> initial_theta_pr(1, y_mean / (double)num_trees_pr);
-    std::unique_ptr<X_struct> x_struct_pr(new X_struct(Xpointer, ypointer, tpointer_mu, N, p_y, Xorder_std, torder_mu_std, p_categorical_pr, p_continuous_pr, &initial_theta_pr, num_trees_pr, sig_knl, lambda_knl));
+    std::unique_ptr<X_struct> x_struct_pr(new X_struct(Xpointer, ypointer, tpointer_mu, Spointer, N, p_y, Xorder_std, torder_mu_std, Sorder_std, p_categorical_pr, p_continuous_pr, &initial_theta_pr, num_trees_pr, sig_knl, lambda_knl));
 
-    // initialize X_struct for the treatment term
     std::vector<double> initial_theta_trt(1, 0);
-    std::unique_ptr<X_struct> x_struct_trt(new X_struct(Xpointer_tau, ypointer, tpointer_tau, N, p_y, Xorder_tau_std, torder_tau_std, p_categorical_trt, p_continuous_trt, &initial_theta_trt, num_trees_trt, sig_knl, lambda_knl));
+    std::unique_ptr<X_struct> x_struct_trt(new X_struct(Xpointer_tau, ypointer, tpointer_tau, Spointer, N, p_y, Xorder_tau_std, torder_tau_std, Sorder_std, p_categorical_trt, p_continuous_trt, &initial_theta_trt, num_trees_trt, sig_knl, lambda_knl));
 
     size_t t_size = state->beta_size;
     matrix<double> resid_info;

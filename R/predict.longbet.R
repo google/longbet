@@ -9,7 +9,6 @@
 #' @export
 predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, ...) {
 
-    print(dim(x))
     if(!("matrix" %in% class(x))) {
         cat("Msg: input x is not a matrix, try to convert type.\n")
         x = as.matrix(x)

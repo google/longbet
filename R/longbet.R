@@ -99,22 +99,17 @@ longbet <- function(y, x, z, t, pcat,
         }
     }
     post_trt_time <- t(apply(z, 1, get_trt_time, t = t))
-    beta_size = max(post_trt_time) + 1
+    beta_size <- max(post_trt_time) + 1
 
+    # get cumulative treated time
+    S <- apply(z, 1, cumsum)
 
     trt_time <- matrix(apply(z, 1, function(x) sum(x == 0)), nrow(z), 1)
 
     if (ncol(y) > 1) {
-        # unique_z_sum <- unique(rowSums(z))
-        # post_t <- sort(unique_z_sum)[2]
-        # t0 <- t_con[ncol(y) - post_t]
-        # t_mod <- sapply(t_con, function(x) max(x - t0, 0))
         post_t <- max(rowSums(z))
         t0 <- ncol(y) - post_t + 1
         t_mod <- c(rep(0, t0 - 1), 1:post_t)
-        print("Adjusted treatment time:")
-        print(t_mod)
-        # t_mod <- c(rep(0, ncol(y) - post_t), 1:post_t)
     } else {
         t_mod <- c(1)
         t0 <- NULL
@@ -198,6 +193,7 @@ longbet <- function(y, x, z, t, pcat,
                     t_con = t_con, 
                     t_mod = t_mod,
                     post_t = post_trt_time,
+                    S = S,
                     beta_size = beta_size,
                     num_sweeps = num_sweeps, 
                     burnin = num_burnin,

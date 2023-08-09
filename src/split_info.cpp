@@ -309,8 +309,11 @@ void split_info::split_torder_std(std::unique_ptr<split_info> &split_left,
         if(sorder_std[i].size() == 0) {continue;}
         
         for (size_t j = 0; j < sorder_std[i].size(); j++){
+
             if (x_struct->Tpt[i + j * state->n_y] <= split_value){
                 split_left->sorder_std[i].push_back(j);
+
+                model->incSuffStat(state, i, sorder_std[i][j], left_suff_stat);
             } else {
                 split_right->sorder_std[i].resize(sorder_std[i].size() - j);
                 std::copy(sorder_std[i].begin() + j, sorder_std[i].end(), split_right->sorder_std[i].begin());
@@ -318,7 +321,9 @@ void split_info::split_torder_std(std::unique_ptr<split_info> &split_left,
             }
         }
     }
-
+    bool copy_compute_left = true;
+    model->calculateOtherSideSuffStat(suff_stat, left_suff_stat, right_suff_stat, copy_compute_left);
+ 
     // TODO: remove the rest
 
     // split t as categorical variable
@@ -369,10 +374,10 @@ void split_info::split_torder_std(std::unique_ptr<split_info> &split_left,
 
             if (*(temp_pointer + torder_std[i][j]) <= cutvalue)
             {
-              for (size_t k = 0; k < Xorder_std[0].size(); k++){
-                model->incSuffStat(state, Xorder_std[0][k],
-                torder_std[split_var][j], left_suff_stat);
-              }
+            //   for (size_t k = 0; k < Xorder_std[0].size(); k++){
+            //     model->incSuffStat(state, Xorder_std[0][k],
+            //     torder_std[split_var][j], left_suff_stat);
+            //   }
               split_left->torder_std[i][left_ix] = torder_std[i][j];
               left_ix = left_ix + 1;
             } else {
@@ -389,10 +394,10 @@ void split_info::split_torder_std(std::unique_ptr<split_info> &split_left,
               split_left->torder_std[i][left_ix] = torder_std[i][j];
               left_ix = left_ix + 1;
             } else {
-              for (size_t k = 0; k < Xorder_std[0].size(); k++){
-                model->incSuffStat(state, Xorder_std[0][k],
-                torder_std[split_var][j], right_suff_stat);
-              }
+            //   for (size_t k = 0; k < Xorder_std[0].size(); k++){
+            //     model->incSuffStat(state, Xorder_std[0][k],
+            //     torder_std[split_var][j], right_suff_stat);
+            //   }
               split_right->torder_std[i][right_ix] = torder_std[i][j];
               right_ix = right_ix + 1;
             }
@@ -441,7 +446,7 @@ void split_info::split_torder_std(std::unique_ptr<split_info> &split_left,
       }
     }
 
-    model->calculateOtherSideSuffStat(suff_stat, left_suff_stat, right_suff_stat, compute_left_side);
+    // model->calculateOtherSideSuffStat(suff_stat, left_suff_stat, right_suff_stat, compute_left_side);
 
     // update X_num_unique
 

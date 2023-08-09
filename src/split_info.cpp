@@ -75,6 +75,11 @@ void split_info::split_xorder_std_continuous(std::unique_ptr<split_info> &split_
             if (*(temp_pointer + Xorder_std[split_var][j]) <= cutvalue)
             {
                 model->updateNodeSuffStat(left_suff_stat, state, Xorder_std, torder_std, split_var, j);
+
+                // copy sorder
+                split_left->sorder_std[Xorder_std[split_var][j]] = sorder_std[Xorder_std[split_var][j]];
+            } else {
+                split_right->sorder_std[Xorder_std[split_var][j]] = sorder_std[Xorder_std[split_var][j]];
             }
         }
         else
@@ -82,6 +87,11 @@ void split_info::split_xorder_std_continuous(std::unique_ptr<split_info> &split_
             if (*(temp_pointer + Xorder_std[split_var][j]) > cutvalue)
             {
                 model->updateNodeSuffStat(right_suff_stat, state, Xorder_std, torder_std, split_var, j);
+
+                // copy sorder
+                split_right->sorder_std[Xorder_std[split_var][j]] = sorder_std[Xorder_std[split_var][j]];
+            } else {
+                split_left->sorder_std[Xorder_std[split_var][j]] = sorder_std[Xorder_std[split_var][j]];
             }
         }
     }
@@ -285,7 +295,6 @@ void split_info::split_torder_std(std::unique_ptr<split_info> &split_left,
     std::unique_ptr<State> &state, std::vector<double> &suff_stat,
     std::vector<double> &left_suff_stat, std::vector<double> &right_suff_stat)
 {
-    // TODO:  split sorder
     double split_value = s_values[split_point];
     for (size_t i = 0; i < sorder_std.size(); i++){
 
@@ -301,6 +310,8 @@ void split_info::split_torder_std(std::unique_ptr<split_info> &split_left,
             }
         }
     }
+
+    // TODO: remove the rest
 
     // split t as categorical variable
     // preserve order of other variables

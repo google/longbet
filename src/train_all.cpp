@@ -273,10 +273,10 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     // TODO: get structure for t and s values.
     // initialize X_struct for the prognostic term
     std::vector<double> initial_theta_pr(1, y_mean / (double)num_trees_pr);
-    std::unique_ptr<X_struct> x_struct_pr(new X_struct(Xpointer, ypointer, tpointer_mu, Spointer, N, p_y, Xorder_std, torder_mu_std, Sorder_std, p_categorical_pr, p_continuous_pr, &initial_theta_pr, num_trees_pr, sig_knl, lambda_knl));
+    std::unique_ptr<X_struct> x_struct_pr(new X_struct(Xpointer, ypointer, tpointer_mu, Tpointer, t_values, N, p_y, Xorder_std, torder_mu_std, Sorder_std, p_categorical_pr, p_continuous_pr, &initial_theta_pr, num_trees_pr, sig_knl, lambda_knl));
 
     std::vector<double> initial_theta_trt(1, 0);
-    std::unique_ptr<X_struct> x_struct_trt(new X_struct(Xpointer_tau, ypointer, tpointer_tau, Spointer, N, p_y, Xorder_tau_std, torder_tau_std, Sorder_std, p_categorical_trt, p_continuous_trt, &initial_theta_trt, num_trees_trt, sig_knl, lambda_knl));
+    std::unique_ptr<X_struct> x_struct_trt(new X_struct(Xpointer_tau, ypointer, tpointer_tau, Spointer, s_values, N, p_y, Xorder_tau_std, torder_tau_std, Sorder_std, p_categorical_trt, p_continuous_trt, &initial_theta_trt, num_trees_trt, sig_knl, lambda_knl));
 
     size_t t_size = state->beta_size;
     matrix<double> resid_info;

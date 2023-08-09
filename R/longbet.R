@@ -104,6 +104,9 @@ longbet <- function(y, x, z, t, pcat,
     # get cumulative treated time
     S <- apply(z, 1, cumsum)
 
+    # get a matrix of time for the panel data
+    T <- matrix(rep(t, nrow(y)), nrow = nrow(y), byrow = TRUE)
+
     trt_time <- matrix(apply(z, 1, function(x) sum(x == 0)), nrow(z), 1)
 
     if (ncol(y) > 1) {
@@ -193,6 +196,7 @@ longbet <- function(y, x, z, t, pcat,
                     t_con = t_con, 
                     t_mod = t_mod,
                     post_t = post_trt_time,
+                    T = T, 
                     S = S,
                     beta_size = beta_size,
                     num_sweeps = num_sweeps, 

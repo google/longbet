@@ -36,7 +36,7 @@ using namespace chrono;
 // [[Rcpp::plugins(cpp11)]]
 // [[Rcpp::export]]
 Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
-                    arma::mat t_con, arma::mat t_mod, arma::mat post_t, arma::mat S,
+                    arma::mat t_con, arma::mat t_mod, arma::mat post_t, arma::mat T, arma::mat S,
                     size_t beta_size,
                     size_t num_sweeps, size_t burnin = 1,
                     size_t max_depth = 1, size_t n_min = 5,
@@ -124,12 +124,6 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     matrix<size_t> Xorder_tau_std;
     ini_matrix(Xorder_tau_std, N, p_trt);
 
-    matrix<size_t> Sorder_std;
-    ini_matrix(Sorder_std, p_y, N);
-    for (size_t i = 0; i < N; i++){
-        std::iota(Sorder_std[i].begin(), Sorder_std[i].end(), 0);
-    }
-
     // std::vector<double> y_std(N);
     // std::vector<size_t> z_std(N);
     // std::vector<double> time_std(N);
@@ -156,7 +150,6 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     arma_to_rcpp(X_tau, X_tau_std);
     arma_to_std_ordered(X_tau, Xorder_tau_std);
     y_mean = compute_mat_mean(y_std);
-    arma_to_rcpp(S, S_std);
    
 
     ///////////////////////////////////////////////////////////////////
@@ -200,8 +193,26 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     double *tpointer_mu = &tcon_std[0];
     double *tpointer_tau = &tmod_std[0];
     double *post_t_pointer = &post_t_std[0];
-    double *Spointer = &S_std[0];
-    // double *Xtestpointer = &Xtest_std[0];
+
+    // T and S matrix
+    matrix<size_t> Torder_std;
+    matrix<size_t> Sorder_std;
+    ini_matrix(Torder_std, p_y, N);
+    ini_matrix(Sorder_std, p_y, N);
+    for (size_t i = 0; i < N; i++){
+        std::iota(Torder_std[i].begin(), Torder_std[i].end(), 0);
+        std::iota(Sorder_std[i].begin(), Sorder_std[i].end(), 0);
+    }
+
+    double *Spointer = S.memptr();
+    double *Tpointer = T.memptr();
+    
+    // get unique values of T and S
+    std::vector<double> t_values = arma::conv_to<std::vector<double>>::from( arma::sort(arma::unique(arma::vectorise(T))) ); 
+    std::vector<double> s_values = arma::conv_to<std::vector<double>>::from( arma::sort(arma::unique(arma::vectorise(S))) ); 
+    
+    // // row of Tpointer:
+    // cout << "t pointer " << Tpointer[0] << " " << Tpointer[0 + 1*N] << " " << Tpointer[0 + 2*N] << endl;
 
     std::vector<matrix<double>> tauhats_xinfo(num_sweeps);
     std::vector<matrix<double>> muhats_xinfo(num_sweeps);
@@ -304,7 +315,7 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix resid(t_size, num_sweeps);
     Rcpp::NumericMatrix A_diag(t_size, num_sweeps);
     Rcpp::NumericMatrix Sig_diag(t_size, num_sweeps);
-    Rcpp::NumericMatrix t_values(t_size, 1);
+    Rcpp::NumericMatrix t_vector(t_size, 1);
     Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt_pr(trees_pr, true);
     Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt_trt(trees_trt, true);
 
@@ -332,10 +343,8 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
 
     for (size_t i = 0; i < t_size; i++)
     {
-        t_values(i, 0) = x_struct_trt->t_values[i];
+        t_vector(i, 0) = x_struct_trt->t_values[i];
     }
-    // cout << "x_struct t_values " << x_struct_trt->t_values << endl;
-    // cout << "t_values output " << t_values << endl;
 
 
     auto end = system_clock::now();
@@ -422,7 +431,7 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         Rcpp::Named("input_var_count") = Rcpp::List::create(Rcpp::Named("x_con") = p_pr,
                                                             Rcpp::Named("x_mod") = p_trt),
         Rcpp::Named("gp_info") = Rcpp::List::create(
-            Rcpp::Named("t_values") = t_values,
+            Rcpp::Named("t_vector") = t_vector,
             Rcpp::Named("resid") = resid,
             Rcpp::Named("A_diag") = A_diag,
             Rcpp::Named("Sig_diag") = Sig_diag

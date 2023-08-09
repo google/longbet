@@ -189,8 +189,8 @@ std::vector<double> &suff_stat)
 // it is executed after suffstats for the node has been initialized by suff_stats_ini [defined in tree.h]
 void longbetModel::updateNodeSuffStat(std::vector<double> &suff_stat, std::unique_ptr<State> &state, matrix<size_t> &Xorder_std, matrix<size_t> &torder_std, size_t &split_var, size_t row_ind)
 {
-  for (size_t i = 0; i < torder_std[0].size(); i++){
-    incSuffStat(state, Xorder_std[split_var][row_ind], torder_std[0][i], suff_stat);
+  for (auto i: torder_std[Xorder_std[split_var][row_ind]]){
+    incSuffStat(state, Xorder_std[split_var][row_ind], i, suff_stat);
   }
 }
 

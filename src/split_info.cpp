@@ -74,7 +74,7 @@ void split_info::split_xorder_std_continuous(std::unique_ptr<split_info> &split_
         {
             if (*(temp_pointer + Xorder_std[split_var][j]) <= cutvalue)
             {
-                model->updateNodeSuffStat(left_suff_stat, state, Xorder_std, torder_std, split_var, j);
+                model->updateNodeSuffStat(left_suff_stat, state, Xorder_std, sorder_std, split_var, j);
 
                 // copy sorder
                 split_left->sorder_std[Xorder_std[split_var][j]] = sorder_std[Xorder_std[split_var][j]];
@@ -86,7 +86,7 @@ void split_info::split_xorder_std_continuous(std::unique_ptr<split_info> &split_
         {
             if (*(temp_pointer + Xorder_std[split_var][j]) > cutvalue)
             {
-                model->updateNodeSuffStat(right_suff_stat, state, Xorder_std, torder_std, split_var, j);
+                model->updateNodeSuffStat(right_suff_stat, state, Xorder_std, sorder_std, split_var, j);
 
                 // copy sorder
                 split_right->sorder_std[Xorder_std[split_var][j]] = sorder_std[Xorder_std[split_var][j]];
@@ -190,7 +190,7 @@ void split_info::split_xorder_std_categorical(std::unique_ptr<split_info> &split
                 if (*(temp_pointer + Xorder_std[i][j]) <= cutvalue)
                 {
                     model->updateNodeSuffStat(left_suff_stat, state,
-                    Xorder_std, torder_std, split_var, j);
+                    Xorder_std, sorder_std, split_var, j);
                     split_left->Xorder_std[i][left_ix] = Xorder_std[i][j];
                     left_ix = left_ix + 1;
 
@@ -215,7 +215,7 @@ void split_info::split_xorder_std_categorical(std::unique_ptr<split_info> &split
                 } else {
                     // cout << "right, update node suff stat" << endl;
                     model->updateNodeSuffStat(right_suff_stat, state,
-                    Xorder_std, torder_std, split_var, j);
+                    Xorder_std, sorder_std, split_var, j);
                     split_right->Xorder_std[i][right_ix] = Xorder_std[i][j];
                     right_ix = right_ix + 1;
 

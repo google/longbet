@@ -37,6 +37,7 @@ void mcmc_loop_longbet(
   if (state->parallel)
     thread_pool.start();
 
+  // verbose = true;
 
   for (size_t sweeps = 0; sweeps < state->num_sweeps; sweeps++)
   {

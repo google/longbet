@@ -65,8 +65,15 @@ public:
         if (left)
         {
           ini_xinfo_sizet(this->torder_std, split_point + 1, parent->p_torder);
+          
+          this->s_values.resize(split_point + 1);
+          std::copy(parent->s_values.begin(), parent->s_values.begin() + split_point, this->s_values.begin());
+
         } else {
           ini_xinfo_sizet(this->torder_std, parent->N_torder - split_point - 1, parent->p_torder);
+          
+          this->s_values.resize(parent->s_values.size() - split_point - 1);
+          std::copy(parent->s_values.begin() + split_point + 1, parent->s_values.end(), this->s_values.begin());
         }
       } else {
         ini_xinfo_sizet(this->torder_std, parent->N_torder, parent->p_torder);
@@ -75,6 +82,9 @@ public:
           std::copy(parent->torder_std[i].begin(), parent->torder_std[i].end(), this->torder_std[i].begin());
           std::copy(parent->torder_std[i].begin(), parent->torder_std[i].end(), this->torder_std[i].begin());
         }
+
+        this->s_values = parent->s_values;
+        
         if (left) 
         {
           ini_xinfo_sizet(this->Xorder_std, split_point + 1, parent->p_Xorder);

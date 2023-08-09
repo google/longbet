@@ -290,17 +290,6 @@ void split_info::split_torder_std(std::unique_ptr<split_info> &split_left,
     //      All the splitting code need to be
     // initialize X_struct for the treatment term
 
-    // cout << "split point " << split_point << " value " << *(state->t_std + state->n_t * split_var + torder_std[split_var][split_point]) << endl;
-    // cout << "s_values size " << s_values << endl;
-    // // split_left->s_values.resize(split_point + 1);
-    // // split_right->s_values.resize(s_values.size() - split_point - 1)
-    // for (size_t i = 0; i < s_values.size(); i++){
-    //   if (s_values[i] <= s_values[split_point]){
-    //     split_left->s_values.push_back(s_values[i]);
-    //   } else {
-    //     split_right->s_values.push_back(s_values[i]);
-    //   }
-    // }
     // split t as categorical variable
     // preserve order of other variables
     size_t N_torder = torder_std[0].size();

@@ -14,6 +14,9 @@ public:
     matrix<size_t> Xorder_std;
     matrix<size_t> torder_std;
 
+    matrix<size_t> sorder_std;
+    std::vector<double> s_values;
+
     std::vector<size_t> X_counts;
     std::vector<size_t> X_num_unique;
     std::vector<size_t> t_counts;
@@ -24,13 +27,16 @@ public:
     size_t N_torder;
     size_t p_torder;
 
-    split_info(std::unique_ptr<X_struct> &x_struct, matrix<size_t> &Xorder_std, matrix<size_t> &torder_std){
+    split_info(std::unique_ptr<X_struct> &x_struct, matrix<size_t> &Xorder_std, matrix<size_t> &torder_std, matrix<size_t> &sorder_std, std::vector<double> s_values){
       this->Xorder_std = Xorder_std;
       this->torder_std = torder_std;
       this->X_counts  = x_struct->X_counts;
       this->X_num_unique = x_struct->X_num_unique;
       this->t_counts  = x_struct->t_counts;
       this->t_num_unique = x_struct->t_num_unique;
+
+      this->sorder_std = sorder_std;
+      this->s_values = s_values;
 
       this->N_Xorder = Xorder_std[0].size();
       this->p_Xorder = Xorder_std.size();
@@ -372,7 +378,8 @@ public:
     //      All the splitting code need to be
     // initialize X_struct for the treatment term
 
-    // cout << "split_torder_std, split_var = " << split_var << ", split_point = " << split_point << endl;
+    // cout << "split point " << split_point << " value " << *(state->t_std + state->n_t * split_var + torder_std[split_var][split_point]) << endl;
+    // for (size_t i = 0; i < )
     // split t as categorical variable
     // preserve order of other variables
     size_t N_torder = torder_std[0].size();

@@ -6,40 +6,37 @@
 // input includes information about two sets of trees 
 // (one for prognostic term, the other for treatment term)
 
-void mcmc_loop_longbet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_std,
-                    const double *X_std, const double *X_tau_std,
-                    matrix<size_t> &torder_mu_std,
-                    matrix<size_t> &torder_tau_std,
-                    bool verbose,
-                    matrix<double> &sigma0_draw_xinfo,
-                    matrix<double> &sigma1_draw_xinfo,
-                    matrix<double> &b_xinfo,
-                    matrix<double> &a_xinfo,
-                    matrix<double> &beta_info,
-                    matrix<double> &beta_xinfo,
-                    vector<vector<tree>> &trees_ps,
-                    vector<vector<tree>> &trees_trt,
-                    double no_split_penality,
-                    std::unique_ptr<State> &state,
-                    longbetModel *model_ps,
-                    longbetModel *model_trt,
-                    std::unique_ptr<X_struct> &x_struct_ps,
-                    std::unique_ptr<X_struct> &x_struct_trt,
-                    bool a_scaling,
-                    bool b_scaling,
-                    bool split_time_ps,
-                    bool split_time_trt,
-                    matrix<double> &resid_info,
-                    matrix<double> &A_diag_info,
-                    matrix<double> &Sig_diag_info
-                    )
+void mcmc_loop_longbet( 
+  std::unique_ptr<split_info> &split_pr,  
+  std::unique_ptr<split_info> &split_trt,
+  bool verbose,
+  matrix<double> &sigma0_draw_xinfo,
+  matrix<double> &sigma1_draw_xinfo,
+  matrix<double> &b_xinfo,
+  matrix<double> &a_xinfo,
+  matrix<double> &beta_info,
+  matrix<double> &beta_xinfo,
+  vector<vector<tree>> &trees_ps,
+  vector<vector<tree>> &trees_trt,
+  double no_split_penality,
+  std::unique_ptr<State> &state,
+  longbetModel *model_ps,
+  longbetModel *model_trt,
+  std::unique_ptr<X_struct> &x_struct_ps,
+  std::unique_ptr<X_struct> &x_struct_trt,
+  bool a_scaling,
+  bool b_scaling,
+  bool split_time_ps,
+  bool split_time_trt,
+  matrix<double> &resid_info,
+  matrix<double> &A_diag_info,
+  matrix<double> &Sig_diag_info
+  )
 {
 
   if (state->parallel)
     thread_pool.start();
 
-  std::unique_ptr<split_info> split_ps(new split_info(x_struct_ps, Xorder_std, torder_mu_std));
-  std::unique_ptr<split_info> split_trt(new split_info(x_struct_trt, Xorder_tau_std, torder_tau_std));
 
   for (size_t sweeps = 0; sweeps < state->num_sweeps; sweeps++)
   {
@@ -50,7 +47,7 @@ void mcmc_loop_longbet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
       COUT << "--------------------------------" << endl;
     }
 
-    model_ps->set_state_status(state, 0, X_std, Xorder_std, x_struct_ps->t_std);
+    model_ps->set_state_status(state, 0, x_struct_ps->X_std, split_pr->Xorder_std, x_struct_ps->t_std);
 
     ////////////// Prognostic term loop
     for (size_t tree_ind = 0; tree_ind < state->num_trees_vec[0]; tree_ind++)
@@ -92,14 +89,14 @@ void mcmc_loop_longbet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
       trees_ps[sweeps][tree_ind].suff_stat);
       // cout << "root suffstat = " << trees_ps[sweeps][tree_ind].suff_stat << endl;
       // GFR
-      trees_ps[sweeps][tree_ind].grow_from_root(state, split_ps, model_ps,
+      trees_ps[sweeps][tree_ind].grow_from_root(state, split_pr, model_ps,
       x_struct_ps, sweeps, tree_ind, split_time_ps);
       model_ps->state_sweep(tree_ind, state->mu_fit, x_struct_ps);  // update total mu_fit by adding just fitted values
 
       state->update_split_counts(tree_ind, 0);  // update split counts for mu 
     }
 
-    model_ps->set_state_status(state, 1, X_tau_std, Xorder_tau_std, x_struct_trt->t_std);
+    model_ps->set_state_status(state, 1, x_struct_trt->X_std, split_trt->Xorder_std, x_struct_trt->t_std);
     
     ////////////// Treatment term loop
     for (size_t tree_ind = 0; tree_ind < state->num_trees_vec[1]; tree_ind++)
@@ -157,7 +154,7 @@ void mcmc_loop_longbet(matrix<size_t> &Xorder_std, matrix<size_t> &Xorder_tau_st
       }
     }
 
-    model_ps->update_time_coef(state, x_struct_trt, torder_tau_std, 
+    model_ps->update_time_coef(state, x_struct_trt, split_trt->torder_std, 
       resid_info[sweeps], A_diag_info[sweeps], Sig_diag_info[sweeps], beta_info[sweeps]); 
 
     std::copy(state->beta_t.begin(), state->beta_t.end(),

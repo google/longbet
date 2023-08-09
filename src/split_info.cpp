@@ -285,10 +285,22 @@ void split_info::split_torder_std(std::unique_ptr<split_info> &split_left,
     std::unique_ptr<State> &state, std::vector<double> &suff_stat,
     std::vector<double> &left_suff_stat, std::vector<double> &right_suff_stat)
 {
-    // TODO: 
-    //      Restructure sindex as vector of vector with varying size.
-    //      All the splitting code need to be
-    // initialize X_struct for the treatment term
+    // TODO:  split sorder
+    double split_value = s_values[split_point];
+    for (size_t i = 0; i < sorder_std.size(); i++){
+
+        if(sorder_std[i].size() == 0) {continue;}
+        
+        for (size_t j = 0; j < sorder_std[i].size(); j++){
+            if (x_struct->Tpt[i + j * state->n_y] <= split_value){
+                split_left->sorder_std[i].push_back(j);
+            } else {
+                split_right->sorder_std[i].resize(sorder_std[i].size() - j);
+                std::copy(sorder_std[i].begin() + j, sorder_std[i].end(), split_right->sorder_std[i].begin());
+                break;
+            }
+        }
+    }
 
     // split t as categorical variable
     // preserve order of other variables

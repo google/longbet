@@ -53,6 +53,8 @@ public:
       this->t_num_unique.resize(parent->t_num_unique.size());
       this->t_counts.resize(parent->t_counts.size());
 
+      this->sorder_std.resize(parent->sorder_std.size());
+
       if (split_t)
       {
         ini_xinfo_sizet(this->Xorder_std, parent->N_Xorder, parent->p_Xorder);
@@ -83,8 +85,9 @@ public:
           std::copy(parent->torder_std[i].begin(), parent->torder_std[i].end(), this->torder_std[i].begin());
         }
 
+        // copy s_values
         this->s_values = parent->s_values;
-        
+
         if (left) 
         {
           ini_xinfo_sizet(this->Xorder_std, split_point + 1, parent->p_Xorder);

@@ -760,7 +760,7 @@ void BART_likelihood_all(std::unique_ptr<split_info> &split_info,
     // calculate for each cases
     if (state->p_continuous > 0)
     {
-        calculate_loglikelihood_continuous(loglike, subset_vars, N_Xorder, split_info->Xorder_std, split_info->torder_std, loglike_max, model, x_struct, state, tree_pointer);
+        calculate_loglikelihood_continuous(loglike, subset_vars, N_Xorder, split_info->Xorder_std, split_info->sorder_std, loglike_max, model, x_struct, state, tree_pointer);
     }
 
     if (state->p_categorical > 0)
@@ -973,7 +973,6 @@ std::unique_ptr<X_struct> &x_struct, std::unique_ptr<State> &state,
 tree *tree_pointer)
 {
     size_t N = N_Xorder;
-    std::vector<size_t> &torder = torder_std[0];
 
     std::vector<double> temp_suff_stat(model->dim_suffstat);
     std::vector<double> temp_suff_stat2(model->dim_suffstat);
@@ -1010,7 +1009,7 @@ tree *tree_pointer)
 
                 for (size_t j = 0; j < N_Xorder - 1; j++)
                 {
-                    calcSuffStat_continuous(temp_suff_stat, xorder, torder, candidate_index, j, false, model, state);
+                    calcSuffStat_continuous(temp_suff_stat, xorder, torder_std, candidate_index, j, false, model, state);
 
                     loglike[(N_Xorder - 1) * i + j] = model->likelihood(temp_suff_stat, tree_pointer->suff_stat, true, false, state) + model->likelihood(temp_suff_stat, tree_pointer->suff_stat, false, false, state);
 
@@ -1041,7 +1040,7 @@ tree *tree_pointer)
             {
 
                 // Lambda callback to perform the calculation
-                auto calcllc_i = [i, &loglike, &loglike_max, &Xorder_std, &torder, &state, &candidate_index2, &model, &llmax_mutex, N_Xorder, &tree_pointer]() {
+                auto calcllc_i = [i, &loglike, &loglike_max, &Xorder_std, &torder_std, &state, &candidate_index2, &model, &llmax_mutex, N_Xorder, &tree_pointer]() {
                     std::vector<size_t> &xorder = Xorder_std[i];
                     double llmax = -INFINITY;
 
@@ -1052,7 +1051,7 @@ tree *tree_pointer)
                     for (size_t j = 0; j < state->n_cutpoints; j++)
                     {
 
-                        calcSuffStat_continuous(temp_suff_stat, xorder, torder, candidate_index2, j, true, model, state);
+                        calcSuffStat_continuous(temp_suff_stat, xorder, torder_std, candidate_index2, j, true, model, state);
 
                         loglike[(state->n_cutpoints) * i + j] = model->likelihood(temp_suff_stat, tree_pointer->suff_stat, true, false, state) + model->likelihood(temp_suff_stat, tree_pointer->suff_stat, false, false, state);
 
@@ -1309,7 +1308,7 @@ size_t &end, Model *model, std::unique_ptr<State> &state)
 }
 
 void calcSuffStat_continuous(std::vector<double> &temp_suff_stat,
-std::vector<size_t> &xorder, std::vector<size_t> &torder,
+std::vector<size_t> &xorder, matrix<size_t> &torder,
 std::vector<size_t> &candidate_index,
 size_t index, bool adaptive_cutpoint, Model *model,
 std::unique_ptr<State> &state)
@@ -1322,22 +1321,26 @@ std::unique_ptr<State> &state)
         if (index == 0)
         {
             // initialize, only for the first cutpoint candidate, thus index == 0
-            for (size_t j = 0; j < torder.size(); j++)
-                model->incSuffStat(state, xorder[0], torder[j], temp_suff_stat);
+            for (auto j: torder[xorder[0]]){
+                model->incSuffStat(state, xorder[0], j, temp_suff_stat);
+
+            }
         }
 
         // if use adaptive number of cutpoints, calculated based on vector candidate_index
         for (size_t q = candidate_index[index] + 1; q <= candidate_index[index + 1]; q++)
         {
-            for (size_t j = 0; j < torder.size(); j++)
-                model->incSuffStat(state, xorder[q], torder[j], temp_suff_stat);
+            for (auto j: torder[xorder[q]]){
+                model->incSuffStat(state, xorder[q], j, temp_suff_stat);
+            }
         }
     }
     else
     {
         // use all data points as candidates
-        for (size_t j = 0; j < torder.size(); j++)
-            model->incSuffStat(state, xorder[index], torder[j], temp_suff_stat);
+        for (auto j: torder[xorder[index]]){
+            model->incSuffStat(state, xorder[index], j, temp_suff_stat);
+        }
     }
 }
 

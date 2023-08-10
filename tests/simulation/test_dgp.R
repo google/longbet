@@ -208,3 +208,19 @@ print(plot)
 
 print(att.results)
 print(catt.results)
+
+# # analysis
+# # CATE
+# cate_df <- data.frame(
+#   true = as.vector(t(align_tau)),
+#   lonbet = as.vector(t(longbet.catt)),
+#   time = rep(c(t0:t1), nrow(align_tau)),
+#   id = as.vector(sapply(1:nrow(align_tau), rep, (t1 - t0 + 1)))
+# )
+# 
+# cate_plot <-  cate_df %>%
+#   gather("method", "cate", -time, -id) %>%
+#   ggplot() +
+#   geom_line(aes(time, cate, group = id, color = id)) +
+#   facet_wrap(~method)
+# plot(cate_plot)

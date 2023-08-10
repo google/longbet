@@ -23,7 +23,7 @@ longbet <- function(y, x, z, t, pcat,
                     num_trees_pr = 20, num_trees_trt = 20,
                     mtry = 0L, n_min = 10,
                     sig_knl = 1, lambda_knl = 1,
-                    split_time_ps = TRUE, split_time_trt = FALSE,
+                    split_time_ps = TRUE, split_time_trt = TRUE,
                     ps = NULL) {
 
     if(!("matrix" %in% class(x))){
@@ -76,9 +76,9 @@ longbet <- function(y, x, z, t, pcat,
         t_con = t
     }
 
-    if (split_time_trt){
-        stop("Can not handle split time on treatment tree with staggered adoption yet. \n")
-    }
+    # if (split_time_trt){
+    #     stop("Can not handle split time on treatment tree with staggered adoption yet. \n")
+    # }
 
     # get post-treatment time matrix
     get_trt_time <- function(z_vec, t){

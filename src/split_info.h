@@ -78,12 +78,15 @@ public:
           std::copy(parent->s_values.begin() + split_point + 1, parent->s_values.end(), this->s_values.begin());
         }
       } else {
+
         ini_xinfo_sizet(this->torder_std, parent->N_torder, parent->p_torder);
         // copy torder
         for (size_t i = 0; i < torder_std.size(); i++){
           std::copy(parent->torder_std[i].begin(), parent->torder_std[i].end(), this->torder_std[i].begin());
           std::copy(parent->torder_std[i].begin(), parent->torder_std[i].end(), this->torder_std[i].begin());
         }
+        std::copy(parent->t_num_unique.begin(), parent->t_num_unique.end(), this->t_num_unique.begin());
+        std::copy(parent->t_counts.begin(), parent->t_counts.end(), this->t_counts.begin());
 
         // copy s_values
         this->s_values = parent->s_values;

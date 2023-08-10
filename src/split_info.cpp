@@ -310,8 +310,8 @@ void split_info::split_torder_std(std::unique_ptr<split_info> &split_left,
         
         for (size_t j = 0; j < sorder_std[i].size(); j++){
 
-            if (x_struct->Tpt[i + j * state->n_y] <= split_value){
-                split_left->sorder_std[i].push_back(j);
+            if (x_struct->Tpt[i + sorder_std[i][j] * state->n_y] <= split_value){
+                split_left->sorder_std[i].push_back(sorder_std[i][j]);
 
                 model->incSuffStat(state, i, sorder_std[i][j], left_suff_stat);
             } else {

@@ -612,7 +612,7 @@ const size_t &tree_ind, bool control_split_t)
 
         if (this->split_t)
         {
-            // cout << "split_t, value = " << this->c << endl;
+            // cout << "split_t, split_point = " << split_point << " value = " << *(x_struct->t_std + x_struct->n_t * split_var + split->torder_std[split_var][split_point]) << endl;
             this->c = *(x_struct->t_std + x_struct->n_t * split_var + split->torder_std[split_var][split_point]);
             while ((split_point < N_torder - 1) && (*(x_struct->t_std + x_struct->n_t * split_var + split->torder_std[split_var][split_point + 1]) == this->c))
             {
@@ -627,6 +627,7 @@ const size_t &tree_ind, bool control_split_t)
             }
             // cout << "split point = " << split_point << endl;
         } else {
+            // cout << "split on X" << endl;
             this->c = *(state->X_std + state->n_y * split_var + split->Xorder_std[split_var][split_point]);
             // Update Cutpoint to be a true seperating point
             // Increase split_point (index) until it is no longer equal to cutpoint value
@@ -646,6 +647,7 @@ const size_t &tree_ind, bool control_split_t)
 
     if (this->no_split == true)
     {
+        // cout << "no split " << endl;
         for (size_t i = 0; i < N_Xorder; i++)
         {
             for (size_t j = 0; j < N_torder; j++)
@@ -760,12 +762,16 @@ void BART_likelihood_all(std::unique_ptr<split_info> &split_info,
     // calculate for each cases
     if (state->p_continuous > 0)
     {
+        // cout << "calculate_loglikelihood_continuous" << endl;
         calculate_loglikelihood_continuous(loglike, subset_vars, N_Xorder, split_info->Xorder_std, split_info->sorder_std, loglike_max, model, x_struct, state, tree_pointer);
+        // cout << "finish " << endl;
     }
 
     if (state->p_categorical > 0)
     {
+        // cout << "calculate_loglikelihood_categorical" << endl;
         calculate_loglikelihood_categorical(loglike, loglike_start, subset_vars, N_Xorder, split_info->Xorder_std, split_info->sorder_std, loglike_max, split_info->X_counts, split_info->X_num_unique, model, x_struct, total_categorical_split_candidates, state, tree_pointer);
+        // cout << "finish" << endl;
     }
 
     if (control_split_t)
@@ -879,19 +885,23 @@ void BART_likelihood_all(std::unique_ptr<split_info> &split_info,
             // split at time variable
             split_t = true;
             size_t start;
+            // cout << "ind = " << ind << ", loglike_time_start = " << loglike_time_start << endl;
             ind = ind - loglike_time_start;
-            for (size_t i = 0; i < (x_struct->t_variable_ind.size() - 1); i++)
-            {
-                if (x_struct->t_variable_ind[i] <= ind && x_struct->t_variable_ind[i + 1] > ind)
-                {
-                    split_var = i;
-                }
-            }
-            start = x_struct->t_variable_ind[split_var];
-            // count how many
-            split_point = std::accumulate(split_info->t_counts.begin() + start, split_info->t_counts.begin() + ind + 1, 0);
-            // minus one for correct index (start from 0)
-            split_point = split_point - 1;
+            split_var = 0;
+            split_point = ind;
+            // for (size_t i = 0; i < (x_struct->t_variable_ind.size() - 1); i++)
+            // {
+            //     if (x_struct->t_variable_ind[i] <= ind && x_struct->t_variable_ind[i + 1] > ind)
+            //     {
+            //         split_var = i;
+            //     }
+            // }
+            // start = x_struct->t_variable_ind[split_var];
+            // // count how many
+            // split_point = std::accumulate(split_info->t_counts.begin() + start, split_info->t_counts.begin() + ind + 1, 0);
+            // cout << "split_point = " << split_point << endl;
+            // // minus one for correct index (start from 0)
+            // split_point = split_point - 1;
         }
     }
     else
@@ -949,18 +959,20 @@ void BART_likelihood_all(std::unique_ptr<split_info> &split_info,
             split_t = true;
             size_t start;
             ind = ind - loglike_time_start;
-            for (size_t i = 0; i < (x_struct->t_variable_ind.size() - 1); i++)
-            {
-                if (x_struct->t_variable_ind[i] <= ind && x_struct->t_variable_ind[i + 1] > ind)
-                {
-                    split_var = i;
-                }
-            }
-            start = x_struct->t_variable_ind[split_var];
-            // count how many
-            split_point = std::accumulate(split_info->t_counts.begin() + start, split_info->t_counts.begin() + ind + 1, 0);
-            // minus one for correct index (start from 0)
-            split_point = split_point - 1;
+            split_var = 0;
+            split_point = ind;
+            // for (size_t i = 0; i < (x_struct->t_variable_ind.size() - 1); i++)
+            // {
+            //     if (x_struct->t_variable_ind[i] <= ind && x_struct->t_variable_ind[i + 1] > ind)
+            //     {
+            //         split_var = i;
+            //     }
+            // }
+            // start = x_struct->t_variable_ind[split_var];
+            // // count how many
+            // split_point = std::accumulate(split_info->t_counts.begin() + start, split_info->t_counts.begin() + ind + 1, 0);
+            // // minus one for correct index (start from 0)
+            // split_point = split_point - 1;
         }
     }
 }
@@ -1082,6 +1094,9 @@ size_t &loglike_start, double &loglike_max, Model *model,
 std::unique_ptr<X_struct> &x_struct, std::unique_ptr<split_info> &split_info,
 std::unique_ptr<State> &state, tree *tree_pointer)
 {
+
+    std::vector<double> loglike_copy = loglike;
+
     size_t N = split_info->Xorder_std[0].size();
     size_t start;
     size_t end;
@@ -1132,20 +1147,47 @@ std::unique_ptr<State> &state, tree *tree_pointer)
                     split_info->torder_std[i], n1, temp, model, state);
                     n1 = n1 + split_info->t_counts[j];
 
-                    loglike[loglike_start + j] = model->likelihood(temp_suff_stat, tree_pointer->suff_stat, true, false, state)
+                    loglike_copy[loglike_start + j] = model->likelihood(temp_suff_stat, tree_pointer->suff_stat, true, false, state)
                     + model->likelihood(temp_suff_stat, tree_pointer->suff_stat, false, false, state);              
                     
                     // count total number of cutpoint candidates
                     effective_cutpoints++;
 
-                    if (loglike[loglike_start + j] > loglike_max)
-                    {
-                        loglike_max = loglike[loglike_start + j];
-                    }
+                    // if (loglike[loglike_start + j] > loglike_max)
+                    // {
+                    //     loglike_max = loglike[loglike_start + j];
+                    // }
                 }
             }
         }
+    } 
+
+    // std::vector<double> temp_suff_stat(tree_pointer->suff_stat.size());
+    std::fill(temp_suff_stat.begin(), temp_suff_stat.end(), 0.0);
+
+    for (size_t s = 0; s <split_info->s_values.size() - 1; s++){
+        
+        for (auto i: split_info->Xorder_std[0])
+        {
+            if (split_info->sorder_std[i].size() == 0) {continue;}
+
+            for (auto j: split_info->sorder_std[i]){ 
+
+                // this can be improved.
+                if (x_struct->Tpt[i + j*state->n_y] == split_info->s_values[s]){ // ==? <=
+                    model->incSuffStat(state, i, j, temp_suff_stat);
+                }
+            }
+        }
+
+        loglike[loglike_start + s] = model->likelihood(temp_suff_stat, tree_pointer->suff_stat, true, false, state)
+                    + model->likelihood(temp_suff_stat, tree_pointer->suff_stat, false, false, state);       
+        if (loglike[loglike_start + s] > loglike_max)
+        {
+            loglike_max = loglike[loglike_start + s];
+        }       
     }
+
 }
 
 

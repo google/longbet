@@ -69,7 +69,7 @@ public:
           ini_xinfo_sizet(this->torder_std, split_point + 1, parent->p_torder);
           
           this->s_values.resize(split_point + 1);
-          std::copy(parent->s_values.begin(), parent->s_values.begin() + split_point, this->s_values.begin());
+          std::copy(parent->s_values.begin(), parent->s_values.begin() + split_point + 1, this->s_values.begin());
 
         } else {
           ini_xinfo_sizet(this->torder_std, parent->N_torder - split_point - 1, parent->p_torder);

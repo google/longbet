@@ -21,7 +21,7 @@
 // for convenience
 using json = nlohmann::json;
 
-void calcSuffStat_categorical(std::vector<double> &temp_suff_stat, std::vector<size_t> &xorder, std::vector<size_t> &torder, size_t &start, size_t &end, Model *model, std::unique_ptr<State> &state);
+void calcSuffStat_categorical(std::vector<double> &temp_suff_stat, std::vector<size_t> &xorder, matrix<size_t> &torder, size_t &start, size_t &end, Model *model, std::unique_ptr<State> &state);
 
 void calcSuffStat_continuous(std::vector<double> &temp_suff_stat, std::vector<size_t> &xorder, std::vector<size_t> &torder, std::vector<size_t> &candidate_index, size_t index, bool adaptive_cutpoint, Model *model, std::unique_ptr<State> &state);
 

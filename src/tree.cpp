@@ -765,7 +765,7 @@ void BART_likelihood_all(std::unique_ptr<split_info> &split_info,
 
     if (state->p_categorical > 0)
     {
-        calculate_loglikelihood_categorical(loglike, loglike_start, subset_vars, N_Xorder, split_info->Xorder_std, split_info->torder_std, loglike_max, split_info->X_counts, split_info->X_num_unique, model, x_struct, total_categorical_split_candidates, state, tree_pointer);
+        calculate_loglikelihood_categorical(loglike, loglike_start, subset_vars, N_Xorder, split_info->Xorder_std, split_info->sorder_std, loglike_max, split_info->X_counts, split_info->X_num_unique, model, x_struct, total_categorical_split_candidates, state, tree_pointer);
     }
 
     if (control_split_t)
@@ -1212,7 +1212,7 @@ std::vector<size_t> &X_num_unique, Model *model, std::unique_ptr<X_struct> &x_st
                 {
 
                     temp = n1 + X_counts[j] - 1;
-                    calcSuffStat_categorical(temp_suff_stat, Xorder_std[i], torder_std[0], n1, temp, model, state);
+                    calcSuffStat_categorical(temp_suff_stat, Xorder_std[i], torder_std, n1, temp, model, state);
 
                     n1 = n1 + X_counts[j];
                     // n1tau = (double)n1 * model->tau;
@@ -1268,7 +1268,7 @@ void calculate_likelihood_no_split(std::vector<double> &loglike, size_t &N_Xorde
 // }
 
 void calcSuffStat_categorical(std::vector<double> &temp_suff_stat,
-std::vector<size_t> &xorder, std::vector<size_t> &torder, size_t &start,
+std::vector<size_t> &xorder, matrix<size_t> &torder, size_t &start,
 size_t &end, Model *model, std::unique_ptr<State> &state)
 {
     // calculate sufficient statistics for categorical variables
@@ -1276,8 +1276,8 @@ size_t &end, Model *model, std::unique_ptr<State> &state)
     // compute sum of y[Xorder[start:end, var]]
     for (size_t i = start; i <= end; i++)
     {
-        for (size_t j = 0; j < torder.size(); j++){
-            model->incSuffStat(state, xorder[i], torder[j],temp_suff_stat);
+        for (auto j: torder[xorder[i]]){
+            model->incSuffStat(state, xorder[i], j, temp_suff_stat);
         }
     }
 }

@@ -32,7 +32,6 @@ public:
     const double *y_std;  // pointer to y data
     const double *t_std;  // pointer to t data
     const double *Tpt;  // pointer to s (cumulative treatment time)
-    std::vector<double> t_uniq_values;
     size_t n_y;  // number of total data points in root node
     size_t p_y;
     size_t p_continuous;
@@ -41,7 +40,7 @@ public:
     size_t n_t;
     size_t p_t;
 
-    X_struct(const double *X_std, const double *y_std, const double *t_std, const double *Tpt, std::vector<double> t_uniq_values, 
+    X_struct(const double *X_std, const double *y_std, const double *t_std, const double *Tpt, std::vector<double> s_values, 
     size_t n_y, size_t p_y, std::vector<std::vector<size_t>> &Xorder_std,
     std::vector<std::vector<size_t>> &torder_std, std::vector<std::vector<size_t>> &sorder_std,
     size_t p_categorical, size_t p_continuous,
@@ -70,7 +69,7 @@ public:
         this->y_std = y_std;
         this->t_std = t_std;
         this->Tpt = Tpt;
-        this->t_uniq_values = t_uniq_values;
+        this->s_values = s_values;
         this->n_y = n_y;
         this->p_y = p_y;
         this->p_continuous = p_continuous;

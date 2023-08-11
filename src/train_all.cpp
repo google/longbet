@@ -270,8 +270,8 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     burnin, model_trt->dim_suffstat));
     // cout << "state->beta_size = " << state->beta_size << endl;
 
-    // TODO: get structure for t and s values.
     // initialize X_struct for the prognostic term
+    // TODO: remove sorder
     std::vector<double> initial_theta_pr(1, y_mean / (double)num_trees_pr);
     std::unique_ptr<X_struct> x_struct_pr(new X_struct(Xpointer, ypointer, tpointer_mu, Tpointer, t_values, N, p_y, Xorder_std, torder_mu_std, Sorder_std, p_categorical_pr, p_continuous_pr, &initial_theta_pr, num_trees_pr, sig_knl, lambda_knl));
 

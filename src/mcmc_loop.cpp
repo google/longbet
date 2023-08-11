@@ -37,7 +37,7 @@ void mcmc_loop_longbet(
   if (state->parallel)
     thread_pool.start();
 
-  // verbose = true;
+  verbose = true;
 
   for (size_t sweeps = 0; sweeps < state->num_sweeps; sweeps++)
   {
@@ -155,6 +155,7 @@ void mcmc_loop_longbet(
       }
     }
 
+    // TODO: replace torder with sorder
     model_ps->update_time_coef(state, x_struct_trt, split_trt->torder_std, 
       resid_info[sweeps], A_diag_info[sweeps], Sig_diag_info[sweeps], beta_info[sweeps]); 
 

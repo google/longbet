@@ -56,6 +56,10 @@ using namespace arma;
 void longbetModel::incSuffStat(std::unique_ptr<State> &state,
 size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
 {
+  if (index_next_t >= state->p_y)  {
+    cout << "index_next_t = " << index_next_t << endl;
+    abort();
+  }
   double gp = *(state->z + index_next_t * state->n_y + index_next_obs);
   double resid = *(state->y_std + state->n_y * index_next_t + index_next_obs) -
   state->a * state->mu_fit[index_next_obs][index_next_t] - state->b_vec[gp] *
@@ -117,6 +121,8 @@ double &prob_leaf)
   double denominator = suff_stat[2] * s0 + suff_stat[3] * s1  + 1 / tau;
   double m1 = (suff_stat[0] * s0 + suff_stat[1] * s1) / denominator;
   double v1 = 1 / denominator;
+  // cout << "s0 = " << s0 << "; s1 = " << s1 << "; m1 = " << m1 << "; v1 = " << v1 << endl;
+  // cout << "suff0 = " << suff_stat[0] << "; suff1 = " << suff_stat[1] << "; suff2 = " << suff_stat[2] << "; suff3 = " << suff_stat[3] << "; denom = " << denominator << endl;
 
   // sample leaf parameter
   theta_vector[0] = m1 + sqrt(v1) * normal_samp(state->gen);
@@ -388,12 +394,12 @@ void longbetModel::update_b_values(std::unique_ptr<State> &state)
   state->b_vec[0] = b0;
 }
 
-void longbetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_ptr<X_struct> &x_struct,
-  matrix<size_t> &torder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig, std::vector<double> &beta)
+void longbetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_ptr<X_struct> &x_struct, matrix<size_t> &sorder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig, std::vector<double> &beta)
 {  
   // get total number of time
-  double t_size = state->beta_size;
+  double t_size = x_struct->s_values.size();
   double n = state->n_y;  // n obs per period. TODO: need update
+
   std::vector<double> res_ctrl(t_size, 0);  // residuals
   std::vector<double> res_trt(t_size, 0);
 
@@ -416,9 +422,25 @@ void longbetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
 
   std::vector<size_t> t_counts(t_size, 0);
 
+  // for (size_t i = 0; i < state->n_y; i++){
+  //   for (size_t j = 0; j < state->p_y; j++){
+  //     s = *(state->post_trt_time + j * state->n_y + i);
+  //     t_counts[s] += 1;
+  //     if (*(state->z + state->n_y * j + i) == 0){
+  //       res_ctrl[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
+  //       diag_ctrl[s] += state->tau_fit[i][j];
+  //       sig[s] += sig02;
+  //     } else {
+  //       res_trt[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
+  //       diag_trt[s] += state->tau_fit[i][j];
+  //       sig[s] += sig12;
+  //     }
+  //   }
+  // }
+
   for (size_t i = 0; i < state->n_y; i++){
-    for (size_t j = 0; j < state->p_y; j++){
-      s = *(state->post_trt_time + j * state->n_y + i);
+    for (size_t  j = 0; j < sorder_std[i].size(); j++){
+      s = sorder_std[i][j]; 
       t_counts[s] += 1;
       if (*(state->z + state->n_y * j + i) == 0){
         res_ctrl[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
@@ -488,6 +510,9 @@ void longbetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   for (size_t i = 0; i < state->n_y; i++){
     for (size_t j = 0; j < state->p_y; j++){
       state->beta_fit[i][j] = state->beta_t[*(state->post_trt_time + j * state->n_y + i)];
+      if (sorder_std[i][j] != *(state->post_trt_time + j * state->n_y + i)){
+        cout << "i = " << i << " j = " << j << " sorder = " << sorder_std[i][j] << " pointer = " << *(state->post_trt_time + j * state->n_y + i) << endl;
+      }
     }
   }
 

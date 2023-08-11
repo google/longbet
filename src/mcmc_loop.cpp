@@ -37,7 +37,7 @@ void mcmc_loop_longbet(
   if (state->parallel)
     thread_pool.start();
 
-  verbose = true;
+  // verbose = true;
 
   for (size_t sweeps = 0; sweeps < state->num_sweeps; sweeps++)
   {
@@ -93,6 +93,7 @@ void mcmc_loop_longbet(
       trees_ps[sweeps][tree_ind].grow_from_root(state, split_pr, model_ps,
       x_struct_ps, sweeps, tree_ind, split_time_ps);
       model_ps->state_sweep(tree_ind, state->mu_fit, x_struct_ps);  // update total mu_fit by adding just fitted values
+      // cout << "finish prognostic tree" << endl;
 
       state->update_split_counts(tree_ind, 0);  // update split counts for mu 
     }
@@ -156,8 +157,9 @@ void mcmc_loop_longbet(
     }
 
     // TODO: replace torder with sorder
-    model_ps->update_time_coef(state, x_struct_trt, split_trt->torder_std, 
+    model_ps->update_time_coef(state, x_struct_trt, split_trt->sorder_std,
       resid_info[sweeps], A_diag_info[sweeps], Sig_diag_info[sweeps], beta_info[sweeps]); 
+    // cout << "beta " << state->beta_t << endl;
 
     std::copy(state->beta_t.begin(), state->beta_t.end(),
     beta_xinfo[sweeps].begin());

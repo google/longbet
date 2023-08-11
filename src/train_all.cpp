@@ -291,8 +291,8 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     matrix<double> beta_info;
     ini_matrix(beta_info, t_size, num_sweeps);
 
-    std::unique_ptr<split_info> split_pr(new split_info(x_struct_pr, Xorder_std, torder_mu_std, Torder_std, t_values));
-    std::unique_ptr<split_info> split_trt(new split_info(x_struct_trt, Xorder_tau_std, torder_tau_std, Sorder_std, s_values));
+    std::unique_ptr<split_info> split_pr(new split_info(x_struct_pr, Xorder_std, Torder_std, t_values));
+    std::unique_ptr<split_info> split_trt(new split_info(x_struct_trt, Xorder_tau_std, Sorder_std, s_values));
 
     // cout << "mcmc loop" << endl;
     // mcmc_loop returns tauhat [N x sweeps] matrix

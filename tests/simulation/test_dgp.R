@@ -19,7 +19,7 @@ t1 <- 12 # observed response period
 alpha <- 0.05
 
 source('dgp.R')
-pr_type = "non-parallel"
+pr_type = "parallel"
 trt_type = "heterogeneous"
 data <- dgp(n, t0, t1, pr_type = pr_type, trt_type = trt_type)
 

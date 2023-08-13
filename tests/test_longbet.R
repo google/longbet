@@ -86,6 +86,10 @@ longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
                        num_trees_pr =  50, num_trees_trt = 50 ,
                        num_sweeps = 100, num_burnin = 20,
                        pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
+# longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
+#                        num_trees_pr =  2, num_trees_trt = 2 ,
+#                        num_sweeps = 3, num_burnin = 1,
+#                        pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 # assume all unit get treated at t0 for test set to get CATE

@@ -136,7 +136,6 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     Rcpp::NumericMatrix tcon_std(t_con.n_rows, t_con.n_cols);
     Rcpp::NumericMatrix tmod_std(t_mod.n_rows, t_mod.n_cols);
     Rcpp::NumericMatrix post_t_std(N, p_y);
-    Rcpp::NumericMatrix S_std(p_y, N);
 
     arma_to_rcpp(X, X_std);
     arma_to_rcpp(y, y_std);

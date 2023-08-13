@@ -24,16 +24,24 @@ predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
         cat("Msg: input z is not a matrix, try to convert type.\n")
         z = as.matrix(z)
     }
-    
-    if (is.null(t)){
-        t = model$time
+
+    if (nrow(z) != nrow(x)){
+        stop("X and Z should have the same number of rows. \n")
     }
 
-    t_con <- t
-    # t_mod <- as.matrix(rep(0, ncol(z)))
-    t_mod <- as.matrix(sapply(t_con, function(x) max(x - model$t0, 0)))
-    # print("Adjusted treatment time to predict:")
-    # print(t_mod)
+    
+    if (is.null(t)){
+        print(paste(c("Predicting from time", longbet.fit$time), collapse = " "))
+        t_con <-  matrix(rep(model$time, nrow(x)), nrow = nrow(x), byrow = T)
+    } else {
+        if (length(t) != ncol(z)){
+            stop("Msg: lenght of t should match the size of z. \n")
+        }
+        print(paste(c("Predicting from time", t), collapse = " "))
+        t_con <-  matrix(rep(t, nrow(x)), nrow = nrow(x), byrow = T)
+    }
+
+    t_mod <- t( apply(z, 1, cumsum) )
     
     obj_mu = .Call(`_longbet_predict`, x, t_con, model$model_list$tree_pnt_pr)
 

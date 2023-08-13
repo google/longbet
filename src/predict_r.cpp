@@ -20,12 +20,10 @@ Rcpp::List predict(arma::mat X, arma::mat t,
     // Process the prognostic input
     size_t N = X.n_rows;
     size_t p = X.n_cols;
-    size_t p_y = t.n_rows;
-
-    if (N * p * p_y == 0)
-    {
-        std::cout << "Wrong dimensions " << " N " << N << " p " << p << " p_y " << p_y << endl;
-        abort();
+    size_t p_y = t.n_cols;
+    
+    if (t.n_rows != N){
+        cout << "Size of t should equal to " << N << " but t.n_rows = " << t.n_rows << endl;
     }
 
     // Init X_std matrix

@@ -258,7 +258,10 @@ tree::tree_p tree::search_bottom_std(const double *X, const double *t, const siz
     {
         if (this->split_t)
         {
-            if (*(t + N_t * v + j) <= c)
+            // Tpointer point to a matrix for the time of the panel
+            // should be *(t + N * j + i)
+            // if (*(t + N_t * v + j) <= c)
+            if (*(t + N * j + i) <= c)
             {
                 return l->search_bottom_std(X, t, i, j, N, N_t);
             } else {

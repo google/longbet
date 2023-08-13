@@ -102,7 +102,7 @@ longbet <- function(y, x, z, t, pcat,
     beta_size <- max(post_trt_time) + 1
 
     # get cumulative treated time
-    S <- apply(z, 1, cumsum)
+    S <- t(apply(z, 1, cumsum))
 
     # get a matrix of time for the panel data
     T <- matrix(rep(t, nrow(y)), nrow = nrow(y), byrow = TRUE)

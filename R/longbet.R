@@ -23,7 +23,7 @@ longbet <- function(y, x, z, t, pcat,
                     num_trees_pr = 20, num_trees_trt = 20,
                     mtry = 0L, n_min = 10,
                     sig_knl = 1, lambda_knl = 1,
-                    split_time_ps = TRUE, split_time_trt = TRUE,
+                    split_time_ps = TRUE, split_time_trt = FALSE,
                     ps = NULL) {
 
     if(!("matrix" %in% class(x))){

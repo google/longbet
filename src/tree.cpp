@@ -652,7 +652,7 @@ const size_t &tree_ind, bool control_split_t)
         // cout << "no split " << endl;
         for (size_t i = 0; i < N_Xorder; i++)
         {
-            for (auto j: split->sorder_std[i])
+            for (auto j: split->sorder_std[split->Xorder_std[0][i]])
             {
                 x_struct->data_pointers[tree_ind][split->Xorder_std[0][i] * state->p_y + j] = &this->theta_vector;
             }

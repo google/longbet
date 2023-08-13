@@ -204,8 +204,12 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         std::iota(Sorder_std[i].begin(), Sorder_std[i].end(), 0);
     }
 
+    // Sorder is used to track splitted panel Y in child nodes.
+    // Sorder_std[i][j]->k indicate the i-th row and k-th columen of panel Y.
+
     double *Spointer = S.memptr();
     double *Tpointer = T.memptr();
+    // The corresponding time value for panel Y(i, k) is Spointer[i + k * N];
     
     // get unique values of T and S
     std::vector<double> t_values = arma::conv_to<std::vector<double>>::from( arma::sort(arma::unique(arma::vectorise(T))) ); 

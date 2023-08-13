@@ -654,7 +654,7 @@ const size_t &tree_ind, bool control_split_t)
         {
             for (auto j: split->sorder_std[i])
             {
-                x_struct->data_pointers[tree_ind][x_struct->Tpt[i + j * state->n_y]] = &this->theta_vector;
+                x_struct->data_pointers[tree_ind][split->Xorder_std[0][i] * state->p_y + j] = &this->theta_vector;
             }
         }
 
@@ -769,20 +769,20 @@ void BART_likelihood_all(std::unique_ptr<split_info> &split_info,
         // cout << "finish " << endl;
     }
 
-    // if (state->p_categorical > 0)
-    // {
-    //     // cout << "calculate_loglikelihood_categorical" << endl;
-    //     calculate_loglikelihood_categorical(loglike, loglike_start, subset_vars, N_Xorder, split_info->Xorder_std, split_info->sorder_std, loglike_max, split_info->X_counts, split_info->X_num_unique, model, x_struct, total_categorical_split_candidates, state, tree_pointer);
-    //     // cout << "finish" << endl;
-    // }
+    if (state->p_categorical > 0)
+    {
+        // cout << "calculate_loglikelihood_categorical" << endl;
+        calculate_loglikelihood_categorical(loglike, loglike_start, subset_vars, N_Xorder, split_info->Xorder_std, split_info->sorder_std, loglike_max, split_info->X_counts, split_info->X_num_unique, model, x_struct, total_categorical_split_candidates, state, tree_pointer);
+        // cout << "finish" << endl;
+    }
 
-    // if (control_split_t)
-    // {
-    //     // cout << "calc time like "  << endl;
-    //     calculate_loglikelihood_time(loglike, loglike_time_start, loglike_max,
-    //     model, x_struct, split_info, state, tree_pointer);
-    //     // cout << "finish " << endl;
-    // }
+    if (control_split_t)
+    {
+        // cout << "calc time like "  << endl;
+        calculate_loglikelihood_time(loglike, loglike_time_start, loglike_max,
+        model, x_struct, split_info, state, tree_pointer);
+        // cout << "finish " << endl;
+    }
 
     // calculate likelihood of no-split option
     calculate_likelihood_no_split(loglike, N_Xorder, loglike_max, model, x_struct, total_categorical_split_candidates, state, tree_pointer);

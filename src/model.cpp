@@ -422,25 +422,9 @@ void longbetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
 
   std::vector<size_t> t_counts(t_size, 0);
 
-  // for (size_t i = 0; i < state->n_y; i++){
-  //   for (size_t j = 0; j < state->p_y; j++){
-  //     s = *(state->post_trt_time + j * state->n_y + i);
-  //     t_counts[s] += 1;
-  //     if (*(state->z + state->n_y * j + i) == 0){
-  //       res_ctrl[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
-  //       diag_ctrl[s] += state->tau_fit[i][j];
-  //       sig[s] += sig02;
-  //     } else {
-  //       res_trt[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
-  //       diag_trt[s] += state->tau_fit[i][j];
-  //       sig[s] += sig12;
-  //     }
-  //   }
-  // }
-
   for (size_t i = 0; i < state->n_y; i++){
-    for (size_t  j = 0; j < sorder_std[i].size(); j++){
-      s = sorder_std[i][j]; 
+    for (size_t j = 0; j < state->p_y; j++){
+      s = *(state->post_trt_time + j * state->n_y + i);
       t_counts[s] += 1;
       if (*(state->z + state->n_y * j + i) == 0){
         res_ctrl[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
@@ -453,16 +437,15 @@ void longbetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
       }
     }
   }
-  // cout << "res_ctrl " << res_ctrl << endl;
-  // cout << "resd_trt " << res_trt << endl;
-  // cout << "t_counts " << t_counts << endl;
 
   for (size_t i = 0; i < t_size; i++){
     resid[i] = (res_trt[i] + res_ctrl[i]) / t_counts[i];
     diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/ t_counts[i];
     sig[i] = sig[i] / pow(t_counts[i], 2) ;
   }
-
+  // cout << "res " << resid  << endl;
+  // cout << "diag " << diag << endl;
+  // cout << "sig " << sig << endl;
   // solve by var = (Sigma0^-1 + Sigma^-1)^-1
   // Sigma0 = A*cov_kernel*A'
   // Sigma = diag(sig)
@@ -510,9 +493,6 @@ void longbetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   for (size_t i = 0; i < state->n_y; i++){
     for (size_t j = 0; j < state->p_y; j++){
       state->beta_fit[i][j] = state->beta_t[*(state->post_trt_time + j * state->n_y + i)];
-      if (sorder_std[i][j] != *(state->post_trt_time + j * state->n_y + i)){
-        cout << "i = " << i << " j = " << j << " sorder = " << sorder_std[i][j] << " pointer = " << *(state->post_trt_time + j * state->n_y + i) << endl;
-      }
     }
   }
 

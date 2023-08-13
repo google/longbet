@@ -46,6 +46,8 @@ predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
     obj_mu = .Call(`_longbet_predict`, x, t_con, model$model_list$tree_pnt_pr)
 
     obj_tau = .Call(`_longbet_predict`, x, t_mod, model$model_list$tree_pnt_trt)
+    
+    obj_tau0 = .Call(`_longbet_predict`, x, matrix(rep(0, nrow(x)), ncol = 1), model$model_list$tree_pnt_trt)
 
     # Match post treatment periods
     n <- nrow(z)
@@ -88,7 +90,7 @@ predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
 
     obj_mu$preds <- obj_mu$preds * model$sdy
     obj_tau$preds <- obj_tau$preds * model$sdy
-
+    obj_tau0$preds <- obj_tau0$preds * model$sdy
 
     obj <- list()
     class(obj) = "longbet.pred"
@@ -98,12 +100,13 @@ predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
     seq <- (num_burnin+1):num_sweeps
     for (i in seq) {
         obj$muhats[,, i - num_burnin] = matrix(obj_mu$preds[,i], n, p) * (model$a_draws[i]) + model$meany +  matrix(obj_tau$preds[,i], n, p) *  model$b_draws[i,1] * model$beta_draws[1, i]
-        # obj$tauhats[,, i - num_burnin] = matrix(obj_tau$preds[,i], n, p) * (model$b_draws[i,2] - model$b_draws[i,1]) * beta_preds[,,i]
-        obj$tauhats[,, i - num_burnin] = matrix(obj_tau$preds[,i], n, p) * (model$b_draws[i,2] * beta_preds[,,i] - model$b_draws[i,1] * model$beta_draws[1, i]) # * beta_preds[,,i]
+        # obj$tauhats[,, i - num_burnin] = matrix(obj_tau$preds[,i], n, p) * (model$b_draws[i,2] * beta_preds[,,i] - model$b_draws[i,1] * model$beta_draws[1, i]) # * beta_preds[,,i]
+        obj$tauhats[,, i - num_burnin] = model$b_draws[i,2] * beta_preds[,,i] * matrix(obj_tau$preds[,i], n, p)  - matrix(rep(model$b_draws[i,1] * model$beta_draws[1, i] * obj_tau0$preds[,i], p), ncol = p)
         # TODO: change tauhat to b1 * beta_s * tau_s - b0 * beta_0 * tau_0 when tau can split on post-treatment time
     }
     obj$beta_preds <- beta_preds
-    # obj$beta_draws = beta
+    obj$tau0 = obj_tau0$preds
+    obj$tau = obj_tau$preds
     return(obj)
 }
 

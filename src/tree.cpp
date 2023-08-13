@@ -617,7 +617,8 @@ const size_t &tree_ind, bool control_split_t)
         if (this->split_t)
         { 
             int place_holder = 1;
-            // cout << "split_t, split_point = " << split_point << " value = " << *(x_struct->t_std + x_struct->n_t * split_var + split->torder_std[split_var][split_point]) << endl;
+            // cout << "split_t, split_point = " << split_point << " value = " << split->s_values[split_point] << endl;
+            this->c = split->s_values[split_point];
             // this->c = *(x_struct->t_std + x_struct->n_t * split_var + split->torder_std[split_var][split_point]);
             // while ((split_point < N_torder - 1) && (*(x_struct->t_std + x_struct->n_t * split_var + split->torder_std[split_var][split_point + 1]) == this->c))
             // {

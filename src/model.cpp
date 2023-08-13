@@ -485,6 +485,7 @@ void longbetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   // beta = diag^-1 * beta_tilde
   // arma::mat beta(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
+    // beta[i] = 1; // disable beta for debug
     beta[i] = beta_tilde(i, 0) / diag[i];
     state->beta_t[i] = beta[i];
   }

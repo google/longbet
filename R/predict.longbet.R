@@ -43,11 +43,11 @@ predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
 
     t_mod <- t( apply(z, 1, cumsum) )
     
-    obj_mu = .Call(`_longbet_predict`, x, t_con, model$model_list$tree_pnt_pr)
+    obj_mu = .Call(`_longbet_predict_longbet`, x, t_con, model$model_list$tree_pnt_pr)
 
-    obj_tau = .Call(`_longbet_predict`, x, t_mod, model$model_list$tree_pnt_trt)
+    obj_tau = .Call(`_longbet_predict_longbet`, x, t_mod, model$model_list$tree_pnt_trt)
     
-    obj_tau0 = .Call(`_longbet_predict`, x, matrix(rep(0, nrow(x)), ncol = 1), model$model_list$tree_pnt_trt)
+    obj_tau0 = .Call(`_longbet_predict_longbet`, x, matrix(rep(0, nrow(x)), ncol = 1), model$model_list$tree_pnt_trt)
 
     # Match post treatment periods
     n <- nrow(z)

@@ -46,8 +46,6 @@ sig_knl: variance parameter for squared exponential kernel (default is 1).
 lambda_knl: lengthscale parameter for squared exponential kernel (default is 5).
 
 ### See Also
-'longbet_full' for fitting with more hyperparameters.
-'predict' will be avaible in the next update.
 
 ### Example
 ```R

@@ -12,16 +12,16 @@ Rcpp::Rostream<true>&  Rcpp::Rcout = Rcpp::Rcpp_cout_get();
 Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
-// predict
-Rcpp::List predict(arma::mat X, arma::mat t, Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt);
-RcppExport SEXP _longbet_predict(SEXP XSEXP, SEXP tSEXP, SEXP tree_pntSEXP) {
+// predict_longbet
+Rcpp::List predict_longbet(arma::mat X, arma::mat t, Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt);
+RcppExport SEXP _longbet_predict_longbet(SEXP XSEXP, SEXP tSEXP, SEXP tree_pntSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< arma::mat >::type X(XSEXP);
     Rcpp::traits::input_parameter< arma::mat >::type t(tSEXP);
     Rcpp::traits::input_parameter< Rcpp::XPtr<std::vector<std::vector<tree>>> >::type tree_pnt(tree_pntSEXP);
-    rcpp_result_gen = Rcpp::wrap(predict(X, t, tree_pnt));
+    rcpp_result_gen = Rcpp::wrap(predict_longbet(X, t, tree_pnt));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -174,7 +174,7 @@ END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_longbet_predict", (DL_FUNC) &_longbet_predict, 3},
+    {"_longbet_predict_longbet", (DL_FUNC) &_longbet_predict_longbet, 3},
     {"_longbet_predict_beta", (DL_FUNC) &_longbet_predict_beta, 7},
     {"_longbet_r_to_json", (DL_FUNC) &_longbet_r_to_json, 2},
     {"_longbet_json_to_r", (DL_FUNC) &_longbet_json_to_r, 1},

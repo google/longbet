@@ -13,7 +13,7 @@
 
 using namespace arma;
 // [[Rcpp::export]]
-Rcpp::List predict(arma::mat X, arma::mat t, 
+Rcpp::List predict_longbet(arma::mat X, arma::mat t, 
                         Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt)
 {
 

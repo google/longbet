@@ -64,7 +64,7 @@ for (pr in pr_types){
   for (trt in trt_types){
     for (iter in 1:mc){
       if (any((att.results$pr == pr) & (att.results$trt == trt))){
-        if ( iter <= max(att.results$iter[(att.results$pr == pr) & (att.results$trt == trt)]) ){
+        if ( iter %in% (att.results$iter[(att.results$pr == pr) & (att.results$trt == trt)]) ){
           # skip this iteration
           next 
         }

@@ -1,21 +1,21 @@
 "pr","trt","method","RMSE.ATT","Coverage.ATT","Cover0.ATT","RMSE.CATT","Coverage.CATT","Cover0.CATT","Time"
-"parallel","homogeneous","LongBet",0.008,0.81,0.095,0.017,0.993,0.138,199.187
-"parallel","homogeneous","DiD",0.01,1,0.27,NA,NA,NA,5.451
-"parallel","homogeneous","Non-linear DiD",0.011,1,0.286,NA,NA,NA,6.289
-"parallel","homogeneous","DiD Imputation",0.008,0.968,0.143,NA,NA,NA,0.911
-"parallel","homogeneous","DiD Imputation Cov",0.033,0.206,0.048,NA,NA,NA,66.318
-"parallel","heterogeneous","LongBet",0.008,0.825,0.127,0.043,0.997,0.29,214.578
-"parallel","heterogeneous","DiD",0.013,1,0.286,NA,NA,NA,5.388
-"parallel","heterogeneous","Non-linear DiD",0.013,1,0.286,NA,NA,NA,6.427
-"parallel","heterogeneous","DiD Imputation",0.009,0.968,0.206,NA,NA,NA,0.863
-"parallel","heterogeneous","DiD Imputation Cov",0.037,0.079,0.048,NA,NA,NA,65.895
-"non-parallel","homogeneous","LongBet",0.014,0.905,0.159,0.05,0.998,0.188,215.631
-"non-parallel","homogeneous","DiD",0.33,0.444,0.143,NA,NA,NA,5.282
-"non-parallel","homogeneous","Non-linear DiD",0.096,0.952,0.286,NA,NA,NA,6.281
-"non-parallel","homogeneous","DiD Imputation",1.042,0.063,0.079,NA,NA,NA,0.909
-"non-parallel","homogeneous","DiD Imputation Cov",0.04,0.079,0.079,NA,NA,NA,66.266
-"non-parallel","heterogeneous","LongBet",0.013,0.937,0.127,0.063,0.999,0.358,224.576
-"non-parallel","heterogeneous","DiD",0.175,0.603,0.175,NA,NA,NA,5.3
-"non-parallel","heterogeneous","Non-linear DiD",0.081,1,0.381,NA,NA,NA,6.306
-"non-parallel","heterogeneous","DiD Imputation",1.236,0.079,0.079,NA,NA,NA,0.922
-"non-parallel","heterogeneous","DiD Imputation Cov",0.047,0.079,0.032,NA,NA,NA,66.424
+"parallel","homogeneous","LongBet",0.008,0.829,0.093,0.016,0.994,0.137,199.076
+"parallel","homogeneous","DiD",0.01,1,0.271,NA,NA,NA,5.468
+"parallel","homogeneous","Non-linear DiD",0.011,1,0.286,NA,NA,NA,6.235
+"parallel","homogeneous","DiD Imputation",0.008,0.971,0.15,NA,NA,NA,0.897
+"parallel","homogeneous","DiD Imputation Cov",0.031,0.2,0.05,NA,NA,NA,66.451
+"parallel","heterogeneous","LongBet",0.008,0.812,0.12,0.043,0.997,0.291,215.372
+"parallel","heterogeneous","DiD",0.012,1,0.286,NA,NA,NA,5.275
+"parallel","heterogeneous","Non-linear DiD",0.012,1,0.286,NA,NA,NA,6.391
+"parallel","heterogeneous","DiD Imputation",0.009,0.97,0.203,NA,NA,NA,0.896
+"parallel","heterogeneous","DiD Imputation Cov",0.037,0.113,0.045,NA,NA,NA,66.05
+"non-parallel","homogeneous","LongBet",0.013,0.887,0.143,0.048,0.998,0.188,212.231
+"non-parallel","homogeneous","DiD",0.316,0.451,0.12,NA,NA,NA,5.301
+"non-parallel","homogeneous","Non-linear DiD",0.102,0.955,0.293,NA,NA,NA,6.251
+"non-parallel","homogeneous","DiD Imputation",1.007,0.075,0.075,NA,NA,NA,0.912
+"non-parallel","homogeneous","DiD Imputation Cov",0.038,0.113,0.06,NA,NA,NA,66.065
+"non-parallel","heterogeneous","LongBet",0.013,0.925,0.165,0.065,0.997,0.369,229.409
+"non-parallel","heterogeneous","DiD",0.159,0.662,0.203,NA,NA,NA,5.325
+"non-parallel","heterogeneous","Non-linear DiD",0.064,1,0.383,NA,NA,NA,6.299
+"non-parallel","heterogeneous","DiD Imputation",1.232,0.068,0.083,NA,NA,NA,0.92
+"non-parallel","heterogeneous","DiD Imputation Cov",0.052,0.068,0.038,NA,NA,NA,66.536

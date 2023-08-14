@@ -20,7 +20,7 @@ source('dgp.R') # script for data generating process
 
 # Set up ------------------------------------------------------------------
 set.seed(100)
-mc <- 10 #1000 # monte carlo iterations
+mc <- 100 #1000 # monte carlo iterations
 n <- 2000      # number of observations
 t0 <- 6        # earliest treatment adoption time
 t1 <- 12       # total time period

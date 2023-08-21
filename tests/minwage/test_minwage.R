@@ -228,3 +228,14 @@ yhat_plot <- rbind(ground_truth, mu_df, yhat_df) %>%
   geom_point() +  geom_line() + 
   facet_wrap(~group)
 plot(yhat_plot)
+
+
+# check counfoundings by varifying impute accuracy on y0_hat
+y0_hat <- longbet.pred$muhats %>% apply(MARGIN = c(1, 2), mean) %>% data.frame
+for (gp in 0:3){
+  gp_z <- ztrain[yclass == gp, ]
+  rmse <- mean( (ytrain[yclass == gp, ][gp_z == 0] - y0_hat[yclass == gp, ][gp_z == 0])^2) %>% sqrt
+  print(paste0("Group ", gp, " RMSE for y0 = ", round(rmse, 3), sep =""))
+}
+
+

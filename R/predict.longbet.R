@@ -61,31 +61,27 @@ predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
     }
 
 
-    post_trt <- t(apply(z, 1, cumsum)) + 1
+    post_trt <- t(apply(z, 1, cumsum))
     beta_preds <- array(NA, dim = c(n, p, num_sweeps))
 
     max_post_trt <- max(post_trt)
-    if (max_post_trt > nrow(longbet.fit$beta_draws)){
+    S <- nrow(model$beta_values) - 1 # max S observed
+    if (max_post_trt > S){
         # predict beta
-        stop("TODO: update extrapolation code for staggered adoption, \n")
-        if (is.null(sigma)) { 
-            if (nrow(model$beta_draws) > t0 + 1){
-                # if the training has more than 1 treatment period
-                sigma = sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[model$t0:t1,], 2, var) ))
-            } else {
-                sigma = 1
-            }
-        }
-        if (is.null(lambda)) { lambda = (nrow(model$beta_draws) - t0) / 2}
+        # stop("TODO: update extrapolation code for staggered adoption, \n")
+        if (is.null(sigma)) {  sigma = 1 }
+        if (is.null(lambda)) { lambda = nrow(model$beta_values) / 2}
         print(paste("predict beta with GP, sigma = ", sigma, ", lambda = ", lambda, sep = ""))
 
-        # obj_beta = .Call(`_longbet_predict_beta`, as.matrix(nrow(model$beta_draws)), 
-        #     model$gp_info$t_values, model$gp_info$resid, model$gp_info$A_diag, model$gp_info$Sig_diag,
-        #     sigma, lambda)
-        # beta[is.na(idx), ] <- obj_beta$beta
+        # beta to be predicted?
+        beta_test <- as.matrix((S + 1) : max_post_trt)
+        obj_beta = .Call(`_longbet_predict_beta`, beta_test,
+            as.matrix(model$gp_info$t_values), model$gp_info$resid, model$gp_info$A_diag, model$gp_info$Sig_diag,
+            sigma, lambda)
+        model$beta_values <- rbind(model$beta_values, obj_beta$beta)
     }
     for (i in 1:num_sweeps){
-        beta_preds[,,i] <- t(apply(post_trt, 1, function(x, beta) beta[x], beta = model$beta_draws[,i]))
+        beta_preds[,,i] <- t(apply(post_trt, 1, function(x, beta) beta[x + 1], beta = model$beta_values[,i]))
     }
 
     obj_mu$preds <- obj_mu$preds * model$sdy
@@ -101,9 +97,10 @@ predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
     for (i in seq) {
         obj$muhats[,, i - num_burnin] = matrix(obj_mu$preds[,i], n, p) * (model$a_draws[i]) + model$meany +  matrix(obj_tau$preds[,i], n, p) *  model$b_draws[i,1] * model$beta_draws[1, i]
         # obj$tauhats[,, i - num_burnin] = matrix(obj_tau$preds[,i], n, p) * (model$b_draws[i,2] * beta_preds[,,i] - model$b_draws[i,1] * model$beta_draws[1, i]) # * beta_preds[,,i]
-        obj$tauhats[,, i - num_burnin] = model$b_draws[i,2] * beta_preds[,,i] * matrix(obj_tau$preds[,i], n, p)  - matrix(rep(model$b_draws[i,1] * model$beta_draws[1, i] * obj_tau0$preds[,i], p), ncol = p)
+        obj$tauhats[,, i - num_burnin] = model$b_draws[i,2] * beta_preds[,,i] * matrix(obj_tau$preds[,i], n, p)  - matrix(rep(model$b_draws[i,1] * model$beta_values[1, i] * obj_tau0$preds[,i], p), ncol = p)
         # TODO: change tauhat to b1 * beta_s * tau_s - b0 * beta_0 * tau_0 when tau can split on post-treatment time
     }
+    obj$beta_values <- model$beta_values
     obj$beta_preds <- beta_preds
     obj$tau0 = obj_tau0$preds
     obj$tau = obj_tau$preds

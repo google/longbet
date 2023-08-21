@@ -350,7 +350,7 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
 
     for (size_t i = 0; i < t_size; i++)
     {
-        t_vector(i, 0) = x_struct_trt->t_values[i];
+        t_vector(i, 0) = x_struct_trt->s_values[i];
     }
 
 
@@ -438,7 +438,7 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
         Rcpp::Named("input_var_count") = Rcpp::List::create(Rcpp::Named("x_con") = p_pr,
                                                             Rcpp::Named("x_mod") = p_trt),
         Rcpp::Named("gp_info") = Rcpp::List::create(
-            Rcpp::Named("t_vector") = t_vector,
+            Rcpp::Named("t_values") = t_vector,
             Rcpp::Named("resid") = resid,
             Rcpp::Named("A_diag") = A_diag,
             Rcpp::Named("Sig_diag") = Sig_diag

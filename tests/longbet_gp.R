@@ -84,14 +84,15 @@ z_vec <- as.vector(ztrain)
 t_longbet <- proc.time()
 longbet.fit <- longbet(y = ytrain, x = x, z = ztrain, t = 1:t1,
                        num_sweeps = 60,
-                       num_trees_pr =  20, num_trees_trt = 20,
-                       pcat = ncol(x) - 3)
+                       num_trees_pr =  40, num_trees_trt = 40,
+                       pcat = ncol(x) - 3, sig_knl =  1, lambda_knl = 1)
 
-longbet.pred <- predict.longbet(longbet.fit, x, 1:t2)
+z_test <- c(rep(0, t0 - 1), rep(1, t2 - t0 + 1)) %>% rep(times = n) %>%  matrix(nrow = t2, ncol = n) %>% t
+longbet.pred <- predict.longbet(longbet.fit, x, z_test, sigma = NULL, lambda = NULL)
 # mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
 # tau_hat_longbet <- apply(longbet.pred$tauhats, c(1, 2), mean)
 # tau_longbet <- tau_hat_longbet[,t0:t2]
-# t_longbet <- proc.time() - t_longbet
+t_longbet <- proc.time() - t_longbet
 # 
 # ate_longbet_fit <- apply(longbet.pred$tauhats, c(2, 3), mean)[t0:t2, ]
 # ate <- tau_mat %>% colMeans
@@ -108,7 +109,7 @@ ate <- tau_mat %>% colMeans
 print(paste0("longbet ATE RMSE in-sample: ", round( sqrt(mean((longbet.ate$ate[t0:t1] - ate[t0:t1])^2)), 2)))
 print(paste0("longbet ATE RMSE extrapolate: ", round( sqrt(mean((longbet.ate$ate[(t1 + 1):t2] - ate[(t1 + 1):t2])^2)), 2)))
 
-print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
+print(paste0("longbet runtime: ", round(t_longbet[3],2)," seconds"))
 
 # visualize ---------------------------------------------------------------
 colors <- c("black", "#FFA500", "#00BFFF")

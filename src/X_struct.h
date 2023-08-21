@@ -78,6 +78,8 @@ public:
         this->p_t = torder_std.size();
 
         ini_cov_kernel(sig_knl, lambda_knl);
+        // std::cout << "t_values " << t_values << endl;
+        // std::cout << "cov " << cov_kernel << endl;
     }
 
     void init_tree_pointers(std::vector<double> *initial_theta, size_t num_trees, size_t N, size_t p_y)

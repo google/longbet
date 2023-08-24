@@ -124,7 +124,7 @@ longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
                        pcat = 0, lambda_knl = 1)
 
 longbet.pred <- predict.longbet(longbet.fit, xtrain, ztrain)
-longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
+longbet.att <- get_att(longbet.pred, alpha = 0.05)
 longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
 
 # reshape tauhats to get att credible interval per group

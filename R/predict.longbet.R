@@ -102,41 +102,43 @@ predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
     }
     obj$beta_values <- model$beta_values
     obj$beta_preds <- beta_preds
-    obj$tau0 = obj_tau0$preds
-    obj$tau = obj_tau$preds
+    obj$z <- z
     return(obj)
 }
 
-get_ate <- function(object, alpha = 0.05, ...) {
+get_att <- function(object, alpha = 0.05, ...){
     if(class(object) != "longbet.pred"){
         stop("Input object should be output from predict.longbet function")    
     }
-    ate_full <- apply(object$tauhats, c(2, 3), mean)
+    # att_full <- apply(object$tauhats[z,,], c(2, 3), mean)
+
+    treatment_period <- nrow(object$beta_values) - 1
+    num_sweeps <- dim(object$tauhats)[3]
+
+    # Align treatment effect 
+    align_catt <- array(NA, dim = c(n, treatment_period, num_sweeps))
+
+    for (i in 1:n){
+        if (sum(object$z[i,]) == 0) {next}
+        post_t <- 1:sum(object$z[i,])
+        align_catt[i,post_t,] = object$tauhats[i, object$z[i,]== 1,]
+    }
+
+    att_hat <- apply(align_catt, c(2, 3), mean, na.rm = T)
+
     obj <- list()
-    obj$ate <- rowMeans(ate_full)
-    obj$interval <- apply(ate_full, 1, quantile, probs = c(alpha / 2, 1- alpha / 2))
-    obj$ate_full <- ate_full
+    obj$att <- rowMeans(att_hat)
+    obj$intervals <- apply(att_hat, 1, quantile, probs = c(alpha / 2, 1- alpha / 2))
+    obj$att_full <- att_hat
     return(obj)
 }
 
-get_att <- function(object, z, alpha = 0.05, ...){
-    if(class(object) != "longbet.pred"){
-        stop("Input object should be output from predict.longbet function")    
-    }
-    att_full <- apply(object$tauhats[z,,], c(2, 3), mean)
-    obj <- list()
-    obj$att <- rowMeans(att_full)
-    obj$interval <- apply(att_full, 1, quantile, probs = c(alpha / 2, 1- alpha / 2))
-    obj$att_full <- att_full
-    return(obj)
-}
-
-get_cate <- function(object, alpha = 0.05, ...){
+get_catt <- function(object, alpha = 0.05, ...){
     if(class(object) != "longbet.pred"){
         stop("Input object should be output from predict.longbet function")    
     }
     obj <- list()
-    obj$cate <- apply(object$tauhats, c(1, 2), mean)
-    obj$interval <- apply(object$tauhats, c(1, 2), quantile, probs = c(alpha / 2, 1 - alpha / 2))
+    obj$catt <- apply(object$tauhats, c(1, 2), mean)
+    obj$intervals <- apply(object$tauhats, c(1, 2), quantile, probs = c(alpha / 2, 1 - alpha / 2))
     return(obj)
 }

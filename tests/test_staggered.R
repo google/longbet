@@ -88,7 +88,7 @@ longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
                        pcat = ncol(xtrain) - 3)
 
 longbet.pred <- predict.longbet(longbet.fit, x, ztrain)
-longbet.ate <- get_ate(longbet.pred, alpha = 0.05)
+longbet.att <- get_att(longbet.pred, alpha = 0.05)
 longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
 
 #TODO estimate CATT

@@ -53,24 +53,79 @@ for (i in t0:t1){
   z_mat <- cbind(z_mat, z)
 }
 colnames(z_mat) <- NULL
+treated <- apply(z_mat, 1, function(x) any(x != 0))
+treatment_group <- apply(z_mat, 1, function(x) t1 - t0 - sum(x) + 2)
+treatment_group[treatment_group == max(treatment_group)] <- 0 # Control group
+
 plot(1:t1, colMeans(z_mat), main = "Treated ratio over time", ylab = "Treated ratio")
 
 # get post treatment time matrix
 trt_time <- t(apply(z_mat, 1, cumsum))
 
-get_te <- function(tau, trt){
-  te <- rep(0, length(trt))
-  te[trt > 0] = tau[trt[trt > 0]]
-  return(te)
+
+early_bird_effect <- c(1.2, 1.2, 1, 1, 0.9, 0.9, 0.8, 0.8)
+get_treatment_effect <- function(ground_truth, trt_time){
+  trt_effect <- rep(0, length(trt_time))
+  eb_effect <- early_bird_effect[sum(trt_time == 0) - t0 + 2]
+  trt_effect[trt_time > 0] = ground_truth[trt_time[trt_time > 0]] * eb_effect
+  return(trt_effect)
 }
-te <- t(mapply(get_te, data.frame(t(tau_mat)), data.frame(t(trt_time))))
+te <- t(mapply(get_treatment_effect, data.frame(t(tau_mat)), data.frame(t(trt_time))))
 
 # generate outcome variable
 y0 <- mu_mat
 y1 <- mu_mat + te
 y <- z * y1 + (1 -z) * y0 +  0.2 * sd(mu_mat) * matrix(rnorm(n*t1), n, t1)
 
-# # If you didn't know pi, you would estimate it here
+
+# Visualize observed data -------------------------------------------------
+# TODO: Visualize observed data and treatment effect
+treated_obs <- data.frame(
+  time = 1:t1,
+  avg = colMeans(y[treated,]),
+  upper = apply(y[treated,], 2, quantile, prob = 0.975),
+  lower = apply(y[treated,], 2, quantile, prob = 0.025),
+  group = "Treated"
+)
+
+control_obs <- data.frame(
+  time = 1:t1,
+  avg = colMeans(y[!treated,]),
+  upper = apply(y[!treated,], 2, quantile, prob = 0.975),
+  lower = apply(y[!treated,], 2, quantile, prob = 0.025),
+  group = "Control"
+)
+
+gg_obs <- rbind(treated_obs, control_obs) %>% ggplot(aes(time, avg, group = group, colour = group, fill = group)) +
+  geom_line(aes(color = group)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = .3, colour = NA) + 
+  facet_wrap(~group, nrow = 1)
+plot(gg_obs)
+
+# Visualize treatment effect by group
+trt_effect_df <- data.frame()
+for (group in 1:max(treatment_group)){
+  temp_y <- te[treatment_group == group, t0:t1]
+  temp_df <- data.frame(
+    time = t0:t1,
+    avg = colMeans(temp_y),
+    upper = apply(temp_y, 2, quantile, prob = 0.975),
+    lower = apply(temp_y, 2, quantile, prob = 0.025),
+    group = group
+  )
+  trt_effect_df <- rbind(trt_effect_df, temp_df)
+}
+
+gg_trt_effect <- trt_effect_df %>% ggplot(aes(time, avg, group = group, colour = group, fill = group)) +
+  geom_pointrange(aes(ymin = lower, ymax = upper)) + 
+  facet_wrap(~group, nrow = 4, dir = "v")
+plot(gg_trt_effect)
+
+
+
+
+# Training ----------------------------------------------------------------
+# TODO: use estimated propensity score in training data
 # pi_mat <- as.matrix(rep(pi, t1), n, t1)
 # pi_vec <- as.vector(pi_mat)
 

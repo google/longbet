@@ -26,10 +26,10 @@ y1 <- y0 + te
 y <- z_mat * y1 + (1 - z_mat) * y0
 
 t_longbet <- proc.time()
-longbet.fit <- longbet(y = y, x = x, z = z_mat, t = 1:t1, pcat = 1,
+longbet.fit <- longbet(y = y, x = x, x_trt = x, z = z_mat, t = 1:t1, pcat = 1,
 num_trees_pr =  50, num_trees_trt = 50)
 
-longbet.pred <- predict.longbet(longbet.fit, x, z_mat)
+longbet.pred <- predict.longbet(longbet.fit, x, x, z_mat)
 longbet.att <- get_att(longbet.pred, alpha = 0.05)
 longbet.catt <- get_catt(longbet.pred, alpha = 0.05)
 t_longbet <- proc.time() - t_longbet

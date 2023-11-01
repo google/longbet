@@ -97,13 +97,13 @@ z_vec <- as.vector(ztrain)
 
 # longbet -----------------------------------------------------------------
 t_longbet <- proc.time()
-longbet.fit <- longbet(y = ytrain, x = x, z = ztrain, t = 1:t1,
+longbet.fit <- longbet(y = ytrain, x = x, x_trt = x, z = ztrain, t = 1:t1,
                        num_sweeps = 60,
                        num_trees_pr =  40, num_trees_trt = 40,
                        pcat = ncol(x) - 3, sig_knl =  1, lambda_knl = 1)
 
 ztest <- z_mat
-longbet.pred <- predict.longbet(longbet.fit, x, ztest, sigma = NULL, lambda = NULL)
+longbet.pred <- predict.longbet(longbet.fit, x, x, ztest, sigma = NULL, lambda = NULL)
 t_longbet <- proc.time() - t_longbet
 
 longbet.att <- get_att(longbet.pred, alpha = 0.05)

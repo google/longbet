@@ -159,12 +159,12 @@ xtrain <- matrix(data$lpop)
 xtrain <- cbind(ps.hat$prob[,2:4], xtrain)
 
 
-longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:ncol(ztrain),
+longbet.fit <- longbet(y = ytrain, x = xtrain, x_trt = xtrain, z = ztrain, t = 1:ncol(ztrain),
                        num_sweeps = 100, num_burnin = 20,
                        num_trees_pr =  50, num_trees_trt = 50,
                        pcat = 0, lambda_knl = 1)
 
-longbet.pred <- predict.longbet(longbet.fit, xtrain, ztrain)
+longbet.pred <- predict.longbet(longbet.fit, xtrain, xtrain, ztrain)
 longbet.att <- get_att(longbet.pred, alpha = 0.05)
 longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
 

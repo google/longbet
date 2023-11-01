@@ -57,12 +57,12 @@ for (pr in pr_types){
     att <- colMeans(align_tau, na.rm = T)
     
     for (num_trees in c(20, 30, 40, 60)){
-      longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
+      longbet.fit <- longbet(y = ytrain, x = xtrain, x_trt = xtrain, z = ztrain, t = 1:t1,
                              num_sweeps = 500,
                              num_trees_pr =  num_trees, num_trees_trt = num_trees,
                              pcat = ncol(xtrain) - 3)
       
-      longbet.pred <- predict.longbet(longbet.fit, xtrain, ztrain)
+      longbet.pred <- predict.longbet(longbet.fit, xtrain, xtrain, ztrain)
       # align catt
       num_sweeps <- dim(longbet.pred$tauhats)[3]
       longbet.catt.sweeps <- array(NA, dim = c(n, t1 - t0 + 1, num_sweeps))

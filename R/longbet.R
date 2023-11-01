@@ -2,6 +2,7 @@
 #'
 #' @param y An n by t matrix of outcome variables.
 #' @param x n by p input matrix of covariates. (If the covariates matrix is different for the prognostic and treatment term, please use longbet_full).
+#' @param x_trt n by p_trt input matrix of covariates for treatment trees
 #' @param z An n by t matrix of treatment assignments.
 #' @param t time variable (post-treatment time for treatment term will be infered based on input t and z).
 #' @param pcat The number of categorical inputs in matrix x.
@@ -18,7 +19,7 @@
 #'
 #' @return A fit file, which contains the draws from the model as well as parameter draws at each sweep.
 #' @export
-longbet <- function(y, x, z, t, pcat, 
+longbet <- function(y, x, x_trt, z, t, pcat, pcat_trt = NULL,
                     num_sweeps = 60, num_burnin = 20,
                     num_trees_pr = 20, num_trees_trt = 20,
                     mtry = 0L, n_min = 10,
@@ -29,6 +30,10 @@ longbet <- function(y, x, z, t, pcat,
     if(!("matrix" %in% class(x))){
         cat("Msg: input x is not a matrix, try to convert type.\n")
         x = as.matrix(x)
+    }
+    if(!("matrix" %in% class(x_trt))){
+        cat("Msg: input x is not a matrix, try to convert type.\n")
+        x_trt = as.matrix(x_trt)
     }
     if(!("matrix" %in% class(z))){
         cat("Msg: input z is not a matrix, try to convert type.\n")
@@ -134,7 +139,7 @@ longbet <- function(y, x, z, t, pcat,
     if(is.null(pcat)) {
         stop('number of categorical variables pcat_con is not specified')
     }
-
+    
     # check if p_categorical exceeds the number of columns
     if(pcat > ncol(x)) {
         stop('number of categorical variables (pcat_con) cannot exceed number of columns')
@@ -143,6 +148,16 @@ longbet <- function(y, x, z, t, pcat,
     # check if p_categorical is negative
     if(pcat < 0) {
         stop('number of categorical values can not be negative: check pcat_con and pcat_mod')
+    }
+
+    if(is.null(pcat_trt)){
+        pcat_trt = pcat
+        cat("Assume number of categories in treatment trees equals ", pcat, "\n")
+    }
+
+    # check if p_categorical exceeds the number of columns
+    if(pcat_trt > ncol(x_trt)) {
+        stop('number of categorical variables (pcat_trt) cannot exceed number of columns')
     }
 
     # check if mtry exceeds the number of columns
@@ -191,7 +206,7 @@ longbet <- function(y, x, z, t, pcat,
 
     obj = longbet_cpp(y = y,
                     X = x, 
-                    X_tau = x, 
+                    X_tau = x_trt, 
                     z = z, 
                     t_con = t_con, 
                     t_mod = t_mod,
@@ -208,7 +223,7 @@ longbet <- function(y, x, z, t, pcat,
                     mtry_pr = mtry, 
                     mtry_trt = mtry,
                     p_categorical_pr = pcat, 
-                    p_categorical_trt = pcat,
+                    p_categorical_trt = pcat_trt,
                     num_trees_pr = num_trees_pr,
                     alpha_pr = alpha_con, 
                     beta_pr = beta_con, 

@@ -7,7 +7,7 @@
 #'
 #' @return A matrix for predicted prognostic effect and a matrix for predicted treatment effect. 
 #' @export
-predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, ...) {
+predict.longbet <- function(model, x, x_trt, z, t = NULL, sigma = NULL, lambda = NULL, ...) {
 
     if(!("matrix" %in% class(x))) {
         cat("Msg: input x is not a matrix, try to convert type.\n")
@@ -18,6 +18,17 @@ predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
         stop(paste0('Check dimensions of input matrices. The model was trained on
         x with ', model$input_var_count$x_con,
         ' columns; trying to predict on x with ', ncol(x),' columns.'))
+    }
+
+    if(!("matrix" %in% class(x_trt))) {
+        cat("Msg: input x is not a matrix, try to convert type.\n")
+        x_trt = as.matrix(x_trt)
+    }
+
+    if(ncol(x_trt) != model$input_var_count$x_mod) {
+        stop(paste0('Check dimensions of input matrices. The model was trained on
+        x with ', model$input_var_count$x_mod,
+        ' columns; trying to predict on x with ', ncol(x_trt),' columns.'))
     }
 
     if(!("matrix" %in% class(z))) {
@@ -45,9 +56,9 @@ predict.longbet <- function(model, x, z, t = NULL, sigma = NULL, lambda = NULL, 
     
     obj_mu = .Call(`_longbet_predict_longbet`, x, t_con, model$model_list$tree_pnt_pr)
 
-    obj_tau = .Call(`_longbet_predict_longbet`, x, t_mod, model$model_list$tree_pnt_trt)
+    obj_tau = .Call(`_longbet_predict_longbet`, x_trt, t_mod, model$model_list$tree_pnt_trt)
     
-    obj_tau0 = .Call(`_longbet_predict_longbet`, x, matrix(rep(0, nrow(x)), ncol = 1), model$model_list$tree_pnt_trt)
+    obj_tau0 = .Call(`_longbet_predict_longbet`, x_trt, matrix(rep(0, nrow(x)), ncol = 1), model$model_list$tree_pnt_trt)
 
     # Match post treatment periods
     n <- nrow(z)

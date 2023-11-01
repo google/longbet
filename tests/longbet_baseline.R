@@ -82,7 +82,7 @@ expand_z_mat <- cbind(matrix(0, n, (t0 - 1)), z_mat)
 
 # longbet -----------------------------------------------------------------
 t_longbet <- proc.time()
-longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
+longbet.fit <- longbet(y = y, x = x, x_trt = x, z = expand_z_mat, t = 1:t1,
                        num_trees_pr =  50, num_trees_trt = 50 ,
                        pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
 # TODO: lambda_knl is quite sensitve, need better understanding
@@ -90,7 +90,7 @@ longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
 # assume all unit get treated at t0 for test set to get CATE
 z_test <- c(rep(0, t0 - 1), rep(1, t1 - t0 + 1)) %>% rep(times = n) %>%  matrix(nrow = t1, ncol = n) %>% t
 
-longbet.pred <- predict.longbet(longbet.fit, x, z_test)
+longbet.pred <- predict.longbet(longbet.fit, x, x, z_test)
 mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
 tau_hat_longbet <- apply(longbet.pred$tauhats, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t1]

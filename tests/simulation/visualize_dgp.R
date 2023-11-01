@@ -69,12 +69,12 @@ for (pr_type in c("linear", "non-linear")){
   
     # longbet -----------------------------------------------------------------
     longbet.time <- proc.time()
-    longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
+    longbet.fit <- longbet(y = ytrain, x = xtrain, x_trt = xtrain, z = ztrain, t = 1:t1,
                            num_sweeps = 60,
                            num_trees_pr =  20, num_trees_trt = 20,
                            pcat = ncol(xtrain) - 3)
     
-    longbet.pred <- predict.longbet(longbet.fit, xtrain, ztrain)
+    longbet.pred <- predict.longbet(longbet.fit, xtrain, xtrain, ztrain)
     # align catt
     num_sweeps <- dim(longbet.pred$tauhats)[3]
     align_catt <- array(NA, dim = c(n, t1 - t0 + 1, num_sweeps))

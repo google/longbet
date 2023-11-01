@@ -9,6 +9,7 @@
 void mcmc_loop_longbet( 
   std::unique_ptr<split_info> &split_pr,  
   std::unique_ptr<split_info> &split_trt,
+  std::unique_ptr<split_info> &split_gp,
   bool verbose,
   matrix<double> &sigma0_draw_xinfo,
   matrix<double> &sigma1_draw_xinfo,
@@ -24,6 +25,7 @@ void mcmc_loop_longbet(
   longbetModel *model_trt,
   std::unique_ptr<X_struct> &x_struct_ps,
   std::unique_ptr<X_struct> &x_struct_trt,
+  std::unique_ptr<X_struct> &x_struct_gp,
   bool a_scaling,
   bool b_scaling,
   bool split_time_ps,
@@ -157,7 +159,7 @@ void mcmc_loop_longbet(
     }
 
     // TODO: replace torder with sorder
-    model_ps->update_time_coef(state, x_struct_trt, split_trt->sorder_std,
+    model_ps->update_time_coef(state, x_struct_gp, split_gp->sorder_std,
       resid_info[sweeps], A_diag_info[sweeps], Sig_diag_info[sweeps], beta_info[sweeps]); 
     // cout << "beta " << state->beta_t << endl;
 

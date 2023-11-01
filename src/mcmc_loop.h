@@ -11,6 +11,7 @@
 void mcmc_loop_longbet( 
   std::unique_ptr<split_info> &split_ps,  
   std::unique_ptr<split_info> &split_trt,
+  std::unique_ptr<split_info> &split_gp,
   bool verbose,
   matrix<double> &sigma0_draw_xinfo,
   matrix<double> &sigma1_draw_xinfo,
@@ -26,6 +27,7 @@ void mcmc_loop_longbet(
   longbetModel *model_trt,
   std::unique_ptr<X_struct> &x_struct_ps,
   std::unique_ptr<X_struct> &x_struct_trt,
+  std::unique_ptr<X_struct> &x_struct_gp,
   bool a_scaling,
   bool b_scaling,
   bool split_time_ps,

@@ -281,6 +281,10 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
     std::vector<double> initial_theta_trt(1, 0);
     std::unique_ptr<X_struct> x_struct_trt(new X_struct(Xpointer_tau, ypointer, tpointer_tau, Spointer, s_values, N, p_y, Xorder_tau_std, torder_tau_std, Sorder_std, p_categorical_trt, p_continuous_trt, &initial_theta_trt, num_trees_trt, sig_knl, lambda_knl));
 
+    // Temp structure when t used in treatment function differs from the GP function
+    std::vector<double> initial_theta_gp(1, 0);
+    std::unique_ptr<X_struct> x_struct_gp(new X_struct(Xpointer_tau, ypointer, tpointer_tau, Spointer, s_values, N, p_y, Xorder_tau_std, torder_tau_std, Sorder_std, p_categorical_trt, p_continuous_trt, &initial_theta_trt, num_trees_trt, sig_knl, lambda_knl));
+
     size_t t_size = state->beta_size;
     matrix<double> resid_info;
     ini_matrix(resid_info, t_size, num_sweeps);
@@ -296,12 +300,13 @@ Rcpp::List longbet_cpp(arma::mat y, arma::mat X, arma::mat X_tau, arma::mat z,
 
     std::unique_ptr<split_info> split_pr(new split_info(x_struct_pr, Xorder_std, Torder_std, t_values));
     std::unique_ptr<split_info> split_trt(new split_info(x_struct_trt, Xorder_tau_std, Sorder_std, s_values));
+    std::unique_ptr<split_info> split_gp(new split_info(x_struct_gp, Xorder_tau_std, Sorder_std, s_values));
 
     // cout << "mcmc loop" << endl;
     // mcmc_loop returns tauhat [N x sweeps] matrix
-    mcmc_loop_longbet(split_pr, split_trt, verbose, 
+    mcmc_loop_longbet(split_pr, split_trt, split_gp, verbose, 
         sigma0_draw_xinfo, sigma1_draw_xinfo, b_xinfo, a_xinfo, beta_info, beta_xinfo, *trees_pr, *trees_trt, no_split_penality,
-        state, model_pr, model_trt, x_struct_pr, x_struct_trt, a_scaling, b_scaling, split_time_ps, split_time_trt, 
+        state, model_pr, model_trt, x_struct_pr, x_struct_trt, x_struct_gp, a_scaling, b_scaling, split_time_ps, split_time_trt, 
         resid_info, A_diag_info, Sig_diag_info);
 
     // predict tauhats and muhats

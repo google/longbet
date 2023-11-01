@@ -5,9 +5,14 @@ library(ggplot2)
 library(tidyr)
 library(longbet)
 library(forecast)
+
+# Primary hyper-parameters of interest:
+split_time_trt = TRUE
+
+# early_bird_effect <- c(1.2, 1.2, 1, 1, 0.9, 0.9, 0.8, 0.8)
+early_bird_effect <- rep(1, 8)
+
 # DATA GENERATION PROCESS -------------------------------------------------
-
-
 set.seed(1)
 n <- 2000
 t0 <- 6 # treatment start time
@@ -63,7 +68,7 @@ plot(1:t1, colMeans(z_mat), main = "Treated ratio over time", ylab = "Treated ra
 trt_time <- t(apply(z_mat, 1, cumsum))
 
 
-early_bird_effect <- c(1.2, 1.2, 1, 1, 0.9, 0.9, 0.8, 0.8)
+# early_bird_effect <- c(1.2, 1.2, 1, 1, 0.9, 0.9, 0.8, 0.8)
 get_treatment_effect <- function(ground_truth, trt_time){
   trt_effect <- rep(0, length(trt_time))
   eb_effect <- early_bird_effect[sum(trt_time == 0) - t0 + 2]
@@ -140,11 +145,13 @@ t_longbet <- proc.time()
 longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
                        num_sweeps = 60,
                        num_trees_pr =  20, num_trees_trt = 20,
-                       pcat = ncol(xtrain) - 3)
+                       pcat = ncol(xtrain) - 3,
+                       split_time_trt = split_time_trt)
 
 longbet.pred <- predict.longbet(longbet.fit, x, ztrain)
 longbet.att <- get_att(longbet.pred, alpha = 0.05)
-longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
+longbet.catt <- get_catt(longbet.pred, alpha = 0.05)
+t_longbet <- proc.time() - t_longbet
 
 #TODO estimate CATT
 # post_trt_time <- t(apply(ztrain, 1, get_post_trt_time, t = 1:t1))
@@ -157,7 +164,7 @@ for (i in 1:n){
   if (sum(ztrain[i,]) == 0) {next}
   post_t <- 1:sum(ztrain[i,])
   align_te[i, post_t] = te[i, ztrain[i,] == 1]
-  align_catt[i, post_t] = longbet.cate$cate[i, ztrain[i,] == 1]
+  align_catt[i, post_t] = longbet.catt$catt[i, ztrain[i,] == 1]
 } 
 
 att <- colMeans(align_te, na.rm = T)

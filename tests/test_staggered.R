@@ -9,8 +9,8 @@ library(forecast)
 # Primary hyper-parameters of interest:
 split_time_trt = TRUE
 
-# early_bird_effect <- c(1.2, 1.2, 1, 1, 0.9, 0.9, 0.8, 0.8)
-early_bird_effect <- rep(1, 8)
+early_bird_effect <- c(1.2, 1.2, 1, 1, 0.9, 0.9, 0.8, 0.8)
+# early_bird_effect <- rep(1, 8)
 
 # DATA GENERATION PROCESS -------------------------------------------------
 set.seed(1)
@@ -137,18 +137,18 @@ plot(gg_trt_effect)
 # get training data
 ytrain <- y[, 1:t1]
 ztrain <- z_mat
-xtrain <- x
-
+xcon <- x
+xmod <- cbind(x, trt_time)
 
 # longbet -----------------------------------------------------------------
 t_longbet <- proc.time()
-longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = 1:t1,
+longbet.fit <- longbet(y = ytrain, x = xcon, x_trt = xmod, z = ztrain, t = 1:t1,
                        num_sweeps = 60,
                        num_trees_pr =  20, num_trees_trt = 20,
-                       pcat = ncol(xtrain) - 3,
+                       pcat = ncol(xcon) - 3,
                        split_time_trt = split_time_trt)
 
-longbet.pred <- predict.longbet(longbet.fit, x, ztrain)
+longbet.pred <- predict.longbet(longbet.fit, xcon, xmod, ztrain)
 longbet.att <- get_att(longbet.pred, alpha = 0.05)
 longbet.catt <- get_catt(longbet.pred, alpha = 0.05)
 t_longbet <- proc.time() - t_longbet

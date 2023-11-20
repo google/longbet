@@ -123,6 +123,7 @@ get_att <- function(object, alpha = 0.05, ...){
     }
     # att_full <- apply(object$tauhats[z,,], c(2, 3), mean)
 
+    n <- dim(object$tauhats)[1]
     treatment_period <- nrow(object$beta_values) - 1
     num_sweeps <- dim(object$tauhats)[3]
 

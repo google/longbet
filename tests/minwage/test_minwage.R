@@ -25,75 +25,6 @@ longbet_att <- data.frame(
   upper = numeric(),
   lower = numeric()
 )
-# for (year in gp_year){
-#   data <- mpdta[(mpdta$first.treat == 0) | (mpdta$first.treat == year), ]
-#   data$treat[data$first.treat > data$year] = 0
-#   
-#   t0 <- max(data$first.treat) - 2003 + 1 
-#   t1 <- length(unique(data$year))
-#   ttrain <- unique(data$year)
-#   ttreated <- ttrain[t0:t1]
-#   
-#   xtrain <- data[, c("countyreal", "lpop")] %>% 
-#     group_by(countyreal) %>%
-#     summarise(lpop = mean(lpop))
-#   
-#   ytrain <- data[, c("year", "lemp", "countyreal")] %>%
-#     spread(key = "year", value = "lemp")
-#   
-#   ztrain <- data[, c("year", "treat", "countyreal")] %>%
-#     spread(key = "year", value = "treat")
-#   
-#   # check x, y, z id are correct
-#   all(xtrain$countyreal == ytrain$countyreal)
-#   all(xtrain$countyreal == ztrain$countyreal)
-#   countyreal <- xtrain$countyreal
-#   xtrain$countyreal <- NULL
-#   ytrain$countyreal <- NULL
-#   ztrain$countyreal <- NULL
-#   
-#   xtrain <- as.matrix(xtrain)
-#   ytrain <- as.matrix(ytrain)
-#   ztrain <- as.matrix(ztrain)
-#   
-#   t_longbet <- proc.time()
-#   longbet.fit <- longbet(y = ytrain, x = xtrain, z = ztrain, t = ttrain,
-#                          num_sweeps = 100,
-#                          num_trees_pr =  20, num_trees_trt = 20,
-#                          pcat = 0,  sig_knl = 1, lambda_knl = 1)
-#   # TODO: lambda_knl is quite sensitve, need better understanding
-#   if (t1 > t0){
-#   sigma_knl = mean( sqrt( apply(longbet.fit$beta_draws[t0:t1,], 2, var) ))
-#   } else {
-#     sigma_knl = 1
-#   }
-#   lambda_knl = 1
-#   
-#   longbet.pred <- predict.longbet(longbet.fit, xtrain, ztrain, sigma = sigma_knl, lambda = lambda_knl)
-#   t_longbet <- proc.time() - t_longbet
-#   
-#   treated <- ztrain[,ncol(ztrain)]
-#   att_longbet_fit <- apply(longbet.pred$tauhats[treated,,], c(2, 3), mean)[t0:t1, ]
-#   if (t1 > t0){
-#     att_df <- data.frame(
-#       group = rep(year, length(ttreated)),
-#       t = ttreated,
-#       att = att_longbet_fit %>% rowMeans,
-#       upper = apply(att_longbet_fit, 1, quantile, probs = 1 - alpha / 2),
-#       lower = apply(att_longbet_fit, 1, quantile, probs = alpha / 2)
-#     )
-#   } else {
-#     att_df <- data.frame(
-#       group = rep(year, length(ttreated)),
-#       t = ttreated,
-#       att = att_longbet_fit %>% mean,
-#       upper = quantile(att_longbet_fit, probs = 1 - alpha / 2),
-#       lower = quantile(att_longbet_fit, probs = alpha / 2)
-#     )
-#   }
-#   longbet_att <- rbind(longbet_att, att_df)
-# }
-
 
 # longbet staggered adoption ----------------------------------------------
 data <- mpdta %>%  spread(key = "year", value = "lemp")
@@ -118,14 +49,18 @@ fit.ps <- XBART.multinomial(y = matrix(yclass), num_class = 4, X = xtrain,
 ps.hat <- predict.XBARTmultinomial(fit.ps, xtrain)
 xtrain <- cbind(ps.hat$prob[,2:4], xtrain)
 
-longbet.fit <- longbet(y = ytrain, x = xtrain, x_trt = xtrain, z = ztrain, t = 1:ncol(ztrain),
-                       num_sweeps = 100, num_burnin = 20, 
-                       num_trees_pr =  50, num_trees_trt = 50,
-                       pcat = 0, lambda_knl = 1)
+# add group in treatment covariates
+x_trt <- cbind(xtrain, data$first.treat)
 
-longbet.pred <- predict.longbet(longbet.fit, xtrain, xtrain, ztrain)
+longbet.fit <- longbet(y = ytrain, x = xtrain, x_trt = x_trt, z = ztrain, t = 1:ncol(ztrain),
+                       num_sweeps = 200, num_burnin = 80, 
+                       num_trees_pr =  20, num_trees_trt = 10,
+                       pcat = 0, lambda_knl = 1,
+                       split_time_ps = T, split_time_trt = T)
+
+longbet.pred <- predict.longbet(longbet.fit, xtrain, x_trt, ztrain)
 longbet.att <- get_att(longbet.pred, alpha = 0.05)
-longbet.cate <- get_cate(longbet.pred, alpha = 0.05)
+longbet.catt <- get_catt(longbet.pred, alpha = 0.05)
 
 # reshape tauhats to get att credible interval per group
 n <- dim(longbet.pred$tauhats)[1]
@@ -174,7 +109,6 @@ did_att$lower <- did_att$att - k * did_att$se
 did_att$se <- NULL
 
 # visualization -----------------------------------------------------------
-
 require(ggplot2)
 # Plot ggdid with longbet results
 # longbet_att$method <- rep("LongBet", nrow(longbet_att))
@@ -191,7 +125,7 @@ att_plot <- rbind(did_att, staggered_att) %>% #longbet_att
   labs(y = "ATT")
 plot(att_plot)
 
-# Plot estimated muhat and tauhat of each group, compare to ground truth
+# Plot estimated muhat and tauhat of each group, compare to groun --------
 muhat <- longbet.pred$muhats %>% apply(MARGIN = c(1, 2), mean) %>% data.frame
 tauhat <- longbet.pred$tauhats %>% apply(MARGIN = c(1, 2), mean) %>% data.frame
 yhat <- muhat + tauhat
@@ -229,8 +163,7 @@ yhat_plot <- rbind(ground_truth, mu_df, yhat_df) %>%
   facet_wrap(~group)
 plot(yhat_plot)
 
-
-# check counfoundings by varifying impute accuracy on y0_hat
+# check counfoundings by varifying impute accuracy on y0_hat --------------
 y0_hat <- longbet.pred$muhats %>% apply(MARGIN = c(1, 2), mean) %>% data.frame
 for (gp in 0:3){
   gp_z <- ztrain[yclass == gp, ]
@@ -238,4 +171,75 @@ for (gp in 0:3){
   print(paste0("Group ", gp, " RMSE for y0 = ", round(rmse, 3), sep =""))
 }
 
+# check observed confoundings explain the observed outcomes ---------------
+check_df <- data.frame(x_trt)
+check_df$group <- data$treat %>% as.factor()
+check_df$lemp <- ytrain[,1]
 
+check_lpop <- check_df %>% 
+  ggplot(aes(x = lpop, y = lemp, group = group, color = group)) +
+  geom_point()
+
+check_income <- check_df %>% 
+  ggplot(aes(x = income, y = lemp, group = group, color = group)) +
+  geom_point()
+
+combined_check <- gridExtra::grid.arrange(check_lpop, check_income, ncol = 2)  # You can specify the layout
+print(combined_check)
+
+
+# check att per sweep -----------------------------------------------------
+att_sweeps <- 
+  tauhats %>% 
+  filter(group != 0) %>%
+  gather(key = "t", value = "catt", -group, -sweeps) %>%
+  group_by(group, t, sweeps) %>%
+  summarise(catt = mean(catt)) %>%
+  ungroup() %>%
+  filter(t >= group)
+
+sweeps_plt <- att_sweeps %>%
+  ggplot(aes(x = sweeps, y = catt)) +
+  geom_point() + geom_line() +
+  facet_wrap(~group + t, nrow = 2)
+plot(sweeps_plt)
+
+# conditional treatment effect --------------------------------------------
+# feed treatment effect in a CART tree
+# for simplicity feed the the treatment effect in 2007
+library(rpart)
+library(rpart.plot)
+tree.x <- data.frame(
+  lpop = data$lpop,
+  income = data$income,
+  tauhat = longbet.catt$catt[,5]
+)
+fit.tree <- rpart(tauhat ~ ., data=tree.x, cp=0.008)
+rpart.plot(fit.tree)
+
+library(partykit)
+tree_party <- as.party(fit.tree) #coercing the rpart.object into partykit
+tree_fit <- fitted(tree_party) #a two-column data.frame with the fitted node numbers and the observed responses on the training data.
+subgroups <- predict(tree_party, newdata = tree.x, type = "node")
+
+tauhats$subgroups <- rep(subgroups, num_sweeps)
+
+catt <- 
+  tauhats %>% 
+  filter(group != 0) %>%
+  gather(key = "t", value = "catt", -group, -sweeps, -subgroups) %>%
+  group_by(group, t, sweeps, subgroups) %>%
+  summarise(catt = mean(catt)) %>%
+  ungroup() %>%
+  group_by(group, t, subgroups) %>%
+  summarise(att = mean(catt), upper = quantile(catt, 0.975), lower = quantile(catt, 0.025)) %>%
+  filter(t >= group)
+
+catt_plot <- catt %>%
+  ggplot(aes(x = t, y = att)) +
+  geom_point(position = position_dodge(.3)) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = .2,  position = position_dodge(.3)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+  facet_wrap(~group + subgroups, nrow = 3) +
+  labs(y = "CATT")
+plot(catt_plot)

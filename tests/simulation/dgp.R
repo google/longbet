@@ -16,7 +16,9 @@ require(forecast)
 # y0: potential outcomes 
 # tau: treatment effect
 
-dgp <- function(n, t0 = 6, t1 = 12, t2 = NULL, pr_type = "non-parallel", trt_type = "heterogeneous"){
+dgp <- function(n, t0 = 6, t1 = 12, t2 = NULL, 
+                pr_type = "non-parallel", trt_type = "heterogeneous",
+                staggered_effect = NULL){
   # t2: Extended period for prediction
   
   # screening
@@ -82,12 +84,23 @@ dgp <- function(n, t0 = 6, t1 = 12, t2 = NULL, pr_type = "non-parallel", trt_typ
   # get post treatment time matrix
   post_t <- t(apply(z, 1, cumsum))
   
-  get_tau <- function(trt, post_t){
-    tau <- rep(0, length(post_t))
-    tau[post_t > 0] = trt[post_t[post_t > 0]]
-    return(tau)
+  # add staggered effect
+  if (is.null(staggered_effect)){
+    staggered_effect <- rep(1, t2 - t0 + 1)
+  } else {
+    # check staggered effect size
+    if (length(staggered_effect) < t1 - t0 + 1){
+      print("Staggered effect should have length equal or greater than t1 - t0")
+      stop()
+    }
   }
-  tau <- t(mapply(get_tau, data.frame(t(tau)), data.frame(t(post_t))))
+  get_treatment_effect <- function(ground_truth, trt_time){
+    trt_effect <- rep(0, length(trt_time))
+    eb_effect <- staggered_effect[sum(trt_time == 0) - t0 + 2]
+    trt_effect[trt_time > 0] = ground_truth[trt_time[trt_time > 0]] * eb_effect
+    return(trt_effect)
+  }
+  tau <- t(mapply(get_treatment_effect, data.frame(t(tau)), data.frame(t(post_t))))
   results$tau <- tau
   
   # generate outcome variable

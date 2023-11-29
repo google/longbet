@@ -18,12 +18,14 @@ alpha <- 0.05
 source('dgp.R')
 pr_type = "non-parallel"
 trt_type = "homogeneous"
-data <- dgp(n, t0, t1, t2, pr_type = pr_type, trt_type = trt_type)
+staggered_effect <- c(1.2, 1.2, 1, 0.9, 0.8, 0.8)
+data <- dgp(n, t0, t1, t2, pr_type = pr_type, trt_type = trt_type, staggered_effect = staggered_effect)
 
 # get training data
 ytrain <- data$y[, 1:t1]
 ztrain <- data$z[, 1:t1]
 xtrain <- data$x
+xmod <- cbind(xtrain, cohort) # covariates for treatment arm
 
 ypred <- data$y[, 1:t2]
 zpred <- data$z[, 1:t2]
@@ -34,12 +36,12 @@ cohort.att <- getCohortAtt(data$tau[,t0:t2], cohort)
 
 # longbet -----------------------------------------------------------------
 longbet.time <- proc.time()
-longbet.fit <- longbet(y = ytrain, x = xtrain, x_trt = xtrain, z = ztrain, t = 1:t1,
+longbet.fit <- longbet(y = ytrain, x = xtrain, x_trt = xmod, z = ztrain, t = 1:t1,
                        num_sweeps = 100,
-                       num_trees_pr =  20, num_trees_trt = 20,
+                       num_trees_pr =  40, num_trees_trt = 40,
                        pcat = ncol(xtrain) - 3)
 
-longbet.ext <- predict.longbet(longbet.fit, xtrain, xtrain, zpred)
+longbet.ext <- predict.longbet(longbet.fit, xtrain, xmod, zpred)
 longbet.time <- proc.time() - longbet.time
 
 # get ATT by cohort
@@ -80,7 +82,7 @@ cohort.att.plot <- cohort.att.combined %>%
   geom_line(aes(y = LongBet, color = "LongBet")) +  # Map color to legend
   geom_ribbon(aes(ymin = Lower, ymax = Upper, fill = "LongBet"), alpha = 0.15, fill = colors[2]) +
   geom_vline(xintercept = t1, linetype = "dashed", color = "grey") +
-  labs(x = "Time", y = "ATT", color = "Legend") +
+  labs(x = "Time", y = "ATT per cohort", color = "Legend") +
   scale_color_manual(
     values = c("True" = colors[1], "LongBet" = colors[2])
   ) +

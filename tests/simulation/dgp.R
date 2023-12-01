@@ -125,19 +125,34 @@ getCohort <- function(z){
 getAttHat <- function(tauhat){
   # tauhat: tauhats from longbet prediction, n by t by sweeps
   # return: return estimated att across time
-  att.hat <- apply(tauhat, 2, mean)
+  att.hat <- apply(tauhat, c(2, 3), mean) %>% rowMeans
   return(att.hat)
 }
 
 getAttCI <- function(tauhat, alpha = 0.05){
   # tauhat: tauhats from longbet prediction, n by t by sweeps
-  # return: return credible intervals across time
-  lower <- apply(tauhat, 2, quantile, probs = alpha/2)
-  upper <- apply(tauhat, 2, quantile, probs = 1 - alpha/2)
+  # return: return credible intervals across 
+  att.hats <- apply(tauhat, c(2, 3), mean)
+  lower <- apply(att.hats, 1, quantile, probs = alpha/2)
+  upper <- apply(att.hats, 1, quantile, probs = 1 - alpha/2)
   return(list(lower = lower, upper = upper))
 }
 
 getCohortAtt <- function(tau, cohort){
+  # return dataframe of ATT for each group at each time
+  tau.df <- data.frame(tau)
+  tau.df$cohort <- cohort
+  df <- tau.df %>% 
+    group_by(cohort) %>%
+    summarize(across(starts_with("X"), mean)) %>%
+    gather(key = "Time", value = "ATT", -cohort) %>%
+    mutate(Time = as.numeric(gsub("X", "", Time))) %>% 
+    filter(cohort != 0) %>%
+    filter(Time >= cohort)
+  return(df)
+}
+
+getCohortAttBackup <- function(tau, cohort){
   # return dataframe of ATT for each group at each time
   tau.df <- data.frame(tau)
   tau.df$cohort <- cohort
@@ -157,10 +172,81 @@ getCohortAttHat <- function(tauhat, cohort){
   for (i in 1:length(unique.cohort)){
     df[i,2:ncol(df)] <- getAttHat(tauhat[cohort == unique.cohort[i],,])
   }
+  mutate_df <-  df %>%
+    gather(key = "Time", value = "True", -cohort) %>%
+    mutate(Time = as.numeric(gsub("X", "", Time))) %>% 
+    filter(cohort != 0) %>%
+    filter(Time >= cohort)
+  return(mutate_df)
+}
+
+getCohortAttHatBackup <- function(tauhat, cohort){
+  # tauhat: tauhats from longbet prediction, n by t by sweeps
+  # cohort: a vector of length n indicating group for each unit
+  # return: dataframe of ATT for each group at each time
+  
+  unique.cohort <- sort(unique(cohort))
+  df <- data.frame(cohort = unique.cohort, matrix(NA, nrow = length(unique.cohort), ncol = dim(tauhat)[2]))
+  for (i in 1:length(unique.cohort)){
+    df[i,2:ncol(df)] <- getAttHat(tauhat[cohort == unique.cohort[i],,])
+  }
   return(df)
 }
 
-getCohortAttCI <- function(tauhat, cohort, alpha = 0.05){
+getCohortAttLongBet<- function(tauhat, cohort, alpha = 0.05){
+  # tauhat: tauhats from longbet prediction, n by t by sweeps
+  # cohort: a vector of length n indicating group for each unit
+  # return: list of dataframe of credible intervals for each group at each time
+  
+  unique.cohort <- sort(unique(cohort))
+  estimate <- data.frame(cohort = unique.cohort, matrix(NA, nrow = length(unique.cohort), ncol = dim(tauhat)[2]))
+  lower <- data.frame(cohort = unique.cohort, matrix(NA, nrow = length(unique.cohort), ncol = dim(tauhat)[2]))
+  upper <- data.frame(cohort = unique.cohort, matrix(NA, nrow = length(unique.cohort), ncol = dim(tauhat)[2]))
+  for (i in 1:length(unique.cohort)){
+    estimate[i,2:ncol(estimate)] <- getAttHat(tauhat[cohort == unique.cohort[i],,])
+    
+    CI <- getAttCI(tauhat[cohort == unique.cohort[i],,], alpha)
+    lower[i,2:ncol(lower)] <- CI$lower
+    upper[i,2:ncol(upper)] <- CI$upper
+  }
+  df <-  estimate %>%
+    gather(key = "Time", value = "ATT", -cohort) %>%
+    mutate(Time = as.numeric(gsub("X", "", Time))) %>% 
+    left_join(lower %>%
+                gather(key = "Time", value = "conf.low", -cohort) %>%
+                mutate(Time = as.numeric(gsub("X", "", Time))),
+              by = c("cohort", "Time")) %>%
+    left_join(upper %>%
+                gather(key = "Time", value = "conf.high", -cohort) %>%
+                mutate(Time = as.numeric(gsub("X", "", Time))),
+              by = c("cohort", "Time")) %>%
+    filter(cohort != 0) %>%
+    filter(Time >= cohort) 
+  return(df)
+}
+
+
+getCohortAttDiD <- function(did, cohort.att, alpha, t0 = 1){
+  # cohort.att: take reference for which cohort is of interest
+  
+  # adjust did cohort and time
+  did$group <- did$group - t0 + 1
+  did$t <- did$t - t0 + 1
+  did.df <- data.frame(cohort = did$group, Time = did$t, ATT = did$att, SE = did$se)
+  
+  # merge
+  cohort.att$ATT <- NULL
+  df <- merge(cohort.att, did.df, by = c("cohort", "Time"), how = "left")
+  
+  # get 95% simultaneous confidence band
+  df$conf.low <- df$ATT +  df$SE * qnorm(alpha / 2 / nrow(df))
+  df$conf.high <- df$ATT +  df$SE * qnorm(1 - alpha / 2 / nrow(df))
+  df$SE <- NULL
+  return(df)
+}
+
+
+getCohortAttCIBackup <- function(tauhat, cohort, alpha = 0.05){
   # tauhat: tauhats from longbet prediction, n by t by sweeps
   # cohort: a vector of length n indicating group for each unit
   # return: list of dataframe of credible intervals for each group at each time
@@ -239,7 +325,32 @@ att.metric <- function(att, estimate){
   return(metrics)
 }
 
-catt.metric <- function(align_catt, estimate, conf.low, conf.high){
+cohort.att.metric <- function(att, estimate){
+  # check estimate has the right form
+  if (!is.data.frame(estimate)){
+    stop("Estimate needs to be a data frame")
+  }
+  if (!all(c("cohort", "Time", "ATT", "conf.low", "conf.high")%in% colnames(estimate))){
+    stop(cat("Estimate table must have the following columns: ", c("cohort", "Time", "ATT", "conf.low", "conf.high")))
+  }
+  # merge and check
+  df <- merge(att, estimate, by = c("cohort", "Time"), suffixes = c(".true", ".est"), how = "left")
+  
+  if (any(is.null(df[, c("ATT.est", "conf.low", "conf.high")]))){
+    print("estimate table is not complete")
+    stop()
+  }
+  
+  metrics <- c()
+  metrics['RMSE'] <- sqrt(mean( (df$ATT.true - df$ATT.est)^2 ))
+  metrics['Bias'] <- mean(abs(df$ATT.true - df$ATT.est))
+  metrics['Coverage'] <- mean( (df$ATT.true >= df$conf.low) & (df$ATT.true <= df$conf.high))
+  metrics['Cover0'] <-  mean( (0 >= df$conf.low) & (0 <= df$conf.high))
+  metrics['I.L'] <- mean(df$conf.high - df$conf.low)
+  return(metrics)
+}
+
+catt.metric.aligned <- function(align_catt, estimate, conf.low, conf.high){
   # check dimensions
   if (any(dim(align_catt) != dim(estimate))){
     stop("Dimension of estimate does not match aligned catt")
@@ -256,6 +367,33 @@ catt.metric <- function(align_catt, estimate, conf.low, conf.high){
   metrics['Coverage'] <- mean( (align_catt >= conf.low) & (align_tau <= conf.high), na.rm = T )
   metrics['Cover0'] <-  mean( (0 >= conf.low) & (0 <= conf.high), na.rm = T)
   metrics['I.L'] <- mean(conf.high - conf.low, na.rm = T)
+  return(metrics)
+}
+
+catt.metric.longbet <- function(tau, tauhats, z, alpha = 0.05){
+  # z: treatment metric, only measure treatment effect when treatment is assigned
+  
+  # check dimension
+  if (any(dim(tau) != dim(tauhats)[1:2])){
+    print("Dimensions of tau and tauhats do not match")
+    stop()
+  }
+  if(any(dim(tau) != dim(z))){
+    print(" Dimensions of tau and z do not match")
+    stop()
+  }
+  
+  treated <- z==1
+  estimate <- apply(tauhats, c(1, 2), mean)
+  conf.low <- apply(tauhats, c(1, 2), quantile, probs = alpha/2)
+  conf.high <- apply(tauhats, c(1, 2), quantile, probs = 1 - alpha/2)
+  
+  metrics <- c()
+  metrics['RMSE'] <- sqrt(mean((tau[treated] - estimate[treated])^2, na.rm = T))
+  metrics['Bias'] <- mean( abs( tau[treated] - estimate[treated] ), na.rm = T)
+  metrics['Coverage'] <- mean( (tau[treated] >= conf.low[treated]) & (tau[treated] <= conf.high[treated]), na.rm = T )
+  metrics['Cover0'] <-  mean( (0 >= conf.low[treated]) & (0 <= conf.high[treated]), na.rm = T)
+  metrics['I.L'] <- mean(conf.high[treated] - conf.low[treated], na.rm = T)
   return(metrics)
 }
 

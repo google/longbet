@@ -328,7 +328,7 @@ summary <- merge(att.summary, catt.summary, by = c('pr', 'trt', 'method'),
   arrange(
     factor(pr, levels = c("parallel", 'non-parallel')),
     factor(trt, levels = c("homogeneous", "heterogeneous")),
-    factor(method, levels = c("LongBet", "DiD", "Non-linear DiD"))) %>%
+    factor(method, levels = c("LongBet", "DiD", "Non-linear DiD", "DiD Imputation", "DiD Imputation Cov"))) %>%
   relocate(Time, .after = last_col()) %>%
   mutate(across(where(is.numeric), ~ round(., 3)))
 print(summary)

@@ -25,14 +25,13 @@ data <- dgp(n, t0, t1, t2, pr_type = pr_type, trt_type = trt_type, staggered_eff
 ytrain <- data$y[, 1:t1]
 ztrain <- data$z[, 1:t1]
 xtrain <- data$x
-xmod <- cbind(xtrain, cohort) # covariates for treatment arm
 
 ypred <- data$y[, 1:t2]
 zpred <- data$z[, 1:t2]
 
 cohort <- getCohort(zpred) # get treatment group
 cohort.att <- getCohortAtt(data$tau[,t0:t2], cohort)
-
+xmod <- cbind(xtrain, cohort) # covariates for treatment arm
 
 # longbet -----------------------------------------------------------------
 longbet.time <- proc.time()

@@ -32,7 +32,7 @@ ztrain <- data$z
 xtrain <- data$x
 
 cohort <- getCohort(ztrain)
-xmod <- cbind(xtrain, cohort)
+xmod <- cbind(cohort, xtrain)
 # xmod <- xtrain
 
 # get att by cohort
@@ -79,7 +79,7 @@ longbet.time <- proc.time()
 longbet.fit <- longbet(y = ytrain, x = xtrain, x_trt = xmod, z = ztrain, t = 1:t1,
                        num_sweeps = 100,
                        num_trees_pr =  50, num_trees_trt = 50,
-                       pcat = ncol(xtrain) - 3, pcat_trt = ncol(xmod) - 3)
+                       pcat = 2, pcat_trt = 2)
 
 longbet.pred <- predict.longbet(longbet.fit, xtrain, xmod, ztrain)
 longbet.att.cohort <- getCohortAttLongBet(longbet.pred$tauhats[, t0:t1, ], cohort, alpha = alpha / nrow(cohort.att))

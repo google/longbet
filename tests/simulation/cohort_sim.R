@@ -79,7 +79,7 @@ for (pr in pr_types){
       ztrain <- data$z
       
       cohort <- getCohort(ztrain)
-      xmod <- cbind(xtrain, cohort)
+      xmod <- cbind(cohort, xtrain)
       # get att by cohort
       cohort.att <- getCohortAtt(data$tau[,t0:t1], cohort)
       
@@ -105,7 +105,7 @@ for (pr in pr_types){
       longbet.time <- proc.time()
       longbet.fit <- longbet(y = ytrain, x = xtrain, x_trt = xmod, z = ztrain, t = 1:t1,
                              num_sweeps = 100, num_trees_pr =  50, num_trees_trt = 50,
-                             pcat = pcat)
+                             pcat = pcat, pcat_trt = pcat)
       
       longbet.pred <- predict.longbet(longbet.fit, xtrain, xmod, ztrain)
       longbet.att.cohort <- getCohortAttLongBet(longbet.pred$tauhats[, t0:t1, ], cohort, alpha = alpha / nrow(cohort.att))

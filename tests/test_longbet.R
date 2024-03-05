@@ -84,61 +84,32 @@ expand_z_mat <- cbind(matrix(0, n, (t0 - 1)), z_mat)
 t_longbet <- proc.time()
 longbet.fit <- longbet(y = y, x = x, x_trt = x, z = expand_z_mat, t = 1:t1,
                        num_trees_pr =  50, num_trees_trt = 50 ,
+                       num_sweeps = 100, num_burnin = 20,
                        pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
+# longbet.fit <- longbet(y = y, x = x, z = expand_z_mat, t = 1:t1,
+#                        num_trees_pr =  2, num_trees_trt = 2 ,
+#                        num_sweeps = 3, num_burnin = 1,
+#                        pcat = ncol(x) - 3,  sig_knl = 1, lambda_knl = 1)
 # TODO: lambda_knl is quite sensitve, need better understanding
 
 # assume all unit get treated at t0 for test set to get CATE
 z_test <- c(rep(0, t0 - 1), rep(1, t1 - t0 + 1)) %>% rep(times = n) %>%  matrix(nrow = t1, ncol = n) %>% t
 
 longbet.pred <- predict.longbet(longbet.fit, x, x, z_test)
+# longbet.pred <- predict.longbet(longbet.fit, x, 1:t1)
 mu_hat_longbet <- apply(longbet.pred$muhats, c(1, 2), mean)
 tau_hat_longbet <- apply(longbet.pred$tauhats, c(1, 2), mean)
 tau_longbet <- tau_hat_longbet[,t0:t1]
 t_longbet <- proc.time() - t_longbet
 
-print(paste0("longbet CATE RMSE: ", sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2))))
-print(paste0("longbet CATT RMSE: ", sqrt(mean((as.vector(tau_longbet[z == 1, ]) - as.vector(tau_mat[z==1,]))^2))))
-print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
-
-# bart --------------------------------------------------------------------
-xtr <- cbind(z_vec, x_bart)
-xte <- cbind(1 - z_vec, x_bart)
-ytr <- y_vec
-
-t_bart = proc.time()
-ce_bart <- list()
-bartps<-bart(x.train = xtr, y.train = ytr, x.test = xte)
-ppd_test<-t(apply(bartps$yhat.test,1,function(x) rnorm(n=length(x),mean=x,sd=bartps$sigma)))
-ppd_test_mean<-apply(ppd_test,2,mean)
-
-## individual causal effects ##
-ce_bart$ite<-rep(NA,length(ytr))
-ce_bart$ite[which(xtr[,1]==1)] <- ytr[which(xtr[,1]==1)] - ppd_test_mean[which(xtr[,1]==1)]
-ce_bart$ite[which(xtr[,1]==0)] <- ppd_test_mean[which(xtr[,1]==0)] - ytr[which(xtr[,1]==0)]
-tau_bart <- matrix(ce_bart$ite, n, t1)[,t0:t1]
-
-ce_bart$itu<-apply(ppd_test,2,quantile,probs=0.975)
-ce_bart$itl<-apply(ppd_test,2,quantile,probs=0.025)
-
-## average causal effects ##
-ce_bart$ate <- mean(ce_bart$ite)
-t_bart = proc.time() - t_bart
-
-
-
 # results -----------------------------------------------------------------
 # check ate
 ate <- tau_mat %>% colMeans
-ate_bart <- tau_bart %>% colMeans
 ate_longbet <- tau_longbet %>% colMeans
 
 print(paste0("longbet CATE RMSE: ", round( sqrt(mean((as.vector(tau_longbet) - as.vector(tau_mat))^2)), 2 ) ))
 print(paste0("longbet ate rmse: ", round( sqrt(mean((ate_longbet - ate)^2)), 2)))
 print(paste0("longbet runtime: ", round(as.list(t_longbet)$elapsed,2)," seconds"))
-
-print(paste0("bart CATE RMSE: ", round( sqrt(mean((tau_bart - tau_mat)^2)), 2)))
-print(paste0("BART ate rmse: ", round( sqrt(mean((ate_bart - ate)^2)), 2)))
-print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
 
 
 # # visualize ---------------------------------------------------------------
@@ -146,7 +117,6 @@ print(paste0("bart runtime: ", round(as.list(t_bart)$elapsed,2)," seconds"))
 ate_df <- data.frame(
   time = t0:t1,
   true = ate,
-  bart = ate_bart,
   longbet = ate_longbet
 )
 
@@ -161,7 +131,6 @@ ate_df %>%
 cate_df <- data.frame(
   true = as.vector(t(tau_mat)),
   lonbet = as.vector(t(tau_longbet)),
-  bart = as.vector(t(tau_bart)),
   time = rep(c(t0:t1), nrow(tau_mat)),
   id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
 )
@@ -173,20 +142,50 @@ cate_plot <-  cate_df %>%
   facet_wrap(~method)
 plot(cate_plot)
 
-# CATE error
-cate_error <- data.frame(
-  lonbet = as.vector(t(tau_longbet - tau_mat)),
-  bart = as.vector(t(tau_bart - tau_mat)),
-  time = rep(c(t0:t1), nrow(tau_mat)),
-  id = as.vector(sapply(1:nrow(tau_longbet), rep, (t1 - t0 + 1)))
-)
+# # muhat
+# y0hat <- longbet.pred$muhats %>% apply(MARGIN = c(1, 2), mean) %>% data.frame
+# y0_df <- data.frame(
+#   true = as.vector(t(mu_mat)),
+#   lonbet = as.vector(t(y0hat)),
+#   time = rep(c(1:t1), nrow(mu_mat)),
+#   id = as.vector(sapply(1:nrow(y0hat), rep, (t1)))
+# )
+# 
+# y0_plot <-  y0_df %>%
+#   gather("method", "cate", -time, -id) %>%
+#   ggplot() +
+#   geom_line(aes(time, cate, group = id, color = id)) +
+#   facet_wrap(~method)
+# plot(y0_plot)
 
-error_plot <- cate_error %>%
-  gather("method", "cate", -time, -id) %>%
-  ggplot() +
-  geom_line(aes(time, cate, group = id, color = id)) +
-  facet_wrap(~method)
-plot(error_plot)
+
+# check convergence 
+n_sweeps <- dim(longbet.pred$tauhats)[3]
+rmse <- rep(NA, n_sweeps)
+for(i in 1:n_sweeps){
+  rmse[i] <- round( sqrt(mean((as.vector(longbet.pred$tauhats[,t0:t1,i]) - as.vector(tau_mat))^2)), 2)
+}
+rmse_df <- data.frame(rmse = rmse, sweeps = 1:n_sweeps)
+rmse_trace <- rmse_df %>%
+  ggplot(aes(sweeps, rmse)) + geom_point() + geom_line()
+plot(rmse_trace)
+
+# # sigma convergence
+# sigma0 <- longbet.fit$sigma0_draws %>% as.vector
+# sigma1 <- longbet.fit$sigma1_draws %>% as.vector
+# sigma_df <- data.frame(iter = 1:length(sigma0), sigma0 = sigma0, sigma1 = sigma1)
+# sigma_trace <- sigma_df %>% gather(key = "param", value = "value", -iter) %>%
+#   ggplot(aes(iter, value, color = param)) + geom_point() + geom_line()
+# plot(sigma_trace)
+# 
+# 
+# param_df <- data.frame(iter = 1:longbet.fit$model_params$num_sweeps, 
+#                        a = as.vector(longbet.fit$a_draws),
+#                        b0 = as.vector(longbet.fit$b_draws[,1]),
+#                        b1 = as.vector(longbet.fit$b_draws[,2]))
+# param_trace <- param_df %>% gather(key = "param", value = "value", -iter) %>%
+#   ggplot(aes(iter, value, color = param)) + geom_point() + geom_line()
+# plot(param_trace)
 
 
 

@@ -23,9 +23,15 @@ public:
     std::vector<size_t> t_num_unique;
     matrix<double> cov_kernel;
 
+    std::vector<double> s_values;
+    std::vector<size_t> s_counts;
+    std::vector<size_t> s_variable_ind;
+    std::vector<size_t> s_num_unique;
+
     const double *X_std;  // pointer to original data
     const double *y_std;  // pointer to y data
     const double *t_std;  // pointer to t data
+    const double *Tpt;  // pointer to s (cumulative treatment time)
     size_t n_y;  // number of total data points in root node
     size_t p_y;
     size_t p_continuous;
@@ -34,9 +40,9 @@ public:
     size_t n_t;
     size_t p_t;
 
-    X_struct(const double *X_std, const double *y_std, const double *t_std,
+    X_struct(const double *X_std, const double *y_std, const double *t_std, const double *Tpt, std::vector<double> s_values, 
     size_t n_y, size_t p_y, std::vector<std::vector<size_t>> &Xorder_std,
-    std::vector<std::vector<size_t>> &torder_std,
+    std::vector<std::vector<size_t>> &torder_std, std::vector<std::vector<size_t>> &sorder_std,
     size_t p_categorical, size_t p_continuous,
     std::vector<double> *initial_theta, size_t num_trees,
     double &sig_knl, double &lambda_knl)
@@ -58,9 +64,12 @@ public:
 
         unique_value_count2(t_std, torder_std, t_values, t_counts, t_variable_ind, p_y, t_num_unique, t_categorical, t_continuous);
 
+
         this->X_std = X_std;
         this->y_std = y_std;
         this->t_std = t_std;
+        this->Tpt = Tpt;
+        this->s_values = s_values;
         this->n_y = n_y;
         this->p_y = p_y;
         this->p_continuous = p_continuous;
@@ -69,6 +78,8 @@ public:
         this->p_t = torder_std.size();
 
         ini_cov_kernel(sig_knl, lambda_knl);
+        // std::cout << "t_values " << t_values << endl;
+        // std::cout << "cov " << cov_kernel << endl;
     }
 
     void init_tree_pointers(std::vector<double> *initial_theta, size_t num_trees, size_t N, size_t p_y)

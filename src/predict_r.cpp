@@ -13,19 +13,17 @@
 
 using namespace arma;
 // [[Rcpp::export]]
-Rcpp::List predict(arma::mat X, arma::mat t, 
+Rcpp::List predict_longbet(arma::mat X, arma::mat t, 
                         Rcpp::XPtr<std::vector<std::vector<tree>>> tree_pnt)
 {
 
     // Process the prognostic input
     size_t N = X.n_rows;
     size_t p = X.n_cols;
-    size_t p_y = t.n_rows;
-
-    if (N * p * p_y == 0)
-    {
-        std::cout << "Wrong dimensions " << " N " << N << " p " << p << " p_y " << p_y << endl;
-        abort();
+    size_t p_y = t.n_cols;
+    
+    if (t.n_rows != N){
+        cout << "Size of t should equal to " << N << " but t.n_rows = " << t.n_rows << endl;
     }
 
     // Init X_std matrix
@@ -49,7 +47,7 @@ Rcpp::List predict(arma::mat X, arma::mat t,
         ini_matrix(pred_xinfo[i], p_y, N);
     }
 
-    longBetModel *model = new longBetModel();
+    longbetModel *model = new longbetModel();
 
     // Predict
     model->predict_std(Xpointer, tpointer, N, p_y, num_sweeps, pred_xinfo, *trees);
@@ -115,7 +113,7 @@ Rcpp::List predict_beta(arma::mat t_test, arma::mat t_train,
     cov_kernel(te_std, te_std, sig_knl, lambda_knl, Sigma_te_std);
     cov_kernel(tr_std, te_std, sig_knl, lambda_knl, Sigma_tt_std);
 
-    longBetModel *model = new longBetModel();
+    longbetModel *model = new longbetModel();
 
     // cout << "tr_size" << tr_size << endl;
 

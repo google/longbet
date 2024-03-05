@@ -17,7 +17,7 @@ using namespace arma;
 
 // adds residual to suff stats
 // called from calcSuffStat_categorical, calcSuffStat_continuous in tree.cpp
-// void longBetModel::incSuffStat(std::unique_ptr<State> &state,
+// void longbetModel::incSuffStat(std::unique_ptr<State> &state,
 // size_t index_next_obs, matrix<double> &suffstats)
 // {
 //   // TODO: reconstruct this for n*t y matrix
@@ -53,13 +53,17 @@ using namespace arma;
 //   }
 // }
 
-void longBetModel::incSuffStat(std::unique_ptr<State> &state,
+void longbetModel::incSuffStat(std::unique_ptr<State> &state,
 size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
 {
+  if (index_next_t >= state->p_y)  {
+    cout << "index_next_t = " << index_next_t << endl;
+    abort();
+  }
   double gp = *(state->z + index_next_t * state->n_y + index_next_obs);
   double resid = *(state->y_std + state->n_y * index_next_t + index_next_obs) -
   state->a * state->mu_fit[index_next_obs][index_next_t] - state->b_vec[gp] *
-  state->beta_t[index_next_t] * state->tau_fit[index_next_obs][index_next_t];
+  state->beta_fit[index_next_obs][index_next_t] * state->tau_fit[index_next_obs][index_next_t];
 
   if (state->fl == 0)  // suff stat for prognostic trees
   {
@@ -85,11 +89,11 @@ size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
     if (gp == 1)
     {
       // beta_t^2 * r / b / beta_t = beta_t * r / b
-      suffstats[1] += state->beta_t[index_next_t] * resid / state->b_vec[1];
-      suffstats[3] += pow(state->beta_t[index_next_t], 2);
+      suffstats[1] += state->beta_fit[index_next_obs][index_next_t] * resid / state->b_vec[1];
+      suffstats[3] += pow(state->beta_fit[index_next_obs][index_next_t], 2);
     } else {
-      suffstats[0] += state->beta_t[index_next_t] * resid / state->b_vec[0];
-      suffstats[2] += pow(state->beta_t[index_next_t], 2);
+      suffstats[0] += state->beta_fit[index_next_obs][index_next_t] * resid / state->b_vec[0];
+      suffstats[2] += pow(state->beta_fit[index_next_obs][index_next_t], 2);
     }
   }
 
@@ -97,7 +101,7 @@ size_t index_next_obs, size_t index_next_t, std::vector<double> &suffstats)
 
 // samples leaf parameter
 // called from GFR in tree.cpp
-void longBetModel::samplePars(std::unique_ptr<State> &state,
+void longbetModel::samplePars(std::unique_ptr<State> &state,
 std::vector<double> &suff_stat, std::vector<double> &theta_vector,
 double &prob_leaf)
 {
@@ -117,6 +121,8 @@ double &prob_leaf)
   double denominator = suff_stat[2] * s0 + suff_stat[3] * s1  + 1 / tau;
   double m1 = (suff_stat[0] * s0 + suff_stat[1] * s1) / denominator;
   double v1 = 1 / denominator;
+  // cout << "s0 = " << s0 << "; s1 = " << s1 << "; m1 = " << m1 << "; v1 = " << v1 << endl;
+  // cout << "suff0 = " << suff_stat[0] << "; suff1 = " << suff_stat[1] << "; suff2 = " << suff_stat[2] << "; suff3 = " << suff_stat[3] << "; denom = " << denominator << endl;
 
   // sample leaf parameter
   theta_vector[0] = m1 + sqrt(v1) * normal_samp(state->gen);
@@ -134,7 +140,7 @@ double &prob_leaf)
 }
 
 // updates sigmas (new)
-void longBetModel::draw_sigma(std::unique_ptr<State> &state, size_t ind)
+void longbetModel::draw_sigma(std::unique_ptr<State> &state, size_t ind)
 {
   double m1 = 0;
   double v1 = 0;
@@ -165,8 +171,8 @@ void longBetModel::draw_sigma(std::unique_ptr<State> &state, size_t ind)
 }
 
 // initializes root suffstats
-// called from mcmc_loop_longBet in mcmc_loop.cpp
-void longBetModel::initialize_root_suffstat(std::unique_ptr<State> &state,
+// called from mcmc_loop_longbet in mcmc_loop.cpp
+void longbetModel::initialize_root_suffstat(std::unique_ptr<State> &state,
 std::vector<double> &suff_stat)
 {
   // ini_matrix(suff_stat, 4, state->p_y);
@@ -187,16 +193,16 @@ std::vector<double> &suff_stat)
 // updates node suffstats for the split
 // called from split_xorder_std_continuous, split_xorder_std_categorical in tree.cpp
 // it is executed after suffstats for the node has been initialized by suff_stats_ini [defined in tree.h]
-void longBetModel::updateNodeSuffStat(std::vector<double> &suff_stat, std::unique_ptr<State> &state, matrix<size_t> &Xorder_std, matrix<size_t> &torder_std, size_t &split_var, size_t row_ind)
+void longbetModel::updateNodeSuffStat(std::vector<double> &suff_stat, std::unique_ptr<State> &state, matrix<size_t> &Xorder_std, matrix<size_t> &torder_std, size_t &split_var, size_t row_ind)
 {
-  for (size_t i = 0; i < torder_std[0].size(); i++){
-    incSuffStat(state, Xorder_std[split_var][row_ind], torder_std[0][i], suff_stat);
+  for (auto i: torder_std[Xorder_std[split_var][row_ind]]){
+    incSuffStat(state, Xorder_std[split_var][row_ind], i, suff_stat);
   }
 }
 
 // updates the other side node's side suffstats for the split
 // called from split_xorder_std_continuous, split_xorder_std_categorical in tree.cpp
-void longBetModel::calculateOtherSideSuffStat(std::vector<double> &parent_suff_stat, std::vector<double> &lchild_suff_stat, std::vector<double> &rchild_suff_stat, bool &compute_left_side)
+void longbetModel::calculateOtherSideSuffStat(std::vector<double> &parent_suff_stat, std::vector<double> &lchild_suff_stat, std::vector<double> &rchild_suff_stat, bool &compute_left_side)
 {
 
   // in function split_xorder_std_categorical, for efficiency, the function only calculates suff stat of ONE child
@@ -214,7 +220,7 @@ void longBetModel::calculateOtherSideSuffStat(std::vector<double> &parent_suff_s
 
 // updates partial residual for the next tree to fit
 // called from mcmc_loop_xbcf in xbcf_mcmc_loop.cpp
-void longBetModel::state_sweep(size_t tree_ind, matrix<double> &fit, std::unique_ptr<X_struct> &x_struct) const
+void longbetModel::state_sweep(size_t tree_ind, matrix<double> &fit, std::unique_ptr<X_struct> &x_struct) const
 {
   matrix<double> mu_ft;
   ini_matrix(mu_ft, fit[0].size(), fit.size());
@@ -234,7 +240,7 @@ void longBetModel::state_sweep(size_t tree_ind, matrix<double> &fit, std::unique
 
 // computes likelihood of a split
 // called from GFR in tree.cpp
-double longBetModel::likelihood(std::vector<double> &temp_suff_stat,
+double longbetModel::likelihood(std::vector<double> &temp_suff_stat,
 std::vector<double> &suff_stat_all, bool left_side,
 bool no_split, std::unique_ptr<State> &state) const
 {
@@ -275,7 +281,7 @@ bool no_split, std::unique_ptr<State> &state) const
 }
 
 // makes a prediction for treatment effect on the given Xtestpointer data
-void longBetModel::predict_std(const double *Xtestpointer, const double *tpointer, size_t N_test, size_t p, size_t num_sweeps, std::vector<matrix<double>> &yhats_test_xinfo, vector<vector<tree>> &trees)
+void longbetModel::predict_std(const double *Xtestpointer, const double *tpointer, size_t N_test, size_t p, size_t num_sweeps, std::vector<matrix<double>> &yhats_test_xinfo, vector<vector<tree>> &trees)
 {
   std::vector<double> output(this->dim_theta, 0.0);
   for (size_t sweeps = 0; sweeps < num_sweeps; sweeps++)
@@ -298,7 +304,7 @@ void longBetModel::predict_std(const double *Xtestpointer, const double *tpointe
 
 // updates parameter a
 // called from mcmc_loop_xbcf in xbcf_mcmc_loop.cpp
-void longBetModel::update_a_value(std::unique_ptr<State> &state)
+void longbetModel::update_a_value(std::unique_ptr<State> &state)
 {
   std::normal_distribution<double> normal_samp(0.0, 1.0);
 
@@ -308,6 +314,7 @@ void longBetModel::update_a_value(std::unique_ptr<State> &state)
   double muressum_trt = 0;
   double s0 = pow(state->sigma_vec[0], 2);
   double s1 = pow(state->sigma_vec[1], 2);
+  size_t s = 0;
 
   // compute the residual y-b*beta_t*tau(x)
   for (size_t i = 0; i < state->n_y; i++)
@@ -316,13 +323,13 @@ void longBetModel::update_a_value(std::unique_ptr<State> &state)
       if ((*(state->z + j * state->n_y + i)) == 1)
       {
         state->residual[i][j] = *(state->y_std + state->n_y * j + i) -
-        state->b_vec[1] * state->beta_t[j] * state->tau_fit[i][j];
+        state->b_vec[1] * state->beta_fit[i][j] * state->tau_fit[i][j];
 
         mu2sum_trt += state->mu_fit[i][j] * state->mu_fit[i][j];
         muressum_trt += state->mu_fit[i][j] * state->residual[i][j];
       } else {
         state->residual[i][j] = *(state->y_std + state->n_y * j + i) -
-        state->b_vec[0] * state->beta_t[j] * state->tau_fit[i][j];
+        state->b_vec[0] * state->beta_fit[i][j] * state->tau_fit[i][j];
 
         mu2sum_ctrl += state->mu_fit[i][j] * state->mu_fit[i][j];
         muressum_ctrl += state->mu_fit[i][j] * state->residual[i][j];
@@ -341,7 +348,7 @@ void longBetModel::update_a_value(std::unique_ptr<State> &state)
 
 // updates parameters b0, b1
 // called from mcmc_loop_xbcf in xbcf_mcmc_loop.cpp
-void longBetModel::update_b_values(std::unique_ptr<State> &state)
+void longbetModel::update_b_values(std::unique_ptr<State> &state)
 {
   std::normal_distribution<double> normal_samp(0.0, 1.0);
 
@@ -351,7 +358,7 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
   double tauressum_trt = 0;
   double s0 = pow(state->sigma_vec[0], 2);
   double s1 = pow(state->sigma_vec[1], 2);
-
+  size_t s = 0;
 
   for (size_t i = 0; i < state->n_y; i++)
   {
@@ -361,12 +368,12 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
 
       if (*(state->z + j * state->n_y + i) == 1)
       {
-        tau2sum_trt += pow(state->tau_fit[i][j] * state->beta_t[j], 2);
-        tauressum_trt += state->beta_t[j] * state->tau_fit[i][j] *
+        tau2sum_trt += pow(state->tau_fit[i][j] * state->beta_fit[i][j], 2);
+        tauressum_trt += state->beta_fit[i][j] * state->tau_fit[i][j] *
         state->residual[i][j];
       } else {
-        tau2sum_ctrl += pow(state->tau_fit[i][j] * state->beta_t[j], 2);
-        tauressum_ctrl += state->beta_t[j] * state->tau_fit[i][j] *
+        tau2sum_ctrl += pow(state->tau_fit[i][j] * state->beta_fit[i][j], 2);
+        tauressum_ctrl += state->beta_fit[i][j] * state->tau_fit[i][j] *
         state->residual[i][j];
       }
     }
@@ -387,12 +394,12 @@ void longBetModel::update_b_values(std::unique_ptr<State> &state)
   state->b_vec[0] = b0;
 }
 
-void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_ptr<X_struct> &x_struct,
-  matrix<size_t> &torder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig, std::vector<double> &beta)
+void longbetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_ptr<X_struct> &x_struct, matrix<size_t> &sorder_std, std::vector<double> &resid, std::vector<double> &diag, std::vector<double> &sig, std::vector<double> &beta)
 {  
   // get total number of time
-  double t_size = x_struct->t_values.size();
+  double t_size = x_struct->s_values.size();
   double n = state->n_y;  // n obs per period. TODO: need update
+
   std::vector<double> res_ctrl(t_size, 0);  // residuals
   std::vector<double> res_trt(t_size, 0);
 
@@ -409,44 +416,36 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   std::vector<size_t> idx(state->p_y);  // keep track of t-values
   size_t t_idx;
   size_t counts = 0;
+  size_t s;
   const double *z_pointer;
   const double *y_pointer;
 
-  // if(t_size <= 1){
-  //   cout << "unique t values need to be greater than 1" << endl;
-  //   throw;
-  // }
+  std::vector<size_t> t_counts(t_size, 0);
 
-  for (size_t i = 0; i < t_size; i++)
-  {
-    for (size_t j = 0; j < x_struct->t_counts[i]; j++)
-    {
-      t_idx = torder_std[0][counts];
-      counts++;
-      idx[t_idx] = i;
-      z_pointer = state->z + state->n_y * t_idx;
-      y_pointer = state->y_std + state->n_y * t_idx;
-      for (size_t k = 0; k < state->n_y; k++)
-      {
-        if (*(z_pointer + k) == 0)
-        {
-          res_ctrl[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
-          diag_ctrl[i] += state->tau_fit[k][t_idx];
-          sig[i] += sig02;
-        } else {
-          res_trt[i] += *(y_pointer + k) - state->a * state->mu_fit[k][t_idx];
-          diag_trt[i] += state->tau_fit[k][t_idx];
-          sig[i] += sig12;
-        }
+  for (size_t i = 0; i < state->n_y; i++){
+    for (size_t j = 0; j < state->p_y; j++){
+      s = *(state->post_trt_time + j * state->n_y + i);
+      t_counts[s] += 1;
+      if (*(state->z + state->n_y * j + i) == 0){
+        res_ctrl[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
+        diag_ctrl[s] += state->tau_fit[i][j];
+        sig[s] += sig02;
+      } else {
+        res_trt[s] += *(state->y_std + state->n_y * j + i) - state->a * state->mu_fit[i][j];
+        diag_trt[s] += state->tau_fit[i][j];
+        sig[s] += sig12;
       }
     }
   }
 
   for (size_t i = 0; i < t_size; i++){
-    resid[i] = (res_trt[i] + res_ctrl[i]) / n / x_struct->t_counts[i];
-    diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/n;
-    sig[i] = sig[i] / pow(n, 2) / x_struct->t_counts[i];
+    resid[i] = (res_trt[i] + res_ctrl[i]) / t_counts[i];
+    diag[i] = (state->b_vec[1] * diag_trt[i] + state->b_vec[0] * diag_ctrl[i])/ t_counts[i];
+    sig[i] = sig[i] / pow(t_counts[i], 2) ;
   }
+  // cout << "res " << resid  << endl;
+  // cout << "diag " << diag << endl;
+  // cout << "sig " << sig << endl;
   // solve by var = (Sigma0^-1 + Sigma^-1)^-1
   // Sigma0 = A*cov_kernel*A'
   // Sigma = diag(sig)
@@ -466,10 +465,10 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   arma::mat var = pinv(var_inv);
 
   arma::mat U, V;
-  arma::vec s;
-  svd(U, s, V, var);
+  arma::vec scale;
+  svd(U, scale, V, var);
 
-  arma::mat L = U * diagmat(s);
+  arma::mat L = U * diagmat(scale);
   // mean
   arma::mat res_vec(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
@@ -486,19 +485,24 @@ void longBetModel::update_time_coef(std::unique_ptr<State> &state, std::unique_p
   // beta = diag^-1 * beta_tilde
   // arma::mat beta(t_size, 1);
   for (size_t i = 0; i < t_size; i++){
+    // beta[i] = 1; // disable beta for debug
     beta[i] = beta_tilde(i, 0) / diag[i];
+    state->beta_t[i] = beta[i];
   }
 
-  // match beta to beta_t
-  for (size_t i = 0; i < state->p_y; i++){
-    state->beta_t[i] = beta[idx[i]];
+  // // match beta_t to beta_fit
+  for (size_t i = 0; i < state->n_y; i++){
+    for (size_t j = 0; j < state->p_y; j++){
+      state->beta_fit[i][j] = state->beta_t[*(state->post_trt_time + j * state->n_y + i)];
+    }
   }
+
 }
 
 
 // subtracts old tree contribution from the fit
 // called from mcmc_loop_xbcf in xbcf_mcmc_loop.cpp
-void longBetModel::subtract_old_tree_fit(size_t tree_ind, matrix<double> &fit, std::unique_ptr<X_struct> &x_struct)
+void longbetModel::subtract_old_tree_fit(size_t tree_ind, matrix<double> &fit, std::unique_ptr<X_struct> &x_struct)
 {
   for (size_t i = 0; i < fit.size(); i++)  // N
   {
@@ -510,7 +514,7 @@ void longBetModel::subtract_old_tree_fit(size_t tree_ind, matrix<double> &fit, s
 
 // sets unique term parameters in the state object depending on the term being updated
 // called from mcmc_loop_xbcf in xbcf_mcmc_loop.cpp
-void longBetModel::set_state_status(std::unique_ptr<State> &state, size_t value, const double *X, matrix<size_t> &Xorder, const double *t_std)
+void longbetModel::set_state_status(std::unique_ptr<State> &state, size_t value, const double *X, matrix<size_t> &Xorder, const double *t_std)
 {
   state->fl = value; // value can only be 0 or 1 (to alternate between arms)
   state->iniSplitStorage(state->fl);
@@ -531,7 +535,7 @@ void longBetModel::set_state_status(std::unique_ptr<State> &state, size_t value,
 
 }
 
-void longBetModel::predict_beta(std::vector<double> &beta,
+void longbetModel::predict_beta(std::vector<double> &beta,
   std::vector<double> &res_vec, std::vector<double> &a_vec, std::vector<double> &sig_vec, 
   matrix<double> &Sigma_tr_std, matrix<double> &Sigma_te_std, matrix<double> &Sigma_tt_std,
   std::mt19937 &gen)

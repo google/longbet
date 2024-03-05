@@ -52,14 +52,19 @@ public:
     size_t mtry;
     size_t n_y;  // number of total data points in root node
     size_t p_y;  // dimension of response variables
+    size_t beta_size; // unique post-treatment period
 
     const double *X_std;  // pointer to original data
     const double *y_std;  // pointer to y data
     const double *z;            // the scaled treatment vector            TODO: move to xbcfState
+    const double *post_trt_time;
+    const double *Spt;
+    const double *Tpt;
     
     std::vector<size_t> n_trt;                     // the number of treated individuals      TODO: check if it's used anywhere after restructuring
     matrix<double> mu_fit;       // total mu_fit                           TODO: move to xbcfState
     matrix<double> tau_fit;      // total tau_fit                          TODO: move to xbcfState
+    matrix<double> beta_fit;     // track beta values 
     std::vector<double> b_vec;        // scaling parameters for tau (b0,b1)     TODO: move to xbcfState
     std::vector<double> sigma_vec;    // residual standard deviations           TODO: move to xbcfState
     double a;                         // scaling parameter for mu               TODO: move to xbcfState
@@ -95,6 +100,7 @@ public:
 
     void update_residuals()
     {
+        // cout << "update_residuals in state.h need to be updated for staggered adoption" << endl;
         size_t index_trt;
         size_t index_ctrl;
         const double *temp_pointer;
@@ -108,12 +114,17 @@ public:
             {
                 if (*(temp_pointer + i) == 1)
                 {
-                    this->full_residual_trt[j][index_trt] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[1] * this->beta_t[j] * this->tau_fit[i][j];
+                    // this->full_residual_trt[j][index_trt] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[1] * this->beta_t[j] * this->tau_fit[i][j];
+                    this->full_residual_trt[j][index_trt] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[1] * this->beta_fit[i][j] * this->tau_fit[i][j];
                     index_trt++;
+
+                    // Unknown bug: the correct full residual should use beta_fit not beta_t.
+                    // But beta_fit leads to non-converging sigma and b values.
                 }
                 else
                 {
-                    this->full_residual_ctrl[j][index_ctrl] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[0] * this->beta_t[j] * this->tau_fit[i][j];
+                    // this->full_residual_ctrl[j][index_ctrl] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[0] * this->beta_t[0] * this->tau_fit[i][j];
+                    this->full_residual_ctrl[j][index_ctrl] = *(this->y_std + this->n_y * j + i) - this->a * this->mu_fit[i][j] - this->b_vec[0] * this->beta_fit[i][j] * this->tau_fit[i][j];
                     index_ctrl++;
                 }
             }
@@ -126,12 +137,12 @@ public:
         this->sigma2 = pow(sigma, 2);
    }
 
-    // sigma update for longBetModel       TODO: move to xbcfClass
+    // sigma update for longbetModel       TODO: move to xbcfClass
     void update_sigma(double sigma, size_t ind)
     {
         this->sigma_vec[ind] = sigma;    }
 
-    // sigma update for longBetModel       TODO: move to xbcfClass
+    // sigma update for longbetModel       TODO: move to xbcfClass
     void update_bscales(double b0, double b1)
     {
         this->b_vec[0] = b0;  // sigma for the control group
@@ -240,10 +251,10 @@ public:
     }
 };
 
-class longBetState : public State
+class longbetState : public State
 {
  public:
-    longBetState(const double *Xpointer, matrix<size_t> &Xorder_std, size_t N,
+    longbetState(const double *Xpointer, matrix<size_t> &Xorder_std, size_t N,
     std::vector<size_t> n_trt, size_t p, size_t p_tau, size_t p_y,
     std::vector<size_t> num_trees_vec,
     size_t p_categorical_pr, size_t p_categorical_trt, size_t p_continuous_pr,
@@ -251,13 +262,13 @@ class longBetState : public State
     size_t n_min, size_t n_cutpoints, bool parallel, size_t mtry_pr,
     size_t mtry_trt, const double *X_std, size_t num_sweeps,
     bool sample_weights_flag, const double *y_std,
-    const double *z,
+    const double *z, const double *post_trt_time, const double *Tpointer, const double *Spointer, size_t beta_size,
     std::vector<double> sigma_vec, std::vector<double> b_vec, size_t max_depth,
     double ini_var_yhat, size_t burnin, size_t dim_suffstat) :
     State(Xpointer, Xorder_std, N, p, p_tau, p_y, num_trees_vec,
     p_categorical_pr, p_categorical_trt, p_continuous_pr, p_continuous_trt,
     set_random_seed, random_seed, n_min, n_cutpoints, parallel, mtry_pr,
-    mtry_trt, X_std, num_sweeps, sample_weights_flag, y_std, z,
+    mtry_trt, X_std, num_sweeps, sample_weights_flag, y_std, z, 
     sigma_vec, b_vec, max_depth, ini_var_yhat, burnin)
     {
         this->sigma_vec = sigma_vec;
@@ -265,13 +276,22 @@ class longBetState : public State
         this->n_trt = n_trt;
         this->num_trees_vec = num_trees_vec;
         this->z = z;
+        this->post_trt_time = post_trt_time;
+        this->Tpt = Tpointer;
+        this->Spt = Spointer;
         this->a = 1;  // initialize a at 1 for now
 
         this->dim_suffstat = dim_suffstat;
 
         ini_matrix(this->mu_fit, p_y, N);
         ini_matrix(this->tau_fit, p_y, N);
-        this->beta_t = std::vector<double>(p_y, 1);
+        ini_matrix(this->beta_fit, p_y, N);
+        for (size_t i = 0; i < N; i++){ std::fill(this->beta_fit[i].begin(), this->beta_fit[i].end(), 1); }
+        // TODO: Shrink beta_t size to max trt_time in state.h
+
+        
+        this->beta_size = beta_size;
+        this->beta_t = std::vector<double>(beta_size, 1);
 
         // those are for XBCF, initialize at a length 1 vector
         // this->residual = std::vector<double>(N, 0);

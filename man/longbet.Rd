@@ -1,8 +1,8 @@
-\name{longBet-package}
-\alias{longBet-package}
+\name{longbet-package}
+\alias{longbet-package}
 \docType{package}
 \title{
-  longBet: Bayesian Ensemble Trees for Causal Inference on 
+  longbet: Bayesian Ensemble Trees for Causal Inference on 
 Longitudinal Data
 }
 \description{
@@ -23,6 +23,6 @@ Maintainer: Maggie Wang <maggiewang@asu.edu>
 }
 \keyword{ package }
 \seealso{
-  longBet
+  longbet
 }
 

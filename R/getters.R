@@ -5,7 +5,7 @@
 #' @return An array of treatment effect point estimates.
 #' @export
 getTaus <- function(fit) {
-    if(class(fit) != "longBet")
+    if(class(fit) != "longbet")
         stop("Can only get taus for an XBCF object.")
     else
         tauhats <- rowMeans(fit$tauhats.adjusted)
@@ -20,7 +20,7 @@ getTaus <- function(fit) {
 #' @return An array of prognostic effect point estimates.
 #' @export
 getMus <- function(fit) {
-    if(class(fit) != "longBet")
+    if(class(fit) != "longbet")
         stop("Can only get taus for an XBCF object.")
     else
         muhats <- rowMeans(fit$muhats.adjusted)

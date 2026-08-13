@@ -1,5 +1,6 @@
 
 #include "matrix_utility.h"
+#include <cmath>
 #include <cstddef>
 #include <iostream>
 
@@ -215,7 +216,7 @@ matrix<double> &eigenvectors, std::size_t eig_count)
         eigsum_sq += std::pow(eigenvectors[index][v], 2.0);
 
       for (std::uint32_t v = 0; v < eigenvectors[index].size(); v++)
-        eigenvectors[index][v] /= sqrt(eigsum_sq);
+        eigenvectors[index][v] /= std::sqrt(eigsum_sq);
 
       eigenvalues[index] = std::sqrt(eigenvalues[index]);
     }

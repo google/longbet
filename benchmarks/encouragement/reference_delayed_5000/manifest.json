@@ -1,0 +1,26 @@
+{
+  "environment": {
+    "python": "3.12.3",
+    "platform": "Linux-6.8.0-134-generic-x86_64-with-glibc2.43",
+    "packages": {
+      "numpy": "2.5.2",
+      "scipy": "1.18.1",
+      "pandas": "3.0.5",
+      "jax": "0.11.1",
+      "jaxlib": "0.11.1",
+      "bartz": "0.12.1",
+      "longbet": "not-installed-as-distribution"
+    },
+    "git_commit": "4309f66fe54d17fc075ecf38a17e70d0fdcd9168",
+    "git_dirty": true,
+    "created_utc": "2026-09-09T14:09:52.478230+00:00"
+  },
+  "method": "normal_ar",
+  "nominal_pointwise_coverage": 0.95,
+  "target": "fixed_finite_population_complete_randomization",
+  "covariance_target": "exact finite-population covariance; Neyman estimate is conservative",
+  "settings": [
+    "delayed_n80.json"
+  ],
+  "replications": 5000
+}

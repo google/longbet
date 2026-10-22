@@ -1,0 +1,4 @@
+# Raw replay artifacts are retained locally by the runners. Compact JSON reports,
+# exact configurations and seeds are versioned; reproduce arrays with the scripts.
+**/*.npz
+__pycache__/

@@ -1,0 +1,22 @@
+# Copyright 2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The R package with reticulate available but NO Python engine installed.
+# Proves the package loads, documents build, and every engine-dependent test
+# skips cleanly rather than failing.
+FROM longbet-r:reticulate
+WORKDIR /src
+COPY . /src
+RUN R CMD INSTALL --no-multiarch /src
+CMD ["bash", "-lc", "cd /tmp && R CMD build /src >/dev/null 2>&1 && _R_CHECK_FORCE_SUGGESTS_=0 R CMD check --no-manual --no-build-vignettes longbet_*.tar.gz 2>&1 | tail -25"]

@@ -1,0 +1,43 @@
+{
+  "model": "cells_monotone",
+  "scenario": "weak",
+  "replicate": 90,
+  "specification": {
+    "n": 240,
+    "chains": 4,
+    "draws": 1000,
+    "burnin": 1000,
+    "prior": 1.0,
+    "seed": 19037,
+    "forest": {
+      "trees": 3,
+      "cutpoints": 4,
+      "split_probability": 0.5,
+      "prior_sd": 1.0
+    },
+    "max_candidates": 500000,
+    "permutations": 499
+  },
+  "sampler_seed": 3304796615,
+  "targets": {
+    "conditional": {
+      "itt_y": 0.007200000000000021,
+      "itt_d": 0.039999999999999994,
+      "wald": 0.18000000000000055,
+      "complier_encouragement": 0.17999999999999997,
+      "treatment_z0": 0.17999999999999997,
+      "treatment_z1": 0.17999999999999997
+    },
+    "finite": {
+      "itt_y": 0.008333333333333333,
+      "itt_d": 0.041666666666666664,
+      "wald": 0.2,
+      "complier_encouragement": 0.2,
+      "treatment_z0": 0.2,
+      "treatment_z1": 0.2
+    }
+  },
+  "status": "failed",
+  "traceback": "Traceback (most recent call last):\n  File \"/home/ignacio/longbet-jax/benchmarks/encouragement/binary_benchmark.py\", line 211, in run\n    archive = fit_cells(*input_data, seed=sampler_seed, chains=4, draws=args.draws, first_stage=stage,\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ignacio/longbet-jax/benchmarks/encouragement/binary_cells.py\", line 75, in fit_cells\n    value, attempted = ordered_beta(rng, count[:, 1] + prior, count[:, 0] + prior,\n                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ignacio/longbet-jax/benchmarks/encouragement/binary_cells.py\", line 48, in ordered_beta\n    raise RuntimeError(f\"Ordered Beta rejection budget exhausted: {total}/{size} accepted in {attempted} candidates.\")\nRuntimeError: Ordered Beta rejection budget exhausted: 918/4000 accepted in 500000 candidates.\n",
+  "seconds": 0.03220012690871954
+}

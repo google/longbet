@@ -1,0 +1,68 @@
+{
+  "row": {
+    "period": 1.0,
+    "period_index": 0,
+    "horizon": 1,
+    "post_encouragement": true,
+    "n_encouraged": 120,
+    "n_control": 120,
+    "itt_y_d_cov": 0.0012138188608776836,
+    "wald": 1.4999999999999987,
+    "inference": "normal_ar",
+    "itt_y": 0.04999999999999999,
+    "itt_y_se": 0.059780957155842876,
+    "itt_y_lower": -0.0671685229867841,
+    "itt_y_upper": 0.16716852298678408,
+    "itt_d": 0.033333333333333354,
+    "itt_d_se": 0.05011657744899134,
+    "itt_d_lower": -0.06489335349510195,
+    "itt_d_upper": 0.13156002016176865,
+    "wald_set_type": "all_real",
+    "wald_reason": "",
+    "wald_lower_1": "-inf",
+    "wald_upper_1": "inf",
+    "wald_lower_2": null,
+    "wald_upper_2": null
+  },
+  "targets": {
+    "conditional": {
+      "itt_y": 0.0,
+      "itt_d": 0.0,
+      "wald": null,
+      "complier_encouragement": null,
+      "treatment_z0": null,
+      "treatment_z1": null
+    },
+    "finite": {
+      "itt_y": 0.0,
+      "itt_d": 0.0,
+      "wald": null,
+      "complier_encouragement": null,
+      "treatment_z0": null,
+      "treatment_z1": null
+    }
+  },
+  "itt_covariance": [
+    [
+      0.0035737628384687214,
+      0.0012138188608776836
+    ],
+    [
+      0.0012138188608776836,
+      0.0025116713352007474
+    ]
+  ],
+  "coverage": {
+    "conditional": {
+      "itt_y": true,
+      "itt_d": true,
+      "wald": null
+    },
+    "finite": {
+      "itt_y": true,
+      "itt_d": true,
+      "wald": null
+    }
+  },
+  "randomization_ar_at_truth": {}
+}

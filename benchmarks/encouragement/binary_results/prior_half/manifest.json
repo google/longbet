@@ -1,0 +1,38 @@
+{
+  "specification": {
+    "n": 240,
+    "chains": 4,
+    "draws": 1000,
+    "burnin": 1000,
+    "prior": 0.5,
+    "seed": 19037,
+    "forest": {
+      "trees": 3,
+      "cutpoints": 4,
+      "split_probability": 0.5,
+      "prior_sd": 1.0
+    },
+    "max_candidates": 500000,
+    "permutations": 0
+  },
+  "sources": {
+    "binary_dgp.py": "86641b20d27062dbb4ed57d5cb79fe92b9394bfa6135ed4dba2c39d85f264402",
+    "binary_cells.py": "3b976342388aeb72fe186c3cb4b097908541ac70a8041b574f00a1bd444334cb",
+    "binary_forest.py": "ab2338fad03343665107805f0fe02071792fa00f657ee3deb4bf271fcc906a0d",
+    "binary_benchmark.py": "27e760c31ec4837849b8673841d413a97f41c9a6e419b48c2b271e235821ff4e",
+    "direct_smooth_candidate.py": "2b19986a9d8a3d9f8729d57140a257c8e34f30bee5e9091a49e8d07500baa032",
+    "randomization_ar.py": "86219a57c4102fe266569ab2df44a6560f71c67d8e1f2c8c10345d94b4f899f6",
+    "_encourage.py": "e36d636789c2a86bf4e03538e761f5dac486f2364b4fe3265cd713b7e62f8879",
+    "_diagnostics.py": "f69db2084305e8348c244d4297a9a76f895c769dc426dfcf65771b590ea31c85"
+  },
+  "python": "3.12.3",
+  "platform": "Linux-6.8.0-134-generic-x86_64-with-glibc2.43",
+  "packages": {
+    "numpy": "2.5.2",
+    "scipy": "1.18.1",
+    "arviz": "1.3.0",
+    "jax": "0.11.1",
+    "bartz": "0.12.1",
+    "pandas": "3.0.5"
+  }
+}

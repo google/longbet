@@ -1,15 +1,36 @@
 Package: longbet
 Type: Package
-Title: longbet: Bayesian Ensemble Trees for Causal Inference on Longitudinal Data
-Version: 0.1.2
-Date: 2022-06-06
-Author: Meijia Wang, P. Richard Hahn, Ignacio Martinez
-Maintainer: Meijia Wang <maggiew614@gmail.com>
-Description: Time-varying conditional average treatment effect estimation with a 
-  tree-based method providing separate regularization for the treatment and 
-  prognostic terms.
+Title: Bayesian Ensemble Trees for Causal Inference on Longitudinal Data
+Version: 1.0.0
+Date: 2026-09-06
+Authors@R: c(
+    person("Meijia", "Wang", email = "maggiew614@gmail.com", role = "aut"),
+    person("P. Richard", "Hahn", role = "aut"),
+    person("Ignacio", "Martinez", email = "martinezig@google.com", role = c("aut", "cre"))
+  )
+Description: Time-varying heterogeneous treatment effects in panel data with
+  Bayesian causal forests. LongBet models the prognostic and treatment surfaces
+  with separate forests, gives exposure dynamics a shared Gaussian-process
+  trajectory, and absorbs unobserved unit heterogeneity with unit random
+  intercepts. Fitting is done by a vectorized Metropolis-Hastings sampler
+  written in JAX and shipped as the 'longbet-jax' Python package, which this
+  package drives through 'reticulate'; it runs on CPU or GPU and reports
+  multi-chain convergence diagnostics.
 License: Apache License (== 2.0)
-Imports: Rcpp (>= 0.12.13)
-LinkingTo: Rcpp, RcppArmadillo
-NeedsCompilation: yes
-RoxygenNote: 7.1.1
+URL: https://github.com/ignacio82/longbet-jax
+BugReports: https://github.com/ignacio82/longbet-jax/issues
+SystemRequirements: Python (>= 3.10) with the longbet-jax package
+Imports:
+    reticulate (>= 1.41),
+    rlang
+Suggests:
+    ggplot2,
+    knitr,
+    pkgload,
+    rmarkdown,
+    testthat (>= 3.0.0),
+    yaml
+NeedsCompilation: no
+Encoding: UTF-8
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.1.0

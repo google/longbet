@@ -1,0 +1,102 @@
+# Copyright 2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  python:
+    name: pytest (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+      - name: Fast tests
+        run: pytest -q -m "not slow"
+      - name: Statistical tests (Geweke, coverage, recovery)
+        run: pytest -q -m slow
+
+  r-no-python:
+    name: R CMD check, no Python at all
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck
+      # Proves the package loads, documents build, and every engine-dependent
+      # test skips cleanly when the Python engine is absent.
+      - uses: r-lib/actions/check-r-package@v2
+        env:
+          RETICULATE_PYTHON: /nonexistent/python
+
+  r-with-python:
+    name: R CMD check + Python engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck
+      - name: Install the engine
+        run: |
+          python -m venv "$HOME/lb-venv"
+          "$HOME/lb-venv/bin/pip" install .
+          echo "RETICULATE_PYTHON=$HOME/lb-venv/bin/python" >> "$GITHUB_ENV"
+      - uses: r-lib/actions/check-r-package@v2
+
+  contract:
+    name: The two front doors still agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      # Installs from DESCRIPTION using binaries and pulls in the system
+      # libraries they need. Hand-rolled install.packages() builds from source
+      # and fails on fs/png/reticulate.
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::testthat, any::yaml
+      - run: pip install ".[dev]"
+      - name: The vendored contract copy is up to date
+        run: diff -u contract/longbet-api.yaml inst/contract/longbet-api.yaml
+      - name: Python side of the contract
+        run: pytest -q tests/test_contract.py
+      - name: R side of the contract
+        # test_dir rather than test_file: it sources helper-*.R, which defines
+        # skip_without_engine().
+        run: |
+          R CMD INSTALL .
+          Rscript -e 'library(longbet); testthat::test_dir("tests/testthat", filter = "contract", stop_on_failure = TRUE)'

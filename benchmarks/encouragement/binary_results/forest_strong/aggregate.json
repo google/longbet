@@ -1,0 +1,479 @@
+{
+  "models": [
+    {
+      "scenario": "strong",
+      "model": "forest_monotone",
+      "attempts": 2,
+      "complete": 2,
+      "failures": 0,
+      "pending": 0,
+      "estimates_condition_on_completed_fits": true,
+      "failure_reasons": [],
+      "targets": {
+        "conditional": {
+          "bias": [
+            0.03343414982282503,
+            0.007414807256993811
+          ],
+          "mean_posterior_covariance": [
+            [
+              0.0034300023233659856,
+              0.000743544079016316
+            ],
+            [
+              0.000743544079016316,
+              0.00278807369006019
+            ]
+          ],
+          "empirical_error_covariance": [
+            [
+              0.005092126943830354,
+              0.003303589672211592
+            ],
+            [
+              0.003303589672211592,
+              0.0021432507167886286
+            ]
+          ],
+          "empirical_covariance_mcse": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0
+            ]
+          ],
+          "coverage": {
+            "itt_y": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "itt_d": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "wald": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            }
+          }
+        },
+        "finite": {
+          "bias": [
+            0.02818414982282503,
+            -0.011335192743006178
+          ],
+          "mean_posterior_covariance": [
+            [
+              0.0034300023233659856,
+              0.000743544079016316
+            ],
+            [
+              0.000743544079016316,
+              0.00278807369006019
+            ]
+          ],
+          "empirical_error_covariance": [
+            [
+              0.00390878863879648,
+              0.000868169162550231
+            ],
+            [
+              0.000868169162550231,
+              0.00019282641361627572
+            ]
+          ],
+          "empirical_covariance_mcse": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0
+            ]
+          ],
+          "coverage": {
+            "itt_y": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "itt_d": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "wald": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            }
+          }
+        }
+      },
+      "mean_interval_width": {
+        "itt_y": 0.22997547132168417,
+        "itt_d": 0.20669793861077224,
+        "wald": 0.5059027789833634
+      },
+      "negative_stage_probability": 0.0,
+      "stage_below_005_probability": 0.0,
+      "diagnosed_runs": 2,
+      "diagnostic_failures": [
+        {
+          "replicate": 0,
+          "quantities": {}
+        },
+        {
+          "replicate": 1,
+          "quantities": {}
+        }
+      ],
+      "bound_availability": {
+        "0.0": {
+          "compatible_fraction": 0.5730625,
+          "fully_available_datasets": 0
+        },
+        "0.05": {
+          "compatible_fraction": 0.6958125,
+          "fully_available_datasets": 0
+        },
+        "0.1": {
+          "compatible_fraction": 0.7963125,
+          "fully_available_datasets": 0
+        },
+        "1.0": {
+          "compatible_fraction": 1.0,
+          "fully_available_datasets": 2
+        }
+      }
+    },
+    {
+      "scenario": "strong",
+      "model": "forest_unrestricted",
+      "attempts": 2,
+      "complete": 2,
+      "failures": 0,
+      "pending": 0,
+      "estimates_condition_on_completed_fits": true,
+      "failure_reasons": [],
+      "targets": {
+        "conditional": {
+          "bias": [
+            0.03562432491321936,
+            0.012615442208114003
+          ],
+          "mean_posterior_covariance": [
+            [
+              0.0033739152840200964,
+              0.0007470426920862356
+            ],
+            [
+              0.0007470426920862356,
+              0.00280474489648947
+            ]
+          ],
+          "empirical_error_covariance": [
+            [
+              0.005044929275577683,
+              0.0027403124774677476
+            ],
+            [
+              0.0027403124774677476,
+              0.001488487164828599
+            ]
+          ],
+          "empirical_covariance_mcse": [
+            [
+              4.336808689942018e-19,
+              1.533293416683374e-19
+            ],
+            [
+              1.533293416683374e-19,
+              0.0
+            ]
+          ],
+          "coverage": {
+            "itt_y": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "itt_d": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "wald": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            }
+          }
+        },
+        "finite": {
+          "bias": [
+            0.030374324913219366,
+            -0.006134557791885986
+          ],
+          "mean_posterior_covariance": [
+            [
+              0.0033739152840200964,
+              0.0007470426920862356
+            ],
+            [
+              0.0007470426920862356,
+              0.00280474489648947
+            ]
+          ],
+          "empirical_error_covariance": [
+            [
+              0.003867450676260595,
+              0.00038382052733400296
+            ],
+            [
+              0.00038382052733400296,
+              3.8091810221971036e-05
+            ]
+          ],
+          "empirical_covariance_mcse": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0
+            ]
+          ],
+          "coverage": {
+            "itt_y": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "itt_d": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "wald": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            }
+          }
+        }
+      },
+      "mean_interval_width": {
+        "itt_y": 0.22718471489195174,
+        "itt_d": 0.20801434660481172,
+        "wald": 0.4910663374374403
+      },
+      "negative_stage_probability": 0.0,
+      "stage_below_005_probability": 0.0,
+      "diagnosed_runs": 2,
+      "diagnostic_failures": [
+        {
+          "replicate": 0,
+          "quantities": {}
+        },
+        {
+          "replicate": 1,
+          "quantities": {}
+        }
+      ],
+      "bound_availability": {}
+    }
+  ],
+  "reference": [
+    {
+      "scenario": "strong",
+      "datasets": 2,
+      "targets": {
+        "conditional": {
+          "bias": [
+            0.04066666666666667,
+            0.029166666666666674
+          ],
+          "mean_estimated_covariance": [
+            [
+              0.0038521241830065363,
+              0.0009588001867413625
+            ],
+            [
+              0.0009588001867413625,
+              0.00306109943977591
+            ]
+          ],
+          "empirical_error_covariance": [
+            [
+              0.0034722222222222207,
+              0.0010416666666666673
+            ],
+            [
+              0.0010416666666666673,
+              0.00031250000000000055
+            ]
+          ],
+          "coverage": {
+            "itt_y": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "itt_d": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "wald": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            }
+          },
+          "randomization_ar_acceptance_at_truth": {
+            "rate": 1.0,
+            "mcse": 0.0,
+            "n": 2,
+            "wilson_95": [
+              0.34237195288961925,
+              1.0
+            ]
+          }
+        },
+        "finite": {
+          "bias": [
+            0.03541666666666667,
+            0.010416666666666685
+          ],
+          "mean_estimated_covariance": [
+            [
+              0.0038521241830065363,
+              0.0009588001867413625
+            ],
+            [
+              0.0009588001867413625,
+              0.00306109943977591
+            ]
+          ],
+          "empirical_error_covariance": [
+            [
+              0.0025086805555555544,
+              -0.0007378472222222194
+            ],
+            [
+              -0.0007378472222222194,
+              0.00021701388888888736
+            ]
+          ],
+          "coverage": {
+            "itt_y": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "itt_d": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            },
+            "wald": {
+              "rate": 1.0,
+              "mcse": 0.0,
+              "n": 2,
+              "wilson_95": [
+                0.34237195288961925,
+                1.0
+              ]
+            }
+          },
+          "randomization_ar_acceptance_at_truth": {
+            "rate": 1.0,
+            "mcse": 0.0,
+            "n": 2,
+            "wilson_95": [
+              0.34237195288961925,
+              1.0
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

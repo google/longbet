@@ -1,0 +1,50 @@
+{
+  "seed1_N80_T10_Th26_dip1": {
+    "features": "379333e28bc72af399837aa08d5bcca738ea810153fe2ae6551d355a1237cb56",
+    "features_default": "f1c5442d7a2562203dfee3e0df6d09f654a7bd556dae07a6188803b3ef3a0d40",
+    "features_ext": "9400e32bd30dcacfd0a011fe953bb8280ad820692fb40b4d72bea74c6f63bb9b",
+    "gate_open": true,
+    "gate_open_default": true,
+    "spectral": "7ea57503c1a5b7ae3889271b957c20d32043cffd485b4e9a15aba3e3030f07f4"
+  },
+  "seed2_N80_T10_Th26_dip0": {
+    "features": "86eea1f13b18fbda0768c54a8ab3672193d2f62efe7850581aa530a6ec975dfa",
+    "features_default": "14d23096b46a41e7d828a61ac4e9661989e4a0fea6aac2f399cb131192136e39",
+    "features_ext": "ab19663a3f383261df23893330183aea55e08c1a8519135a0c59b1b14b3f7912",
+    "gate_open": true,
+    "gate_open_default": true,
+    "spectral": "2c5a295c91658f0828573d6c5584c823616a170c583db2936028fc5dd64ba634"
+  },
+  "seed3_N40_T10_Th4_dip1": {
+    "features": "1d19c990d1a5c057b1e63df3d69c7f9c58bb7db57e0758038a8f7707a4c2552e",
+    "features_default": "a448f5656bea5d9937cc2705de32bded9974d51e75d65d6e98d91045d86c3f29",
+    "features_ext": "2aba3566c9ed91ee70a9797acc84281af26fecd41cf356fb879f0249255cfe15",
+    "gate_open": false,
+    "gate_open_default": false,
+    "spectral": "452d4549c1e2a624246e84f2b9e3c431fc4c5464ef7080871a41e5d3006b708a"
+  },
+  "seed4_N120_T12_Th44_dip1": {
+    "features": "770afce2899e0f30aeca96e755412b9dc9b8ad28307af62e9cd42b3eefdb7adf",
+    "features_default": "37733eed68978f3005c36709fbb0cc1203afc4cff23ea7f84ccf59bbe998a0e9",
+    "features_ext": "5e6babf1dc970dd49b63ab45c6a211b4b29da68de56739e4ada05e75268bf51f",
+    "gate_open": true,
+    "gate_open_default": true,
+    "spectral": "fc1387b92aa8dc0b59c50f306ef586dc53b10b02c783e69b71750496acbcf9ff"
+  },
+  "seed5_N80_T10_Th8_dip1": {
+    "features": "a276a70fba9f7d6e6485a345e01bcdcda607d40eac508841bb0a6f15f361bab5",
+    "features_default": "33b5303be9e47a0f1127b1cd93eaf2ffc05a75cc0da837148050c36ec48d1037",
+    "features_ext": "181dbf970c9cb5db97726d06a926c445c6cc4a1d2e407d98101bedecdda77d7d",
+    "gate_open": true,
+    "gate_open_default": true,
+    "spectral": "50d61c568aac6f6e015eda044e61cb605e040d22609e0c5e4d34989ac9cf8c0e"
+  },
+  "seed6_N30_T8_Th20_dip1": {
+    "features": "0cfb02d6f487a85f70510ef6bb747592e10239e8402e699ca0d52718fff14a9a",
+    "features_default": "cb23c0e310d0d121bbeb05fd0009ae502af1ab5d9f30e2e035b83944583ea52f",
+    "features_ext": "c90af6b8747171c65a3e128bedd91692b9efe0d5bc77f01cc875940f9893b0db",
+    "gate_open": true,
+    "gate_open_default": true,
+    "spectral": "1f0a6d1590bbc30720e2380759ff1fa7a21471c5e55fab160a5b0b2b5782d585"
+  }
+}

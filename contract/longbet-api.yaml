@@ -1,0 +1,1023 @@
+# Copyright 2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Shared API contract between the Python engine and the R front door.
+#
+# The failure mode for a package with two front doors is silent drift: an
+# argument renamed on one side, a default changed on the other, and two
+# languages quietly fitting different models. This file is the single source of
+# truth, and it is checked from both sides:
+#
+#   * tests/test_contract.py asserts every entry matches LongBetConfig, and --
+#     in the other direction -- that every LongBetConfig field appears here or
+#     is listed under `internal`.
+#   * tests/testthat/test-contract.R asserts formals(longbet) matches the
+#     r_name and default of every entry with `expose_in_r: true`.
+#
+# Adding a configuration option without touching this file fails the Python
+# test; exposing it in R with a different default fails the R test.
+version: "3.0.0"
+
+# Config fields that are deliberately not part of the user-facing contract.
+internal:
+  - sample_beta   # switches off the GP draw; used only by the BCF reduction test
+  - trend_period_effects   # removes the free common-time factor; with the
+                           # forest barred from calendar time this leaves the
+                           # model unable to fit a common shock at all, so it
+                           # exists only to reproduce the paper's ablation
+  - trend_forecast_scale   # forecast columns are already RMS-standardized to 1.0
+                           # on the standardized outcome scale; fixed at 1.0
+
+arguments:
+  # -- sampler ---------------------------------------------------------------
+  - python_name: num_sweeps
+    r_name: num_sweeps
+    type: integer
+    default: 1000
+    expose_in_r: true
+    description: Number of posterior draws saved per chain, after burn-in.
+  - python_name: num_burnin
+    r_name: num_burnin
+    type: integer
+    default: 2000
+    expose_in_r: true
+    description: >-
+      Number of burn-in iterations discarded. Larger than num_sweeps on purpose:
+      burn-in, not draw count, governs whether the chains have converged.
+  - python_name: n_skip
+    r_name: n_skip
+    type: integer
+    default: 1
+    model_dependent: true
+    expose_in_r: true
+    description: >-
+      Thinning interval; 1 saves every post-burn-in iteration. Thinning buys
+      effective sample size almost free, because prediction cost scales with
+      retained draws while sampling does not. Left unset (None) in
+      LongBetConfig, it takes the fitted model's default: 1 for longbet and
+      LongBetMulti, 2 for LongBetEncourage (encouragement_model_api.defaults).
+  - python_name: num_chains
+    r_name: num_chains
+    type: integer
+    default: 4
+    expose_in_r: true
+    description: Number of parallel MCMC chains. At least 2 are needed for R-hat.
+  - python_name: inner_loop_length
+    r_name: inner_loop_length
+    type: integer_or_null
+    default: null
+    expose_in_r: true
+    description: Sweeps per dispatch; bounds compile time. NULL runs one dispatch.
+
+  # -- forests ---------------------------------------------------------------
+  - python_name: num_trees_pr
+    r_name: num_trees_pr
+    type: integer
+    default: 20
+    expose_in_r: true
+    description: Number of trees in the prognostic forest.
+  - python_name: num_trees_trt
+    r_name: num_trees_trt
+    type: integer
+    default: 60
+    expose_in_r: true
+    description: Number of trees in the treatment forest.
+  - python_name: min_points_per_leaf_pr
+    r_name: min_points_per_leaf_pr
+    type: integer
+    default: 10
+    expose_in_r: true
+    description: Minimum observations per leaf, prognostic forest.
+  - python_name: min_points_per_leaf_trt
+    r_name: min_points_per_leaf_trt
+    type: integer
+    default: 10
+    expose_in_r: true
+    description: Minimum observations per leaf, treatment forest.
+  - python_name: max_depth_pr
+    r_name: max_depth_pr
+    type: integer
+    default: 8
+    expose_in_r: true
+    description: Maximum tree depth, prognostic forest.
+  - python_name: max_depth_trt
+    r_name: max_depth_trt
+    type: integer
+    default: 8
+    expose_in_r: true
+    description: Maximum tree depth, treatment forest.
+  - python_name: alpha_split_pr
+    r_name: alpha_split_pr
+    type: float
+    default: 0.95
+    expose_in_r: true
+    description: Tree-depth prior alpha, prognostic forest.
+  - python_name: beta_split_pr
+    r_name: beta_split_pr
+    type: float
+    default: 2.0
+    expose_in_r: true
+    description: Tree-depth prior beta, prognostic forest.
+  - python_name: alpha_split_trt
+    r_name: alpha_split_trt
+    type: float
+    default: 0.25
+    expose_in_r: true
+    description: Tree-depth prior alpha, treatment forest.
+  - python_name: beta_split_trt
+    r_name: beta_split_trt
+    type: float
+    default: 3.0
+    expose_in_r: true
+    description: Tree-depth prior beta, treatment forest.
+  - python_name: num_cutpoints
+    r_name: num_cutpoints
+    type: integer
+    default: 100
+    expose_in_r: true
+    description: Maximum quantile bins per continuous covariate.
+
+  # -- exposure trajectory ---------------------------------------------------
+  - python_name: sig_knl
+    r_name: sig_knl
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: Kernel standard deviation for the exposure trajectory.
+  - python_name: lambda_knl
+    r_name: lambda_knl
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: Kernel lengthscale over the exposure index.
+  - python_name: kernel_type
+    r_name: kernel_type
+    type: string
+    default: "se"
+    expose_in_r: true
+    description: Kernel family; one of se, matern32, matern52, ar1.
+  - python_name: sigma_m
+    r_name: sigma_m
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: Prior standard deviation of the marginalized constant GP mean.
+  - python_name: gp_constant_mean
+    r_name: gp_constant_mean
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: Whether the GP reverts to an estimated common level.
+
+  # -- calendar-time block -----------------------------------------------------
+  - python_name: use_trend_block
+    r_name: use_trend_block
+    type: boolean
+    default: true
+    expose_in_r: false
+    description: Whether the prognostic surface carries an explicit conjugate calendar-time component drawn jointly with the unit intercepts and the exposure trajectory. Off reproduces the pre-block model and is kept for ablation.
+  - python_name: trend_horseshoe
+    r_name: trend_horseshoe
+    type: boolean
+    default: true
+    expose_in_r: false
+    description: Whether the heterogeneous-trend coefficients get a horseshoe prior rather than a ridge. On by default so active trend interactions escape shrinkage while null columns are shrunk toward zero.
+  - python_name: baseline_cells
+    r_name: baseline_cells
+    type: string
+    default: all
+    expose_in_r: false
+    description: Which observed cells inform the baseline module (prognostic forest, calendar-time block, unit intercepts, sigma^2). 'all' is the joint posterior, in which treated cells inform the baseline through their partial residuals and a shrunk treatment forest lets part of the effect leak into the baseline. 'untreated' estimates the baseline from untreated cells only (the imputation principle of Borusyak, Jaravel and Spiess, 2024), targeting the cut posterior p(baseline | Y_0) p(beta, nu | baseline, Y_1); continuous outcomes only, no tempering, no ar1_errors, not available for LongBetMulti.
+  - python_name: trend_num_features
+    r_name: trend_num_features
+    type: integer
+    default: 64
+    expose_in_r: true
+    description: Random Fourier features in the unit feature map of the trend block. More capacity to represent a nonlinear trend loading, at more cost per sweep.
+  - python_name: trend_degree
+    r_name: trend_degree
+    type: integer
+    default: 2
+    expose_in_r: false
+    description: Number of smooth polynomial time functions interacted with the unit features.
+  - python_name: trend_prior_scale
+    r_name: trend_prior_scale
+    type: float
+    default: 2.0
+    expose_in_r: false
+    description: Prior standard deviation of a unit's trend deviation on the standardized response; also the horseshoe's global scale.
+  - python_name: trend_period_scale
+    r_name: trend_period_scale
+    type: float
+    default: 2.0
+    expose_in_r: false
+    description: Prior standard deviation of the free common-time factor on the standardized response.
+
+  # -- structure (internal / ablation) ---------------------------------------
+  - python_name: split_calendar_mu
+    r_name: split_time_ps
+    type: boolean_or_null
+    default: null
+    expose_in_r: false
+    description: Internal ablation option controlling whether the prognostic forest may split on calendar time. Null (the default) derives it from the calendar-time block; kept for ablation only.
+  - python_name: split_calendar_trt
+    r_name: split_calendar_trt
+    type: boolean
+    default: false
+    expose_in_r: false
+    description: Internal ablation option controlling whether the treatment forest may split on calendar time; off by default so that beta_S carries dynamic evolution and x_trt_tv carries time-varying moderation without calendar-time collinearity.
+  - python_name: split_exposure_trt
+    r_name: split_exposure_trt
+    type: boolean
+    default: false
+    expose_in_r: false
+    description: Internal ablation option controlling whether the treatment forest may split on the exposure clock; off by default so that beta_S carries the exposure profile and the product beta_S * nu stays identified.
+  - python_name: tempering_levels
+    r_name: tempering_levels
+    type: integer
+    default: 1
+    expose_in_r: false
+    description: Internal ablation option for parallel-tempering replicas per chain (1 = plain sampler).
+  - python_name: tempering_beta_min
+    r_name: tempering_beta_min
+    type: number
+    default: 0.05
+    expose_in_r: false
+    description: Inverse temperature of the hottest replica when tempering_levels > 1.
+  - python_name: use_inter_ensemble_move
+    r_name: use_inter_ensemble_move
+    type: boolean
+    default: true
+    expose_in_r: false
+    description: Whether to run the exact conjugate subspace Gibbs transfer between mu and nu each sweep.
+
+  # -- priors ----------------------------------------------------------------
+  - python_name: random_intercept
+    r_name: random_intercept
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: Whether to fit unit-level random intercepts.
+  - python_name: gamma_prior_a
+    r_name: gamma_prior_a
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: Inverse-gamma shape for the unit-intercept variance.
+  - python_name: gamma_prior_b
+    r_name: gamma_prior_b
+    type: float
+    default: 0.1
+    expose_in_r: true
+    description: Inverse-gamma scale for the unit-intercept variance.
+  - python_name: sigma_prior_a
+    r_name: sigma_prior_a
+    type: float
+    default: 2.0
+    expose_in_r: true
+    description: Inverse-gamma shape for the error variance; 0 is the reference prior.
+  - python_name: sigma_prior_b
+    r_name: sigma_prior_b
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: Inverse-gamma scale for the error variance.
+
+  # -- outcome and moves -----------------------------------------------------
+  - python_name: outcome
+    r_name: outcome
+    type: string
+    default: "continuous"
+    expose_in_r: true
+    description: Outcome type, continuous, binary (probit), or ordinal (ordered probit).
+  - python_name: num_categories
+    r_name: num_categories
+    type: integer_or_null
+    default: null
+    expose_in_r: true
+    description: Declared ordinal category count >=2; null for nonordinal configurations.
+  - python_name: cutpoint_prior_scale
+    r_name: cutpoint_prior_scale
+    type: float
+    default: 5.0
+    expose_in_r: true
+    description: Positive finite ordered-normal cutpoint prior scale in latent probit units.
+  - python_name: standardize
+    r_name: standardize
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: Whether to centre and scale a continuous outcome internally.
+  - python_name: random_seed
+    r_name: random_seed
+    type: integer
+    default: 0
+    expose_in_r: true
+    description: Base PRNG seed.
+  - python_name: device
+    r_name: device
+    type: string
+    default: "auto"
+    expose_in_r: true
+    description: Compute device; auto, cpu or gpu.
+  # -- multi / SUR -----------------------------------------------------------
+  - python_name: sur
+    r_name: sur
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: >-
+      Whether to use full-precision triangular SUR coupling across outcomes.
+      Inert for single-outcome models.
+  - python_name: sur_prior_var
+    r_name: sur_prior_var
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: >-
+      Prior variance on SUR regression loadings Gamma. 0 disables SUR.
+      Inert for single-outcome models.
+
+  # -- encouragement-model extensions ----------------------------------------
+  # Model-dependent: left unset (None) in LongBetConfig, each takes the fitted
+  # model's default. `default` is the plain model's (longbet, LongBetMulti:
+  # the published LongBet); in LongBetEncourage they are fixed components of
+  # the model (encouragement_model_api.components). LongBetMulti does not
+  # support them.
+  - python_name: linear_trt
+    r_name: linear_trt
+    type: boolean
+    default: false
+    model_dependent: true
+    expose_in_r: false
+    description: >-
+      Linear term in the treatment moderator, nu(x) = x'delta + trees, on
+      standardized baseline treatment covariates, with a horseshoe prior
+      delta_j ~ N(0, tau^2 lambda_j^2), lambda_j ~ C+(0, 1),
+      tau ~ C+(0, linear_trt_scale / sqrt(p)).
+  - python_name: linear_trt_scale
+    r_name: linear_trt_scale
+    type: float
+    default: 0.5
+    expose_in_r: false
+    description: Scale of the horseshoe's global half-Cauchy prior, before division by sqrt(p).
+  - python_name: learn_beta_scale
+    r_name: learn_beta_scale
+    type: boolean
+    default: false
+    model_dependent: true
+    expose_in_r: false
+    description: >-
+      Learn the exposure trajectory's scale, beta ~ N(0, s^2 K), s ~ C+(0,
+      beta_scale_prior), so the effect can shrink toward zero under a null and
+      escape the prior under a strong signal.
+  - python_name: beta_scale_prior
+    r_name: beta_scale_prior
+    type: float
+    default: 1.0
+    expose_in_r: false
+    description: Scale of the half-Cauchy prior on the trajectory scale s.
+  - python_name: ar1_errors
+    r_name: ar1_errors
+    type: boolean
+    default: false
+    model_dependent: true
+    expose_in_r: false
+    description: >-
+      Stationary AR(1) innovations within each unit's series, sampled exactly
+      through the Prais-Winsten transform. Continuous outcome, unit intercepts,
+      unit-level partitions and a complete balanced panel only.
+  - python_name: ar1_phi_max
+    r_name: ar1_phi_max
+    type: float
+    default: 0.95
+    expose_in_r: false
+    description: Bound of the uniform prior on the AR(1) coefficient, phi ~ U(-ar1_phi_max, ar1_phi_max).
+  - python_name: interweave_gamma
+    r_name: interweave_gamma
+    type: boolean
+    default: false
+    model_dependent: true
+    expose_in_r: false
+    description: >-
+      Ancillarity-sufficiency interweaving of the unit-intercept scale after its
+      conjugate draw (same posterior; better mixing where intercepts are weakly
+      informed).
+  - python_name: anchor_moderator
+    r_name: anchor_moderator
+    type: boolean
+    default: false
+    expose_in_r: false
+    description: >-
+      Unit-anchored moderator scaling for a continuous outcome: after each sweep
+      the moderator is shifted so that its mean over the fitted units is one,
+      which fixes the scale split between the trajectory and nu(x).
+      LongBetEncourage sets it for its continuous equations.
+
+  # -- distributed-lag kernel (LongBet.fit(exposure_lags=..., extra_cols=...)) --
+  # Inert unless exposure_lags is passed; used by LongBetEncourage with
+  # treatment="intensity" (encouragement_intensity_api). Not formals of R's
+  # longbet(); reachable through longbet_encourage(config = list(...)).
+  - python_name: lag_sig_knl
+    r_name: lag_sig_knl
+    type: float
+    default: 1.0
+    expose_in_r: false
+    description: Prior standard deviation of each lag coefficient kappa_l (standardized outcome per unit dose).
+  - python_name: lag_lambda_knl
+    r_name: lag_lambda_knl
+    type: float
+    default: 1.0
+    expose_in_r: false
+    description: Lengthscale of the GP prior over the lag index, in lag units.
+  - python_name: lag_kernel_type
+    r_name: lag_kernel_type
+    type: string
+    default: se
+    expose_in_r: false
+    description: Covariance family of the lag kernel's GP prior (se, matern, matern32, matern52, ar1).
+  - python_name: lag_sigma_m
+    r_name: lag_sigma_m
+    type: float
+    default: 1.0
+    expose_in_r: false
+    description: Prior standard deviation of the lag kernel's marginalized constant mean.
+  - python_name: lag_gp_constant_mean
+    r_name: lag_gp_constant_mean
+    type: boolean
+    default: true
+    expose_in_r: false
+    description: Whether the lag kernel's GP prior includes a marginalized constant mean.
+  - python_name: lag_learn_scale
+    r_name: lag_learn_scale
+    type: boolean
+    default: true
+    expose_in_r: false
+    description: Learn the lag kernel's scale, kappa ~ N(0, s^2 K_L) with s ~ C+(0, lag_scale_prior).
+  - python_name: lag_scale_prior
+    r_name: lag_scale_prior
+    type: float
+    default: 1.0
+    expose_in_r: false
+    description: Scale of the half-Cauchy prior on the lag kernel's scale.
+  - python_name: extra_cols_prior_scale
+    r_name: extra_cols_prior_scale
+    type: float
+    default: 1.0
+    expose_in_r: false
+    description: >-
+      Prior standard deviation of each fixed extra column's contribution (the
+      control-function basis of Tier T1): coefficient j has prior
+      N(0, (extra_cols_prior_scale / sd_j)^2) with sd_j the column's spread over
+      observed cells; coefficients are reported on the raw column scale.
+
+
+# Arguments accepted by the R front door that are not sampler configuration.
+r_only_arguments:
+  - r_name: y
+    description: Outcome panel, N x T.
+  - r_name: x
+    description: Prognostic covariates, N x P.
+  - r_name: x_trt
+    description: Treatment covariates, N x P_trt. Defaults to x.
+  - r_name: z
+    description: Treatment indicator panel, N x T. Must be absorbing.
+  - r_name: t
+    description: Calendar time vector, length T.
+  - r_name: x_tv
+    description: Time-varying prognostic covariates, N x T x P.
+  - r_name: x_trt_tv
+    description: Time-varying treatment covariates, N x T x P.
+  - r_name: ps
+    description: Propensity score, length N or N x T. Prognostic forest only.
+  - r_name: baseline_forecast
+    description: Optional counterfactual baseline forecast panel, N x T or N x T x K, added to the conjugate trend block.
+  - r_name: verbose
+    description: Whether to print progress messages.
+
+return_fields:
+  fit:
+    - name: beta_values
+      shape: "(S_max + 1, draws) in R; (draws, S_max + 1) in Python"
+      description: Exposure trajectory draws (use beta_draws_by_exposure in Python for exposure-major (S_max + 1, draws) layout).
+    - name: beta_draws_by_exposure
+      shape: "(S_max + 1, draws)"
+      description: Exposure trajectory draws in exposure-major layout (Python property on LongBet and LongBetPrediction).
+    - name: gamma_draws
+      shape: "(N, draws)"
+      description: Unit random intercept draws.
+    - name: sigma_gamma_draws
+      shape: "(draws,)"
+      description: Unit-intercept variance draws.
+    - name: sigma0_draws
+      shape: "(1, draws)"
+      description: >-
+        Residual standard deviation in standardized outcome units; multiply by
+        sdy to recover the data scale.
+    - name: sdy
+      shape: "()"
+      description: Standard deviation used to scale the outcome.
+    - name: meany
+      shape: "()"
+      description: Mean used to centre the outcome.
+    - name: b0_draws
+      shape: "(draws,)"
+      description: Fixed constant 0.0 (untreated treatment indicator coding; retained for archive layout compatibility).
+    - name: b1_draws
+      shape: "(draws,)"
+      description: Fixed constant 1.0 (treated indicator coding; retained for archive layout compatibility).
+    - name: alpha_draws
+      shape: "(draws,)"
+      description: Fixed constant 1.0 (prognostic forest scaling factor; retained for archive layout compatibility).
+    - name: random_intercept
+      shape: "()"
+      description: Whether unit random intercepts were fitted.
+    - name: raw_model
+      shape: "(bytes)"
+      description: Serialized engine state, so saveRDS round-trips without Python.
+  predict:
+    - name: tauhats
+      shape: "(N, T, draws)"
+      description: Treatment-effect draws; NULL when summary_only.
+    - name: muhats0
+      shape: "(N, T, draws)"
+      description: Untreated-outcome draws including the unit intercept.
+    - name: preds
+      shape: "(N, T, draws)"
+      description: Factual outcome draws.
+    - name: att_full
+      shape: "(S_max, draws)"
+      description: ATT draws by exposure time; present even under summary_only.
+    - name: tauhats.mean
+      shape: "(N, T)"
+      description: Posterior mean treatment effect per cell.
+    - name: tauhats.lower
+      shape: "(N, T)"
+      description: Lower credible bound per cell.
+    - name: tauhats.upper
+      shape: "(N, T)"
+      description: Upper credible bound per cell.
+  stability:
+    - name: summary
+      description: >-
+        One row with num_chains, num_draws, total_draws, ess_median, ess_min,
+        ess_tail_median, ess_tail_min, rhat_max, mcse_median, ess_ok, rhat_ok.
+        ess_ok requires finite bulk and tail ESS at every exposure. Mean MCSE
+        uses mean ESS. No reliability verdict is issued.
+    - name: by_exposure
+      description: Per-exposure ess_bulk, ess_tail, ess_mean, rhat and mean mcse.
+
+multi_api:
+  description: >-
+    Multiple continuous, binary and ordinal outcomes on a shared panel using full-precision
+    triangular SUR, including downstream feedback into discrete latent responses.
+    All forests are outcome-specific; only the residual likelihood couples outcomes.
+  sampler_semantics: "full_precision_sur_v1"
+  ordinal_format_version: 3
+  ordinal_schema_version: 1
+  precision_cache_version: 1
+  variance_prior_requirement: >-
+    Innovation-variance priors are proper by construction (positive inverse-gamma
+    parameters); the improper reference prior is not offered.
+  inputs:
+    y:
+      python_types:
+        - "Mapping[str, np.ndarray (N, T)]"
+        - "Sequence[np.ndarray (N, T)]"
+        - "np.ndarray (N, T, M)"
+      r_types:
+        - "list of matrices [N x T]"
+        - "array [N x T x M]"
+      description: >-
+        Panel of M >= 2 outcomes. Unnamed elements generate outcome_1 .. outcome_M.
+        NA/NaN marks unobserved cells. Wholly unobserved outcomes are rejected.
+    outcome:
+      type: "string, Sequence[string], or Mapping[str, string]"
+      default: "continuous"
+      description: >-
+        Outcome type per outcome ('continuous', 'binary', or 'ordinal'). Discrete
+        outcomes precede continuous ones in a stable partition and have zero
+        incoming SUR loadings and unit structural variance.
+    num_categories:
+      type: "integer, sequence/list with nulls, or fully named mapping/list"
+      default: null
+      description: >-
+        Integer broadcast to ordinal outcomes, or entries in user order with
+        null/NULL for nonordinal outcomes. Missing counts are never inferred.
+    outcome_names:
+      type: "Sequence[str] or NULL"
+      description: Length-M unique nonempty outcome names.
+  fit_returns:
+    fits:
+      description: Child LongBet fits in user order.
+    outcome_names:
+      description: Outcome names in user order.
+    order:
+      description: 0-based (Python) or 1-based (R) indices mapping internal order to user order.
+    inverse_order:
+      description: Indices mapping user order to internal order.
+    sur_active:
+      description: Whether SUR coupling is active.
+    gamma_loadings:
+      shape: "(*chains, K, M, M) in Python; (M*M, D) in R"
+      description: >-
+        Strictly lower-triangular SUR loadings in internal outcome order with zero
+        diagonal, in working outcome units. Columns in R exclude burn-in.
+  predict_returns:
+    preds:
+      description: Child predictions in user order.
+    summary_only:
+      description: Whether full draws were suppressed to bound memory.
+  utilities:
+    effect_draws:
+      description: >-
+        Draws of treatment effects on the outcome scale (continuous: tauhats,
+        binary: norm.cdf(mu0+tau)-norm.cdf(mu0)), shape (N, T, D). Requires full draws.
+    joint_prob:
+      description: >-
+        Empirical joint probability across outcomes for user condition callables.
+        AND across outcomes, then mean over draws. cells=NULL returns (N, T);
+        boolean cells (N, T) returns length-N unit average over selected periods.
+    effect_draws_from_arrays:
+      description: >-
+        Shared Python/R array boundary for effect_draws; accepts full tauhats and
+        muhats0 arrays, validates identical nonempty (N,T,D) shapes, and performs
+        the same continuous/probit transformation without live prediction handles.
+    reduce_joint_masks:
+      description: >-
+        Shared Python/R reducer for logical (N,T,D) condition arrays. Rejects
+        empty or inconsistent draw axes; uses the same cells semantics as joint_prob.
+    outcome_correlation:
+      description: >-
+        Mean of per-draw implied innovation correlation matrices in user order,
+        shape (M, M), with unit diagonal and float64 precision.
+
+ordinal_api:
+  identification: "first_finite_zero"
+  probit_variance: 1
+  prediction_fields:
+    cutpoints_samples: "(D, K-2), including the empty last dimension for K=2"
+    prob_y: "(N, T, K, D); factual category probabilities, null in summary mode"
+    prob_mu0: "(N, T, K, D); control probabilities, null in summary mode"
+    prob_tau: "(N, T, K, D); paired treated-minus-control effects, null in summary mode"
+    prob_y_summary: "mean/std/lower/upper, each (N, T, K)"
+    prob_mu0_summary: "mean/std/lower/upper, each (N, T, K)"
+    prob_tau_summary: "mean/std/lower/upper, each (N, T, K)"
+    att_prob_full: "(S, K, D), always retained"
+  methods:
+    predict_probabilities: "arm=factual/control/effect; summary defaults true"
+    att_probabilities: "att (S,K), intervals (2,S,K), att_full (S,K,D), exposure, categories"
+    att_expected_score: "finite numeric weights length K; returns att (S), intervals (2,S), att_full (S,D), exposure, weights"
+  limitations: >-
+    Existing latent ATT and stability APIs keep their meaning. Diagnose category,
+    score and cutpoint draws separately. effect_draws/effect_draws_from_arrays and
+    joint_prob reject ordinal selections; use the category/score methods.
+    New-unit probabilities use zero intercepts when unit counts differ, not a
+    marginal random-unit distribution. Forest-evaluation caching intentionally
+    retains full latent forest buffers and is disabled by default.
+
+# These basic utilities have no sampler configuration and no posterior archive.
+encouragement_api:
+  design: single_wave_complete
+  randomization: >-
+    Individual-unit complete randomization with a single encouragement wave and
+    permanent control arm. Equal-probability independent Bernoulli assignment is
+    supported conditional on arm counts. Array validation does not verify the
+    randomization, exclusion, monotonicity, or adoption-history assumptions.
+  unsupported: >-
+    Blocked, unequal-probability, cluster-randomized, staggered or re-randomized
+    encouragement; nonabsorbing adoption; missing panels. Perfect compliance,
+    first-period encouragement, and negative sample first stages are accepted.
+  inputs:
+    z: Complete binary absorbing (N,T) encouragement panel.
+    d: Complete binary absorbing (N,T) actual adoption panel on identical units.
+    "y": Complete finite numeric (N,T) outcome panel; binary outcomes give risk differences.
+    t: Strictly increasing calendar time with whole-unit gaps; defaults to 1..T.
+  functions:
+    validate_encouragement:
+      required: [z, d]
+      defaults: {t: null}
+      returns: metadata dictionary in Python, list in R
+    encouragement_summary:
+      required: [z, d]
+      defaults: {t: null, alpha: 0.05}
+      returns: table with one row per observed calendar period, including baseline
+    encouragement_effects:
+      required: ["y", d, z]
+      defaults: {t: null, alpha: 0.05}
+      returns: table with one row per observed post-encouragement calendar period
+    plot_encouragement:
+      required: [z, d]
+      defaults: {t: null}
+      python_only_defaults: {ax: null}
+      returns: matplotlib Axes in Python, ggplot in R
+  metadata_fields:
+    - design
+    - n_units
+    - n_periods
+    - n_encouraged
+    - n_control
+    - encouragement_period
+    - encouragement_index
+    - has_pre_periods
+    - perfect_compliance
+  summary_columns:
+    - period
+    - period_index
+    - horizon
+    - post_encouragement
+    - n_encouraged
+    - n_control
+    - takeup_encouraged
+    - takeup_control
+    - first_stage
+    - first_stage_se
+    - first_stage_lower
+    - first_stage_upper
+    - first_stage_includes_zero
+    - negative_first_stage
+    - n_encouraged_adopters
+    - share_immediate
+    - median_observed_lag
+    - share_pre_encouragement_adoption
+  effects_columns:
+    - period
+    - period_index
+    - horizon
+    - post_encouragement
+    - n_encouraged
+    - n_control
+    - itt_y_d_cov
+    - wald
+    - inference
+    - itt_y
+    - itt_y_se
+    - itt_y_lower
+    - itt_y_upper
+    - itt_d
+    - itt_d_se
+    - itt_d_lower
+    - itt_d_upper
+    - wald_set_type
+    - wald_reason
+    - wald_lower_1
+    - wald_upper_1
+    - wald_lower_2
+    - wald_upper_2
+  inference:
+    method: normal_ar
+    covariance: sum of joint within-arm sample covariance matrices divided by arm sizes
+    set: >-
+      Analytic inversion of the studentized Y-w*D assigned-arm contrast, using a
+      normal critical value. Asymptotic pointwise confidence sets, not exact
+      permutation intervals, simultaneous intervals, or Bayesian credible intervals.
+    set_types: [bounded, disjoint, half_line, all_real, singleton, empty, unavailable]
+    components: >-
+      Up to two closed intervals in wald_lower_1/wald_upper_1 and
+      wald_lower_2/wald_upper_2. Infinite endpoints preserved; unused components NaN.
+    insufficient_arm_size: >-
+      With fewer than two units in either arm, retain point estimates but return
+      NaN variance/bounds, wald_set_type=unavailable and
+      wald_reason=insufficient_arm_size.
+    interpretation: >-
+      Wald ratio, not automatically CACE. No absolute first-stage cutoff or
+      automatic monotonicity/timing certification. Lag summaries are descriptive.
+
+encouragement_model_api:
+  python_class: LongBetEncourage
+  r_function: longbet_encourage
+  engine: adoption_clock
+  inference_version: adoption_clock_v2
+  archive_version: 2
+  constructor:
+    required: []
+    defaults: {config: null, outcome: continuous, treatment: absorbing, identification: null,
+               lag_horizon: null, demean_pre: false, stage2_backend: longbet}
+    sampler_overrides: config_kwargs
+    wrapper_default_priors: {sigma_prior_a: 2.0, sigma_prior_b: 1.0}
+    treatment: >-
+      "absorbing" (default) is the adoption-clock model below; "intensity" is
+      the two-stage distributed-lag model of encouragement_intensity_api, for
+      which identification, lag_horizon, demean_pre and stage2_backend apply
+      (passing any of them with treatment="absorbing" raises).
+  components:
+    # Fixed parts of the model (MODEL_COMPONENTS): setting one false raises.
+    linear_trt: true
+    learn_beta_scale: true
+    interweave_gamma: true
+    ar1_errors: continuous outcome only; unit intercepts and unit-level partitions required
+    random_intercept: true in the outcome equation; the adoption hazard has none
+  defaults:
+    n_skip: 2
+  intercept_integral: >-
+    A binary outcome's unit intercept is integrated out of predictions exactly,
+    E[Phi(a + sigma Z)] = Phi(a / sqrt(1 + sigma^2)); the adoption hazard is
+    population-averaged, so there is no frailty to integrate.
+  removed_options:
+    linear_trt_horseshoe: >-
+      The linear moderator term always uses the horseshoe; true is accepted
+      with a DeprecationWarning, false raises.
+    linear_trt_outcome_only: >-
+      The linear term applies to both equations; false is accepted with a
+      DeprecationWarning, true raises.
+    adoption_frailty: >-
+      The adoption hazard is population-averaged; false is accepted with a
+      DeprecationWarning, true raises.
+  earlier_archives: >-
+    Archives of the earlier model (inference adoption_clock_v1: a hazard
+    frailty, no linear moderator term) are refused with that explanation.
+  warnings:
+    tempering: any adjacent tempering pair exchanging in fewer than 5% of attempts (swap_rates_)
+  r_fit:
+    required: ["y", d, z, x]
+    defaults: {t: null, x_trt: null, outcome: continuous, treatment: absorbing, identification: null,
+               lag_horizon: null, demean_pre: false, stage2_backend: longbet, strata: null,
+               config: {}, verbose: false}
+  r_predict:
+    required: [object]
+    defaults: {summary_only: true, groups: null, weights: null, block_size: null, alpha: 0.05, min_ess: 400, max_rhat: 1.01, practical_threshold: null}
+    variadic: "..."
+  fit:
+    required: ["y", d, z, x]
+    defaults: {t: null, x_trt: null, key: null, strata: null}
+  predict:
+    defaults: {summary_only: true, groups: null, weights: null, block_size: null, alpha: 0.05}
+  predict_conditional:
+    defaults: {x: null, z: null, t: null, alpha: 0.05, cace_stabilization: 0.02, monotonic_first_stage: true}
+  diagnostics_defaults: {min_ess: 400, max_rhat: 1.01}
+  posterior_methods:
+    effects: {min_ess: 400, max_rhat: 1.01}
+    stability: {min_ess: 400, max_rhat: 1.01}
+    wald: {require_convergence: true, min_ess: 400, max_rhat: 1.01}
+    first_stage: {practical_threshold: null, min_ess: 400, max_rhat: 1.01}
+    itt_covariance: {}
+    comparison: {}
+  bootstrap_comparison:
+    defaults: {replicates: 200, groups: null, random_seed: 0, alpha: 0.05, min_ess: 400, max_rhat: 1.01, callback: null}
+    sampling_unit: entire longitudinal unit record within assigned arm and baseline subgroup
+    covariance: paired refits of model and reference on the identical bootstrap sample
+    flag: >-
+      Pointwise normal comparison of ITTs only. Withheld when any fit fails
+      diagnostics, any estimate is unavailable, or fewer than 100 replications
+      are requested. Not exact randomization inference or a test of IV assumptions.
+  equations: >-
+    Outcome on the observed adoption clock (LongBet with treatment = adoption,
+    AR(1) errors for a continuous outcome); adoption as a population-averaged
+    discrete-time hazard on the offer clock (binary LongBet on the at-risk set,
+    cells after adoption masked). Both moderators carry a horseshoe linear term
+    beside the trees and the trajectory's scale is learned. The offer effects
+    are composed from the two.
+  target: all original study units with common equal weights, each with its own fitted intercepts
+  groups: >-
+    Fixed baseline labels; include overall all and each subgroup. Conditional
+    subgroup arm-mean reference differs from the fixed-denominator HT estimator
+    in encouragement_design_api. Missing-arm groups retain model predictions
+    flagged as extrapolation, with unavailable reference contrasts.
+  conditional_target: >-
+    predict_conditional describes a unit with the given covariate profile drawn
+    from the fitted population (both unit intercepts integrated out), for study
+    units and new cohorts alike.
+  returns:
+    draws: dictionary of itt_y, itt_d, wald; axes (group, horizon, chain, retained draw)
+    table: tidy posterior means for ITTs, medians/quantiles, diagnostics and support
+    reference: separate frequentist pointwise normal_ar confidence sets
+    itt_covariance: empirical joint posterior covariance across groups, horizons and both ITTs
+  ratio_rules: >-
+    Preserve signed and near-zero denominators, never trim draws. Exactly-zero
+    denominators yield NaN and withhold the ratio interval for that row. Ratio
+    means and mean MCSE are absent. Diagnose endpoint quantiles, bulk/tail ESS,
+    rank R-hat; wald() withholds ratios when either ITT or ratio diagnostics fail.
+  calibration_status: not_established
+  assumptions: >-
+    Exclusion (the offer moves outcomes only through adoption); adoption timing
+    not confounded with outcome innovations given covariates and the outcome's
+    unit intercept; absorbing adoption. The design-based reference needs none of
+    these for the population offer effects.
+  archive: >-
+    Versioned pickle-free NPZ contains both nested scalar archives, original
+    y/d/z/x/t and optional baseline x_trt, the configuration and input digests.
+    R stores raw archive bytes and plain results, retaining no live Python handles.
+  scope: >-
+    Complete individual single-wave randomization, absorbing adoption, complete
+    panels and baseline covariates. Generalized designs below have reference
+    inference only.
+
+encouragement_intensity_api:
+  # LongBetEncourage(treatment="intensity"): a continuous, non-absorbing encouraged
+  # behaviour d >= 0 and the distributed-lag kernel on the calendar clock.
+  engine: distributed_lag
+  inference_version: distributed_lag_v1
+  archive_version: 1
+  identification_tiers: [deconvolution, control_function, unconfounded]
+  default_identification: control_function
+  tier_labels: {deconvolution: T0, control_function: T1, unconfounded: T2}
+  stage2_backends: [longbet, linear]
+  default_lag_horizon: T - t0 (one lag per post-offer period)
+  equations: >-
+    Stage 1 (stream key_d): continuous LongBet for the dose on the absorbing
+    offer clock with unit intercept and AR(1) errors; its posterior-mean fitted
+    dose gives the residual v_it and its offer contrast gives CITT_D(x, t).
+    Stage 2 (stream key_y): LongBet with the lag kernel, y_it = mu_Y(x) + trend
+    + nu_Y(x) sum_{l=0}^{L} kappa_l D_lag[i,t,l] + CF_it + gamma_i + AR(1)
+    errors, kappa ~ GP over the lag index. D_lag holds CITT_D(X_i,t-l) Z_{i,t-l}
+    for T0 and the observed dose D_{i,t-l} (zero pre-panel padding, optionally
+    demeaned by the pre-offer unit mean) for T1 and T2; CF_it is the 3-term
+    plug-in control function [v_it, sum_{l=1}^{L} v_{i,t-l}, vbar_i] (x) [1, x]
+    for T1 and absent otherwise.
+  composition: >-
+    Draw by draw, CITT_Y(x,t) = nu_Y(x) sum_{l=0}^{t-t0} kappa_l CITT_D(x,t-l);
+    the control-function terms have mean zero in both arms and do not enter.
+    Population ITTs average the study units; the population kernel is
+    kappa_l * mean_i nu_Y(x_i) and the compliance-weighted kernel weights
+    nu_Y(x_i) by the unit's cumulative offer-induced dose, which is what the
+    design-based deconvolution identifies.
+  returns:
+    draws: itt_y, itt_d, wald (per-period ratio) and omega_cum (cumulative return per unit of cumulative dose)
+    kernel: posterior lag kernel per group beside the design-based Toeplitz kernel
+    discrepancy: z_{tier - T0} per group and horizon on the cumulative compliance-weighted kernel
+    diagnostics: cond(T_d), z_dip, FOSD check and the headline discrepancy per group
+    conditional: IntensityConditionalPrediction with citt_y, citt_d, kernel, kernel_cum, omega_cum and the decision layer
+  fit_extra_argument:
+    strata: baseline randomization strata (sites) used by the design-based reference and the dip screen only
+  linear_backend: >-
+    Closed-form two-way fixed-effects Gaussian distributed-lag regression
+    without covariate moderation (nu_Y = 1) and with independent errors; for
+    smoke tests and fallbacks, not the model of the paper.
+  reference_functions:
+    validate_intensity:
+      required: [z, d]
+      defaults: {t: null}
+    intensity_reference:
+      required: ["y", d, z]
+      defaults: {t: null, x: null, strata: null, lag_horizon: null, demean_pre: false, alpha: 0.05}
+  reference_returns:
+    itt: >-
+      one row per period: itt_d, itt_y with Neyman SEs, per-period ratio omega with
+      its Fieller/AR set, cumulative ITTs and omega_cum with its exact set
+    covariance: joint Neyman covariance of (itt_y, itt_d) over post-offer periods
+    kernel: unregularized Toeplitz kernel with delta-method SEs and the cumulative kernel
+    condition_number: cond(T_{ITT_D}) in the 2-norm
+    ecdf_fosd: arm-wise ECDF shift of cumulative dose and the one-sided Smirnov FOSD check
+    dip: dose-history-conditioned z_dip with unit-clustered SE
+    methods: [anderson_rubin, anderson_rubin_projection, discrepancy]
+  reference_assumptions: >-
+    Randomization; exclusion and no anticipation; linear additive
+    calendar-homogeneous lag effects; time-invariant conditional complier
+    weights. The population deconvolution identifies the compliance-weighted
+    kernel; it uses no within-arm dose variation, so it is immune to dose
+    endogeneity and classical measurement error.
+  calibration_status: not_established
+
+encouragement_design_api:
+  python_class: EncouragementDesign
+  r_constructor: encouragement_design
+  defaults:
+    assignment: complete
+    blocks: null
+    clusters: null
+    target: unit
+    probabilities: null
+    block_weights: null
+    cohort_weights: null
+    control: not_yet
+  effects_function: design_encouragement_effects
+  required: ["y", d, z]
+  effects_defaults: {t: null, design: null, groups: null, alpha: 0.05}
+  assignment_choices: [complete, bernoulli, staggered]
+  targets: [unit, cluster]
+  estimator: horvitz_thompson
+  covariance:
+    complete: blockwise Neyman on scaled whole-cluster totals
+    bernoulli: independent-assignment uncentered PSD covariance bound
+    staggered: independent categorical cohort assignment; uncentered PSD bound retains reused controls
+  probabilities: >-
+    Known scalar or vector in participant or first-appearance cluster order.
+    Constant within clusters. Staggered uses a mapping from zero-based observed
+    cohort indices and optional never to probabilities summing to one per unit.
+  weights: >-
+    Fixed equal-unit or equal-cluster target, optional explicit block weights,
+    required positive staggered cohort weights. No renormalization after a
+    cohort horizon or eligible controls disappear. Subgroups use fixed target
+    denominators, not realized subgroup arm counts.
+  returns:
+    table: cohort/calendar and fixed-weight horizon contrasts with support and reference confidence sets
+    covariance: full joint matrix indexed by (contrast_id, quantity) for itt_y and itt_d
+    metadata: serializable design, weights, probabilities, assumptions and original label mappings
+  limitations: >-
+    Pointwise asymptotic normal confidence sets; no finite-sample exact or
+    simultaneous guarantees. Uncentered covariance can be loose and depend on
+    outcome location. Staggered assumes independent cohort assignment and no
+    anticipation; fixed cohort quotas, sequential rerandomization, missing
+    panels and nonabsorbing adoption are unsupported. No model extrapolation.
+

@@ -1,0 +1,149 @@
+{
+  "row": {
+    "period": 1.0,
+    "period_index": 0,
+    "horizon": 1,
+    "post_encouragement": true,
+    "n_encouraged": 120,
+    "n_control": 120,
+    "itt_y_d_cov": 0.0006903594771241834,
+    "wald": 0.23728813559322035,
+    "inference": "normal_ar",
+    "itt_y": 0.11666666666666667,
+    "itt_y_se": 0.05892556509887896,
+    "itt_y_lower": 0.0011746813041934867,
+    "itt_y_upper": 0.23215865202913985,
+    "itt_d": 0.49166666666666664,
+    "itt_d_se": 0.04582855844748354,
+    "itt_d_lower": 0.40184434264621005,
+    "itt_d_upper": 0.5814889906871232,
+    "wald_set_type": "bounded",
+    "wald_reason": "",
+    "wald_lower_1": 0.002505794400660666,
+    "wald_upper_1": 0.4657578041667431,
+    "wald_lower_2": null,
+    "wald_upper_2": null
+  },
+  "targets": {
+    "conditional": {
+      "itt_y": 0.07599999999999997,
+      "itt_d": 0.45,
+      "wald": 0.1688888888888888,
+      "complier_encouragement": 0.16888888888888884,
+      "treatment_z0": 0.16888888888888884,
+      "treatment_z1": 0.16888888888888884
+    },
+    "finite": {
+      "itt_y": 0.125,
+      "itt_d": 0.5083333333333333,
+      "wald": 0.24590163934426232,
+      "complier_encouragement": 0.2459016393442623,
+      "treatment_z0": 0.2459016393442623,
+      "treatment_z1": 0.2459016393442623
+    }
+  },
+  "itt_covariance": [
+    [
+      0.003472222222222222,
+      0.0006903594771241834
+    ],
+    [
+      0.0006903594771241834,
+      0.0021002567693744153
+    ]
+  ],
+  "coverage": {
+    "conditional": {
+      "itt_y": true,
+      "itt_d": true,
+      "wald": true
+    },
+    "finite": {
+      "itt_y": true,
+      "itt_d": true,
+      "wald": true
+    }
+  },
+  "randomization_ar_at_truth": {
+    "conditional": {
+      "row": {
+        "period": 1.0,
+        "horizon": 1,
+        "beta": 0.1688888888888888,
+        "statistic": 0.587965672517206,
+        "p_value": 0.576,
+        "accepted": true,
+        "exceedances": 287,
+        "mc_p_lower": 0.5304383859730332,
+        "mc_p_upper": 0.6189666685878188
+      },
+      "metadata": {
+        "design": "single_wave_complete",
+        "n_units": 240,
+        "n_periods": 1,
+        "n_encouraged": 120,
+        "n_control": 120,
+        "encouragement_period": 1.0,
+        "encouragement_index": 0,
+        "has_pre_periods": false,
+        "perfect_compliance": false,
+        "randomization_method": "monte_carlo",
+        "assignment_support": 90903585043608129013204646464578592973032043156467649422446803733295600,
+        "evaluated_assignments": 499,
+        "seed": 1053157223,
+        "alpha": 0.05,
+        "null": "sharp horizon-specific Y(1)-beta*D(1)=Y(0)-beta*D(0)",
+        "finite_sample_valid_under_sharp_null": true,
+        "finite_sample_exact_for_heterogeneous_late": false,
+        "simultaneous": false,
+        "inversion": "evaluated grid only",
+        "between_grid_points": "unknown",
+        "left_tail": "unknown",
+        "right_tail": "unknown",
+        "monte_carlo_formula": "(1+exceedances)/(1+permutations)",
+        "mc_interval_target": "ideal enumeration tail probability",
+        "mc_interval_level": 0.95
+      }
+    },
+    "finite": {
+      "row": {
+        "period": 1.0,
+        "horizon": 1,
+        "beta": 0.24590163934426232,
+        "statistic": 0.07448675011391072,
+        "p_value": 0.942,
+        "accepted": true,
+        "exceedances": 470,
+        "mc_p_lower": 0.9175991127205958,
+        "mc_p_upper": 0.9607369081299985
+      },
+      "metadata": {
+        "design": "single_wave_complete",
+        "n_units": 240,
+        "n_periods": 1,
+        "n_encouraged": 120,
+        "n_control": 120,
+        "encouragement_period": 1.0,
+        "encouragement_index": 0,
+        "has_pre_periods": false,
+        "perfect_compliance": false,
+        "randomization_method": "monte_carlo",
+        "assignment_support": 90903585043608129013204646464578592973032043156467649422446803733295600,
+        "evaluated_assignments": 499,
+        "seed": 1053157223,
+        "alpha": 0.05,
+        "null": "sharp horizon-specific Y(1)-beta*D(1)=Y(0)-beta*D(0)",
+        "finite_sample_valid_under_sharp_null": true,
+        "finite_sample_exact_for_heterogeneous_late": false,
+        "simultaneous": false,
+        "inversion": "evaluated grid only",
+        "between_grid_points": "unknown",
+        "left_tail": "unknown",
+        "right_tail": "unknown",
+        "monte_carlo_formula": "(1+exceedances)/(1+permutations)",
+        "mc_interval_target": "ideal enumeration tail probability",
+        "mc_interval_level": 0.95
+      }
+    }
+  }
+}

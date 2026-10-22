@@ -1,0 +1,17 @@
+{
+  "selected_budget": {
+    "chains": 2,
+    "burnin": 200,
+    "draws": 400
+  },
+  "selection_basis": "Three prespecified disjoint-seed prediction-only budget pilots; held-out prediction error slightly lower at doubled budget in each; no comparator or IV truth performance inspected.",
+  "limitations": "This modest sampler budget is not certified converged; prediction chain discrepancies are algorithmic stability indicators. One abrupt-pilot adoption prediction changed by 0.0744 training SD under doubling.",
+  "pilot_source_sha256": "7725e3262ec4b0ad81c329450ac1348fa9f3451fae688828d27b474f9ef107f3",
+  "final_source_sha256": "220d9069f5ddce78e33516847576aa6fb1c1908c5b70be45c298a3beb7dcddc0",
+  "final_source_change": "Only default burnin100->200 and draws200->400; pilots passed these explicitly.",
+  "records": [
+    "linear_73113.json",
+    "long_abrupt_73112.json",
+    "long_smooth_73111.json"
+  ]
+}

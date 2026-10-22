@@ -1,0 +1,96 @@
+{
+  "config": {
+    "sizes": [
+      500,
+      2500
+    ],
+    "periods": 20,
+    "sweeps": 250,
+    "burnin": 2000,
+    "trees": 20,
+    "chains": 4,
+    "device": "cpu",
+    "out": "/home/ignacio/longbet-jax/benchmarks/benchmark_results.json"
+  },
+  "devices": [
+    "cpu:0"
+  ],
+  "results": [
+    {
+      "N": 500,
+      "T": 20,
+      "M": 10000,
+      "num_chains": 4,
+      "num_sweeps": 250,
+      "device": "cpu",
+      "compile_time_s": 7.651,
+      "sample_time_s": 30.805,
+      "cold_fit_time_s": 38.456,
+      "predict_time_s": 22.358,
+      "total_time_s": 60.813,
+      "iterations": 2500,
+      "ms_per_iteration": 12.32,
+      "att_ess_median": 507.3,
+      "att_rhat_max": 1.0263,
+      "seconds_per_effective_att_draw": 0.1199,
+      "att": [
+        1.1981,
+        1.7288,
+        2.0807,
+        2.46,
+        2.6927,
+        2.9032,
+        3.1744,
+        3.3926,
+        3.6099,
+        3.7321,
+        3.9805,
+        4.1329,
+        4.3937,
+        4.4479,
+        4.6044,
+        4.8976,
+        4.9216,
+        5.1207
+      ]
+    },
+    {
+      "N": 2500,
+      "T": 20,
+      "M": 50000,
+      "num_chains": 4,
+      "num_sweeps": 250,
+      "device": "cpu",
+      "compile_time_s": 5.482,
+      "sample_time_s": 93.154,
+      "cold_fit_time_s": 98.636,
+      "predict_time_s": 76.916,
+      "total_time_s": 175.552,
+      "iterations": 2500,
+      "ms_per_iteration": 37.26,
+      "att_ess_median": 668.2,
+      "att_rhat_max": 1.0257,
+      "seconds_per_effective_att_draw": 0.2627,
+      "att": [
+        1.1959,
+        1.6962,
+        2.0869,
+        2.4117,
+        2.6802,
+        2.9464,
+        3.1653,
+        3.4192,
+        3.5944,
+        3.7989,
+        3.9735,
+        4.1664,
+        4.3568,
+        4.515,
+        4.6712,
+        4.83,
+        4.9241,
+        5.1357
+      ]
+    }
+  ]
+}

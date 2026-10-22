@@ -1,280 +1,316 @@
-#' longbet model
+# Copyright 2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+#' LongBet: Bayesian ensemble trees for causal inference on longitudinal data
 #'
-#' @param y An n by t matrix of outcome variables.
-#' @param x n by p input matrix of covariates. (If the covariates matrix is different for the prognostic and treatment term, please use longbet_full).
-#' @param x_trt n by p_trt input matrix of covariates for treatment trees
-#' @param z An n by t matrix of treatment assignments.
-#' @param t time variable (post-treatment time for treatment term will be infered based on input t and z).
-#' @param pcat The number of categorical inputs in matrix x.
-#' @param num_sweeps The total number of sweeps over data (default is 60).
-#' @param num_burnin The number of burn-in sweeps (default is 20).
-#' @param num_trees_pr The number of trees in the prognostic forest (default is 50).
-#' @param num_trees_trt The number of trees in the treatment forest (default is 20).
-#' @param mtry number of variables to be sampled as split candidate per tree.
-#' @param n_min The minimum node size. (default is 1)
-#' @param sig_knl variance parameter for squared exponential kernel (default is 1).
-#' @param lambda_knl lengthscale parameter for squared exponential kernel (default is 1).
-#' @param split_time_ps whether to split on time variable in prognostic trees (default is TRUE)
-#' @param split_time_trt whether to split on time variable in treatment trees (default is FALSE)
+#' Fits time-varying heterogeneous treatment effects on panel data with separate
+#' prognostic and treatment forests, a conjugate calendar-time block, a shared
+#' Gaussian-process trajectory over the exposure index, and unit-level random
+#' intercepts. The sampler is the JAX engine in the `longbet-jax` Python
+#' package; this function marshals data in and results out.
 #'
-#' @return A fit file, which contains the draws from the model as well as parameter draws at each sweep.
+#' @section Estimand:
+#' The reported effect is the contrast between being `S` periods into treatment
+#' and not being treated at all,
+#' \deqn{\tau_t(X_i, S) = \beta_S \nu(X_i),}
+#' the exposure trajectory times the treatment forest. The treatment term enters
+#' treated cells only, so the untreated surface is the prognostic forest plus the
+#' calendar-time block and the unit intercept.
+#'
+#' @section Sampling defaults:
+#' The defaults use 2,000 burn-in iterations and 1,000 retained draws, thinned by
+#' 1, across four chains: 3,000 iterations per chain and 4,000 retained draws
+#' overall. Check [att_stability()] and the subgroup or probability-scale
+#' effects used in decisions.
+#'
+#' @section Categorical covariates:
+#' Every column is treated as ordered numeric; there is no `pcat` argument.
+#' One-hot encode unordered categorical variables with more than two levels
+#' before calling this function. This is a real modelling difference from the
+#' reference C++ implementation, not a detail.
+#'
+#' @param y Outcome panel, `[N x T]`. `NA` marks an unobserved cell; unbalanced
+#'   panels are marginalized, not imputed.
+#' @param x Covariates for the prognostic forest, `[N x P]`.
+#' @param z Binary treatment indicator, `[N x T]`. Must be absorbing.
+#' @param t Calendar time vector of length `T`. Defaults to `1:ncol(y)`.
+#' @param x_trt Covariates for the treatment forest, `[N x P_trt]`. Defaults to
+#'   `x`, in which case both forests share one block of columns.
+#' @param x_tv Time-varying prognostic covariates, `[N x T x P]`.
+#' @param x_trt_tv Time-varying treatment covariates, `[N x T x P]`.
+#' @param ps Propensity score, length `N` or `[N x T]`. Shown to the prognostic
+#'   forest only. For staggered adoption the principled analogue is a timing or
+#'   hazard score rather than one scalar per unit.
+#' @param baseline_forecast Optional counterfactual baseline forecast panel,
+#'   `[N x T]` or `[N x T x K]`. Double-centered and appended to the conjugate
+#'   calendar-time block while preserving collapsed unit-intercept updates.
+#' @param num_sweeps Posterior draws saved per chain, after burn-in.
+#' @param num_burnin Initial burn-in iterations discarded. This does not
+#'   guarantee convergence or sufficient effective sample size.
+#' @param n_skip Thinning interval; 1 saves every post-burn-in iteration.
+#'   At fixed retained draw count, larger values add sampling work while keeping
+#'   prediction cost and trace storage approximately fixed.
+#' @param num_chains Parallel MCMC chains. At least 2 are needed for R-hat.
+#' @param inner_loop_length Sweeps per dispatch; bounds compile time.
+#' @param num_trees_pr,num_trees_trt Trees in each forest.
+#' @param min_points_per_leaf_pr,min_points_per_leaf_trt Minimum leaf sizes.
+#' @param max_depth_pr,max_depth_trt Maximum tree depths.
+#' @param alpha_split_pr,beta_split_pr Tree-depth prior, prognostic forest.
+#' @param alpha_split_trt,beta_split_trt Tree-depth prior, treatment forest.
+#' @param num_cutpoints Maximum quantile bins per continuous covariate.
+#' @param sig_knl Kernel standard deviation for the exposure trajectory.
+#' @param lambda_knl Kernel lengthscale over the exposure index.
+#' @param kernel_type One of `"se"`, `"matern32"`, `"matern52"`, `"ar1"`.
+#' @param sigma_m Prior standard deviation of the marginalized constant GP mean.
+#' @param gp_constant_mean Whether the projection reverts to an estimated common
+#'   level rather than to zero.
+#' @param trend_num_features Random Fourier features in the unit feature map of
+#'   the calendar-time block. More capacity to represent a trend whose covariate
+#'   loading is nonlinear, at more cost per sweep. The horseshoe prior on the
+#'   block shrinks each column on its own evidence, so raising this is close to
+#'   free statistically; the cost is arithmetic.
+#' @param random_intercept Whether to fit unit random intercepts.
+#' @param gamma_prior_a,gamma_prior_b Inverse-gamma prior on the unit-intercept
+#'   variance.
+#' @param sigma_prior_a,sigma_prior_b Inverse-gamma prior on the error variance
+#'   on the standardized scale; the default IG(2, 1) is proper with prior mean 1.
+#' @param outcome `"continuous"`, `"binary"` (probit), or `"ordinal"` (ordered probit).
+#' @param num_categories Declared integer category count, at least 2, for ordinal
+#'   outcomes; `NULL` otherwise. Labels must be numeric `0,...,K-1`; empty
+#'   categories are allowed. Ordinal outcomes are never standardized.
+#' @param cutpoint_prior_scale Finite positive ordered-normal cutpoint prior
+#'   scale in latent probit units, default 5. Inactive for nonordinal or K=2.
+#' @param standardize Whether to centre and scale a continuous outcome internally.
+#' @param random_seed Base PRNG seed.
+#' @param device `"auto"`, `"cpu"` or `"gpu"`.
+#' @param sur Whether to enable full-precision triangular SUR coupling (inert for scalar `longbet`).
+#' @param sur_prior_var Prior variance for loading regression parameters.
+#' @param verbose Whether to print progress messages.
+#' @param ... Reserved. Passing an unsupported argument is an error rather than
+#'   being silently ignored.
+#' @return An object of class `longbet`.
+#' @seealso [predict.longbet()], [get_att()], [att_stability()]
 #' @export
-longbet <- function(y, x, x_trt, z, t, pcat, pcat_trt = NULL,
-                    num_sweeps = 60, num_burnin = 20,
-                    num_trees_pr = 20, num_trees_trt = 20,
-                    mtry = 0L, n_min = 10,
-                    sig_knl = 1, lambda_knl = 1,
-                    split_time_ps = TRUE, split_time_trt = TRUE,
-                    ps = NULL) {
+longbet <- function(y, x, z, t = NULL,
+                    x_trt = NULL, x_tv = NULL, x_trt_tv = NULL, ps = NULL,
+                    baseline_forecast = NULL,
+                    num_sweeps = 1000, num_burnin = 2000, n_skip = 1,
+                    num_chains = 4, inner_loop_length = NULL,
+                    num_trees_pr = 20, num_trees_trt = 60,
+                    min_points_per_leaf_pr = 10, min_points_per_leaf_trt = 10,
+                    max_depth_pr = 8, max_depth_trt = 8,
+                    alpha_split_pr = 0.95, beta_split_pr = 2.0,
+                    alpha_split_trt = 0.25, beta_split_trt = 3.0,
+                    num_cutpoints = 100,
+                    sig_knl = 1.0, lambda_knl = 1.0, kernel_type = "se",
+                    sigma_m = 1.0, gp_constant_mean = TRUE,
+                    trend_num_features = 64,
+                    random_intercept = TRUE,
+                    gamma_prior_a = 1.0, gamma_prior_b = 0.1,
+                    sigma_prior_a = 2.0, sigma_prior_b = 1.0,
+                    outcome = c("continuous", "binary", "ordinal"),
+                    standardize = TRUE, random_seed = 0,
+                    device = c("auto", "cpu", "gpu"),
+                    sur = TRUE, sur_prior_var = 1.0,
+                    verbose = FALSE, num_categories = NULL,
+                    cutpoint_prior_scale = 5.0, ...) {
 
-    if(!("matrix" %in% class(x))){
-        cat("Msg: input x is not a matrix, try to convert type.\n")
-        x = as.matrix(x)
-    }
-    if(!("matrix" %in% class(x_trt))){
-        cat("Msg: input x is not a matrix, try to convert type.\n")
-        x_trt = as.matrix(x_trt)
-    }
-    if(!("matrix" %in% class(z))){
-        cat("Msg: input z is not a matrix, try to convert type.\n")
-        z = as.matrix(z)
-    }
-    if(!("matrix" %in% class(y))){
-        cat("Msg: input y is not a matrix, try to convert type.\n")
-        y = as.matrix(y)
-    }
+  .reject_unsupported(...)
+  outcome <- match.arg(outcome)
+  device <- match.arg(device)
 
-    if(any(dim(z) != dim(y))) {
-        stop("Dimensions of response y and treatment z do not match. \n")
+  .check_cutpoint_prior(cutpoint_prior_scale)
+  if (outcome == "ordinal") num_categories <- .check_category_count(num_categories)
+  else if (!is.null(num_categories)) stop("num_categories must be NULL for nonordinal outcomes.", call. = FALSE)
+
+  y <- as.matrix(y)
+  if (outcome == "ordinal") .check_ordinal_labels(y, num_categories)
+  x <- as.matrix(x)
+  z <- as.matrix(z)
+  if (is.null(t)) t <- seq_len(ncol(y))
+  t <- as.numeric(t)
+
+  if (!identical(dim(y), dim(z))) {
+    stop(sprintf("y is %d x %d but z is %d x %d; they must match.",
+                 nrow(y), ncol(y), nrow(z), ncol(z)), call. = FALSE)
+  }
+  if (nrow(x) != nrow(y)) {
+    stop(sprintf("x has %d rows but y has %d.", nrow(x), nrow(y)), call. = FALSE)
+  }
+
+  lb <- longbet_py()
+  config <- lb$LongBetConfig(
+    num_sweeps = as.integer(num_sweeps),
+    num_burnin = as.integer(num_burnin),
+    n_skip = as.integer(n_skip),
+    num_chains = as.integer(num_chains),
+    inner_loop_length = if (is.null(inner_loop_length)) NULL else as.integer(inner_loop_length),
+    num_trees_pr = as.integer(num_trees_pr),
+    num_trees_trt = as.integer(num_trees_trt),
+    min_points_per_leaf_pr = as.integer(min_points_per_leaf_pr),
+    min_points_per_leaf_trt = as.integer(min_points_per_leaf_trt),
+    max_depth_pr = as.integer(max_depth_pr),
+    max_depth_trt = as.integer(max_depth_trt),
+    alpha_split_pr = as.numeric(alpha_split_pr),
+    beta_split_pr = as.numeric(beta_split_pr),
+    alpha_split_trt = as.numeric(alpha_split_trt),
+    beta_split_trt = as.numeric(beta_split_trt),
+    num_cutpoints = as.integer(num_cutpoints),
+    sig_knl = as.numeric(sig_knl),
+    lambda_knl = as.numeric(lambda_knl),
+    kernel_type = kernel_type,
+    sigma_m = as.numeric(sigma_m),
+    gp_constant_mean = as.logical(gp_constant_mean),
+    trend_num_features = as.integer(trend_num_features),
+    random_intercept = as.logical(random_intercept),
+    gamma_prior_a = as.numeric(gamma_prior_a),
+    gamma_prior_b = as.numeric(gamma_prior_b),
+    sigma_prior_a = as.numeric(sigma_prior_a),
+    sigma_prior_b = as.numeric(sigma_prior_b),
+    outcome = outcome,
+    num_categories = num_categories,
+    cutpoint_prior_scale = as.numeric(cutpoint_prior_scale),
+    standardize = as.logical(standardize),
+    random_seed = as.integer(random_seed),
+    device = device,
+    sur = as.logical(sur),
+    sur_prior_var = as.numeric(sur_prior_var)
+  )
+
+  if (isTRUE(verbose)) {
+    message(sprintf("longbet: fitting %d x %d panel on device '%s' (%d chain%s).",
+                    nrow(y), ncol(y), device, num_chains,
+                    if (num_chains == 1) "" else "s"))
+  }
+
+  py_model <- lb$LongBet(config)
+  py_model$fit(
+    y = .as_np_matrix(y, "y"),
+    x = .as_np_matrix(x, "x"),
+    z = .as_np_matrix(z, "z"),
+    t = .as_np_vector(t),
+    x_trt = .as_np_matrix(x_trt, "x_trt"),
+    x_tv = .as_np_array3(x_tv, "x_tv"),
+    x_trt_tv = .as_np_array3(x_trt_tv, "x_trt_tv"),
+    ps = if (is.null(ps)) NULL else reticulate::r_to_py(if (is.matrix(ps)) as.matrix(ps) else as.numeric(ps)),
+    baseline_forecast = .as_np_forecast(baseline_forecast, "baseline_forecast")
+  )
+
+  # Serialize the engine state to a raw vector: the R object must hold plain R
+  # data, never a live Python handle, or saveRDS() produces something that
+  # cannot be reopened.
+  tmp <- tempfile(fileext = ".npz")
+  on.exit(unlink(tmp), add = TRUE)
+  py_model$save(tmp)
+  raw_model <- readBin(tmp, what = "raw", n = file.info(tmp)$size)
+
+  trace <- py_model$trace
+  as_arr <- function(v) as.array(reticulate::py_to_r(reticulate::import("numpy")$asarray(v)))
+
+  # Draws go last in R and first in JAX; permute once, here.
+  flatten_draws <- function(a) {
+    if (length(dim(a)) == 3L) {           # (chains, draws, k) -> (k, chains*draws)
+      matrix(aperm(a, c(3, 2, 1)), nrow = dim(a)[3])
+    } else {                              # (draws, k) -> (k, draws)
+      t(a)
     }
+  }
 
-    if (length(t) != ncol(y)){
-        stop("Lenght of input t should match the columns of y. \n")
-    }
-
-    # if (!is.null(ps)){
-    #     if (!"matrix" %in% class(ps)){
-    #         ps = as.matrix(ps)
-    #     }
-    #     if (nrow(ps) != nrow(x)){
-    #         stop("Size of propsensity score vector should match x, \n")
-    #     } 
-    #     x_mod <- cbind(x, ps)
-    # }
-    # else {
-    #     x_mod <- x
-    #       # TODO: if propensity score is used in training, it should be provided in testing
-            # if it is not provided it should be estimated?
-    # }
-    
-    # check if treatment all start at the same time
-    # number of treated periods per unit should only be 0 or t1 - t0 + 1
-    # unique_z_sum <- unique(rowSums(z))
-    # if (length(unique_z_sum) != 2) {
-    #     stop("Current version can only handle treamtments occured at the same time. \n")
-    # }
-
-    # get post-treatment time variable
-    if (is.null(t)){
-        t_con = 1:ncol(y)
+  # (chains, draws) -> (chains*draws,) chain-major. In R, as.numeric() traverses
+  # column-major, so transpose first to avoid interleaving chains.
+  flatten_scalars <- function(a) {
+    if (length(dim(a)) == 2L) {
+      as.numeric(t(a))
     } else {
-        t_con = t
+      as.numeric(a)
     }
+  }
 
-    # if (split_time_trt){
-    #     stop("Can not handle split time on treatment tree with staggered adoption yet. \n")
-    # }
+  beta_draws <- as_arr(trace$beta)
+  gamma_draws <- as_arr(trace$gamma)
+  sigma2_draws <- flatten_scalars(as_arr(trace$sigma2))
 
-    # get post-treatment time matrix
-    get_trt_time <- function(z_vec, t){
-        treated_period <- which(z_vec == 1)
-        if (length(treated_period) == 0){
-            # no treated period
-            return(rep(0, length(z_vec)))
-        } else {
-            if (treated_period[1] == 1){
-                # case: no untreated period for this unit
-                # assuming last untreated time point is lag 1
-                t0 <- t[1] - 1
-            } else {
-                t0 <- t[treated_period[1] - 1]
-            }
-            trt_time <- sapply(t, function(x, t0) max(0, x - t0), t0 = t0)
-            return(trt_time)
-        }
-    }
-    post_trt_time <- t(apply(z, 1, get_trt_time, t = t))
-    beta_size <- max(post_trt_time) + 1
+  # The live handle is cached in an environment, but the model object also
+  # carries `raw_model`, which is what predict() falls back to after a
+  # saveRDS/readRDS round trip leaves the cached pointer dangling.
+  handle <- new.env(parent = emptyenv())
+  handle$py_model <- py_model
+  handle$pid <- Sys.getpid()
 
-    # get cumulative treated time
-    S <- t(apply(z, 1, cumsum))
-
-    # get a matrix of time for the panel data
-    T <- matrix(rep(t, nrow(y)), nrow = nrow(y), byrow = TRUE)
-
-    trt_time <- matrix(apply(z, 1, function(x) sum(x == 0)), nrow(z), 1)
-
-    if (ncol(y) > 1) {
-        post_t <- max(rowSums(z))
-        t0 <- ncol(y) - post_t + 1
-        t_mod <- c(rep(0, t0 - 1), 1:post_t)
-    } else {
-        t_mod <- c(1)
-        t0 <- NULL
-    }
-
-    if(!("matrix" %in% class(t_con))){
-        t_con = as.matrix(t_con)
-    }
-    if(!("matrix" %in% class(t_mod))){
-        t_mod = as.matrix(t_mod)
-    }
-
-
-    if (nrow(x) != nrow(y)) {
-        stop(paste0('row number mismatch between X (', nrow(x), ') and y (', nrow(y), ')'))
-    }
-
-    # check if p_categorical was not provided
-    if(is.null(pcat)) {
-        stop('number of categorical variables pcat_con is not specified')
-    }
-    
-    # check if p_categorical exceeds the number of columns
-    if(pcat > ncol(x)) {
-        stop('number of categorical variables (pcat_con) cannot exceed number of columns')
-    }
-
-    # check if p_categorical is negative
-    if(pcat < 0) {
-        stop('number of categorical values can not be negative: check pcat_con and pcat_mod')
-    }
-
-    if(is.null(pcat_trt)){
-        pcat_trt = pcat
-        cat("Assume number of categories in treatment trees equals ", pcat, "\n")
-    }
-
-    # check if p_categorical exceeds the number of columns
-    if(pcat_trt > ncol(x_trt)) {
-        stop('number of categorical variables (pcat_trt) cannot exceed number of columns')
-    }
-
-    # check if mtry exceeds the number of columns
-    if(mtry > ncol(x)) {
-        cat('Msg: mtry value cannot exceed number of columns; set to default.\n')
-        mtry <- 0
-    }
-    # check if mtry is negative
-    if(mtry < 0) {
-        cat('Msg: mtry value cannot exceed number of columns; set to default.\n')
-        mtry <- 0
-    }
-
-    # set defaults for taus if it wasn't provided with the call
-    tau_con = 0.6 * var(as.vector(y)) / num_trees_pr
-    tau_mod = 0.1 * var(as.vector(y)) / num_trees_trt
-    
-    meany = mean(y) # disable meany temporarily
-    y = y - meany
-    sdy = sd(y)
-
-    if(sdy == 0) {
-        stop('y is a constant variable; sdy = 0')
-    } else {
-        y = y / sdy
-    }
-
-    if(num_burnin >= num_sweeps){
-        stop(paste0('num_burnin (',num_burnin,') cannot exceed or match the total number of sweeps (',num_sweeps,')'))
-    }
-
-    # deprecated hyperparameters for user experience
-    max_depth = 50
-    num_cutpoints = 20
-    no_split_penality = log(num_cutpoints)
-    alpha_con = 0.95; beta_con = 1.25
-    kap_con = 16; s_con = 4
-    pr_scale = FALSE
-    alpha_mod = 0.95; beta_mod = 1.25
-    kap_mod = 16; s_mod = 4
-    trt_scale = FALSE
-    verbose = FALSE; parallel = TRUE
-    set_random_seed = TRUE; random_seed = 0
-    sample_weights_flag = TRUE
-    a_scaling = TRUE; b_scaling = FALSE
-
-    obj = longbet_cpp(y = y,
-                    X = x, 
-                    X_tau = x_trt, 
-                    z = z, 
-                    t_con = t_con, 
-                    t_mod = t_mod,
-                    post_t = post_trt_time,
-                    T = T, 
-                    S = S,
-                    beta_size = beta_size,
-                    num_sweeps = num_sweeps, 
-                    burnin = num_burnin,
-                    max_depth = max_depth, 
-                    n_min = n_min,
-                    num_cutpoints = num_cutpoints,
-                    no_split_penality = no_split_penality,
-                    mtry_pr = mtry, 
-                    mtry_trt = mtry,
-                    p_categorical_pr = pcat, 
-                    p_categorical_trt = pcat_trt,
-                    num_trees_pr = num_trees_pr,
-                    alpha_pr = alpha_con, 
-                    beta_pr = beta_con, 
-                    tau_pr = tau_con,
-                    kap_pr = kap_con, 
-                    s_pr = s_con,
-                    pr_scale = pr_scale,
-                    num_trees_trt = num_trees_trt,
-                    alpha_trt = alpha_mod, 
-                    beta_trt = beta_mod,
-                    tau_trt = tau_mod,
-                    kap_trt = kap_mod, 
-                    s_trt = s_mod,
-                    trt_scale = trt_scale,
-                    verbose = verbose, 
-                    parallel = parallel, 
-                    set_random_seed = set_random_seed,
-                    random_seed = random_seed, 
-                    sample_weights_flag = sample_weights_flag,
-                    a_scaling = a_scaling, 
-                    b_scaling = b_scaling,
-                    split_time_ps = split_time_ps, 
-                    split_time_trt = split_time_trt,
-                    sig_knl = sig_knl, 
-                    lambda_knl = lambda_knl)
-    class(obj) = "longbet"
-
-    obj$time = t_con
-    obj$t0 = t0
-    obj$sdy = sdy
-    obj$meany = meany
-
-    # obj$beta_draws = obj$beta_draws[, (num_burnin+1):num_sweeps]
-    return(obj)
+  fit <- list(
+    beta_values = flatten_draws(beta_draws),
+    gamma_draws = flatten_draws(gamma_draws),
+    sigma_gamma_draws = flatten_scalars(as_arr(trace$sigma_gamma2)),
+    # Standardized units, as the reference package reports it: multiply by sdy
+    # to recover the residual standard deviation on the data scale.
+    sigma0_draws = matrix(sqrt(sigma2_draws), nrow = 1),
+    b0_draws = flatten_scalars(as_arr(trace$b0)),
+    b1_draws = flatten_scalars(as_arr(trace$b1)),
+    alpha_draws = flatten_scalars(as_arr(trace$alpha)),
+    sdy = as.numeric(py_model$sdy),
+    meany = as.numeric(py_model$meany),
+    random_intercept = as.logical(random_intercept),
+    outcome = outcome,
+    num_categories = num_categories,
+    cutpoint_prior_scale = as.numeric(cutpoint_prior_scale),
+    model_params = list(
+      burnin = as.integer(num_burnin),
+      num_sweeps = as.integer(num_sweeps),
+      num_chains = as.integer(num_chains),
+      num_trees_pr = as.integer(num_trees_pr),
+      num_trees_trt = as.integer(num_trees_trt),
+      device = device
+    ),
+    raw_model = raw_model,
+    handle = handle,
+    t = t
+  )
+  class(fit) <- "longbet"
+  fit
 }
 
+#' @export
+print.longbet <- function(x, ...) {
+  p <- x$model_params
+  cat("LongBet fit (JAX engine)\n")
+  cat(sprintf("  Draws:   %d saved, %d burn-in, %d chain%s\n",
+              p$num_sweeps, p$burnin, p$num_chains,
+              if (p$num_chains == 1) "" else "s"))
+  cat(sprintf("  Trees:   %d prognostic / %d treatment\n",
+              p$num_trees_pr, p$num_trees_trt))
+  cat(sprintf("  Outcome: %s\n", x$outcome))
+  if (identical(x$outcome, "ordinal")) cat(sprintf("  Categories: %d; effects and residual SD are on the latent probit scale.\n", x$num_categories))
+  cat(sprintf("  Unit random intercept: %s\n",
+              if (isTRUE(x$random_intercept)) "yes" else "no"))
+  cat(sprintf("  Residual SD (posterior mean): %.4f\n",
+              mean(x$sigma0_draws) * x$sdy))
+  if (p$num_chains < 2) {
+    cat("  Note: R-hat needs at least two chains; set num_chains >= 2.\n")
+  }
+  invisible(x)
+}
 
-get_post_trt_time <- function(z_vec, t){
-    treated_period <- which(z_vec == 1)
-    if (length(treated_period) == 0){
-        # no treated period
-        return(rep(0, length(z_vec)))
-    } else {
-        if (treated_period[1] == 1){
-            # case: no untreated period for this unit
-            # assuming last untreated time point is lag 1
-            t0 <- t[1] - 1
-        } else {
-            t0 <- t[treated_period[1] - 1]
-        }
-        trt_time <- sapply(t, function(x, t0) max(0, x - t0), t0 = t0)
-        return(trt_time)
-    }
+#' @export
+summary.longbet <- function(object, ...) {
+  print(object, ...)
+  invisible(object)
+}
+
+#' Inspect available JAX compute devices
+#'
+#' @return Character vector such as `c("cpu:0", "gpu:0")`.
+#' @export
+longbet_devices <- function() {
+  as.character(reticulate::py_to_r(longbet_py()$available_devices()))
 }

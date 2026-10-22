@@ -1,0 +1,22 @@
+{
+  "correlated/aggregate.csv": "000901eac9431a9430800a7628c2722eb135c76bd9de5a3329106c35c511357a",
+  "correlated/fits.csv": "48acbf39540f792eab06ab44da2d299a05e25c11ede60334700d41c32aca1498",
+  "correlated/manifest.json": "334abebb2f4050af20cd3622b7e64a85f85cdcf4c99cc96c381d247a38658d18",
+  "correlated/observations.csv": "b6dfb9f82afab15bbbc663f0d3a5944582dceb7b635600e0ea47eeb4fdfcacf0",
+  "correlated/paired-comparisons.csv": "aaa5d024eb2d029a3079f85c3f63d6a3233beec079e803051c9428bcc29aa2b1",
+  "correlated/pointwise.csv": "087cf19fca1ebbdc43f4801a57e3b17602e4f739e6884535d7a901c34b2e2fb8",
+  "correlated/runs-index.csv": "b4a3feb067a94b21a5a860cc9114bd31a589f41c58896bc59ace128fe70ec49f",
+  "correlated/runs.jsonl.gz": "93d6d467f48c22feaffc63300bf6e6b61fdef10e30bfff4335f53bac1e5c293d",
+  "correlated/summary.json": "e9a35c4124bb60c78dd1b075bc246642077eb3c565a7282699382d2e6e7dd756",
+  "independent-audit.json": "e3ceb128303083c8f5921bb4465d52343d1b8b3dcf2b6d2a2dd9746ace91cb9e",
+  "primary/aggregate.csv": "9ff2d274f1e7ae39570a0d2290a3f97c02ff533c7ee3b8e377b48564dfb8485b",
+  "primary/fits.csv": "36743ff09ce750ac8f78463fad5ecfdc84463e5836c468052122c627b4167c4b",
+  "primary/manifest.json": "7f98aff14521e8b9246b4c3ed8f8617839fe35df3e0039bc392cbdb3f7acf558",
+  "primary/observations.csv": "8d91c16ff4bdd11eeae69d28aadeec73ee8430a6cccf971ef5c1cf1eed2a2104",
+  "primary/paired-comparisons.csv": "b6aafd27c6958d4dc1927d8c91b15f30084ee6f34469db3adc45cbfe86cfa7b0",
+  "primary/pointwise.csv": "ee192adb66dd78d7e18f1035672f20031cb7628475da920ac9f70a73038283ce",
+  "primary/runs-index.csv": "aa5b1813a96686bb55016e0d5ad6ed9f799983581e946b3f6f348c99a5cea6d7",
+  "primary/runs.jsonl.gz": "3b83ea90d75be8c10f0e194c3d3e8fd27ee0cfcd1a8767c369ce3df3cbc47530",
+  "primary/summary.json": "fe31f373718f0abf4a4ddb70e9325ede2fa60d59c0d20caa67dc8a681d60b8c7",
+  "source-verification.json": "5fd883c74b9a614c98be48775f0f629e885ea1a95996aac4e43bf4e5eea875f5"
+}

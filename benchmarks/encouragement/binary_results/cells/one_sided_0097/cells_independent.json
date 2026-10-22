@@ -1,0 +1,96 @@
+{
+  "model": "cells_independent",
+  "scenario": "one_sided",
+  "replicate": 97,
+  "specification": {
+    "n": 240,
+    "chains": 4,
+    "draws": 1000,
+    "burnin": 1000,
+    "prior": 1.0,
+    "seed": 19037,
+    "forest": {
+      "trees": 3,
+      "cutpoints": 4,
+      "split_probability": 0.5,
+      "prior_sd": 1.0
+    },
+    "max_candidates": 500000,
+    "permutations": 499
+  },
+  "sampler_seed": 1470837034,
+  "targets": {
+    "conditional": {
+      "itt_y": 0.07599999999999997,
+      "itt_d": 0.45,
+      "wald": 0.1688888888888888,
+      "complier_encouragement": 0.16888888888888884,
+      "treatment_z0": 0.16888888888888884,
+      "treatment_z1": 0.16888888888888884
+    },
+    "finite": {
+      "itt_y": 0.075,
+      "itt_d": 0.4375,
+      "wald": 0.17142857142857143,
+      "complier_encouragement": 0.17142857142857143,
+      "treatment_z0": 0.17142857142857143,
+      "treatment_z1": 0.17142857142857143
+    }
+  },
+  "status": "complete",
+  "summary": {
+    "itt_y": {
+      "lower": -0.011831607142107323,
+      "median": 0.10083032965581336,
+      "upper": 0.21478638038838585,
+      "width": 0.22661798753049317,
+      "mean": 0.10210899682485979,
+      "coverage": {
+        "conditional": true,
+        "finite": true
+      }
+    },
+    "itt_d": {
+      "lower": 0.39938110102492,
+      "median": 0.4847256574294627,
+      "upper": 0.5760639638580067,
+      "width": 0.1766828628330867,
+      "mean": 0.4855977744380035,
+      "coverage": {
+        "conditional": true,
+        "finite": true
+      }
+    },
+    "wald": {
+      "lower": -0.02548270677751892,
+      "median": 0.20658918402683785,
+      "upper": 0.4618633796154266,
+      "width": 0.4873460863929455,
+      "mean": null,
+      "coverage": {
+        "conditional": true,
+        "finite": true
+      }
+    },
+    "posterior_itt_covariance": [
+      [
+        0.0033459636433807037,
+        -2.340170987669365e-06
+      ],
+      [
+        -2.340170987669365e-06,
+        0.002083048459449416
+      ]
+    ],
+    "negative_stage_probability": 0.0,
+    "stage_below_005_probability": 0.0,
+    "bounds": {},
+    "diagnostics": {},
+    "diagnostic_mode": "iid_exact_draws",
+    "iid_mean_mcse": {
+      "itt_y": 0.0009145987704152986,
+      "itt_d": 0.0007216384931961113
+    }
+  },
+  "seconds": 0.025562912225723267
+}

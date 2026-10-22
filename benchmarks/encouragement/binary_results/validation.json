@@ -1,0 +1,18 @@
+{
+  "tests_passed": 112,
+  "exit_code": 0,
+  "seconds": 91.09,
+  "command": "OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 taskset -c 10,11 .venv/bin/python -m pytest tests/test_encourage_binary.py tests/test_encourage_direct_smooth.py tests/test_encourage_randomization_ar.py tests/test_encourage.py -q",
+  "test_sha256": {
+    "tests/test_encourage_binary.py": "557a85d15f21890cd79f0fd620af9f222e670bae5842f76527cd44b2ca4fcf0d",
+    "tests/test_encourage_direct_smooth.py": "92b0051c0cb3416f081235043f124dc55244001ef0136dde04ae6fbed8765b84",
+    "tests/test_encourage_randomization_ar.py": "4efbe65cad989a03f3833b9308771efce76e5c0297df79f7513ce0df96e0c399",
+    "tests/test_encourage.py": "b7cb74b5303a481252c3e248536299d7048fec0deca5863b375454177009dc8e"
+  },
+  "sampler_sha256": {
+    "binary_dgp.py": "86641b20d27062dbb4ed57d5cb79fe92b9394bfa6135ed4dba2c39d85f264402",
+    "binary_cells.py": "3b976342388aeb72fe186c3cb4b097908541ac70a8041b574f00a1bd444334cb",
+    "binary_forest.py": "db9054c7276ae7d5502b1e7381472a03105df7fdbfe54c4a0b990a196d8d2254",
+    "binary_benchmark.py": "1fcebac6dc6b55830edd36a784feaf421689c3ef8a88703f5e67d98b4c361591"
+  }
+}

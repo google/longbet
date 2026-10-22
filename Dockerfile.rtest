@@ -1,0 +1,45 @@
+# Copyright 2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Test image for the R front door: the R package plus the Python engine it drives.
+#
+#   docker build -f Dockerfile.rtest -t longbet-rtest .
+#   docker run --rm longbet-rtest                      # testthat suite
+#   docker run --rm longbet-rtest bash -lc \
+#     'cd /tmp && R CMD build /src && R CMD check --no-manual longbet_*.tar.gz'
+#
+# Dockerfile.rtest-nopython is the companion that proves the package still
+# checks cleanly with no Python engine installed at all.
+FROM longbet-r:reticulate
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# One virtualenv holding the engine; reticulate is pointed straight at it, so
+# the tests exercise the same path a user gets from use_virtualenv().
+ENV VIRTUAL_ENV=/opt/longbet-venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+ENV RETICULATE_PYTHON="$VIRTUAL_ENV/bin/python"
+
+WORKDIR /src
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
+
+COPY . /src
+RUN R CMD INSTALL --no-multiarch --with-keep.source /src
+
+CMD ["Rscript", "-e", "testthat::test_local('/src', reporter='summary')"]

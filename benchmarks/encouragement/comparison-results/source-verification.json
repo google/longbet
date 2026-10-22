@@ -1,0 +1,21 @@
+{
+  "primary": {
+    "reproducible_revision": "802cad26ac86f22ba59cd11860feffa556dfd896",
+    "launch_parent_revision": "fe6ec5e38b4a9e80216025ca74bb60681e1b653c",
+    "launch_manifest_sha256": "7f98aff14521e8b9246b4c3ed8f8617839fe35df3e0039bc392cbdb3f7acf558",
+    "files_checked": 43,
+    "nonparticipating_modules_changed_during_launch": [
+      "src/longbet/_hazard_adoption.py",
+      "src/longbet/_structural_deconvolution.py"
+    ],
+    "explanation": "The primary run began from the repaired working tree before its commit. Only the separately repaired hazard and duration modules differ from the launch-wide hashes; neither is called by this comparison. All candidate, reference, diagnostic, DGP and driver sources match the recorded revision."
+  },
+  "correlated": {
+    "reproducible_revision": "eb6e537819e3ef51b3727493017d4103018e5d4b",
+    "launch_parent_revision": "802cad26ac86f22ba59cd11860feffa556dfd896",
+    "launch_manifest_sha256": "334abebb2f4050af20cd3622b7e64a85f85cdcf4c99cc96c381d247a38658d18",
+    "files_checked": 43,
+    "nonparticipating_modules_changed_during_launch": [],
+    "explanation": "All source hashes match this committed revision; the commit was created after launch."
+  }
+}

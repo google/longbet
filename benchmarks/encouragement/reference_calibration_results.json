@@ -1,0 +1,161 @@
+{
+  "n": 400,
+  "replications": 5000,
+  "seed": 2026,
+  "method": "normal_ar",
+  "nominal_pointwise_coverage": 0.95,
+  "scope": "fixed populations; individual complete randomization; immediate uptake",
+  "results": [
+    {
+      "regime": "strong",
+      "n_compliers": 160,
+      "truth_itt_y": [
+        0.3996784039877462,
+        0.5652306195071032
+      ],
+      "truth_itt_d": [
+        0.4,
+        0.4
+      ],
+      "truth_wald": [
+        0.9991960099693654,
+        1.413076548767758
+      ],
+      "itt_y": {
+        "coverage": [
+          0.9472,
+          0.9484
+        ],
+        "mcse": [
+          0.003162662169755093,
+          0.003128496124338337
+        ]
+      },
+      "itt_d": {
+        "coverage": [
+          0.9816,
+          0.9816
+        ],
+        "mcse": [
+          0.001900602009890549,
+          0.001900602009890549
+        ]
+      },
+      "wald": {
+        "coverage": [
+          0.9444,
+          0.9456
+        ],
+        "mcse": [
+          0.003240636974423392,
+          0.003207511184703804
+        ]
+      },
+      "negative_first_stage_rate": [
+        0.0,
+        0.0
+      ],
+      "confidence_set_counts_across_horizons": {
+        "bounded": 10000
+      }
+    },
+    {
+      "regime": "weak",
+      "n_compliers": 20,
+      "truth_itt_y": [
+        0.04713510254167673,
+        0.06665910127828581
+      ],
+      "truth_itt_d": [
+        0.05,
+        0.05
+      ],
+      "truth_wald": [
+        0.9427020508335345,
+        1.333182025565716
+      ],
+      "itt_y": {
+        "coverage": [
+          0.9506,
+          0.9526
+        ],
+        "mcse": [
+          0.003064625262572897,
+          0.0030051036587778464
+        ]
+      },
+      "itt_d": {
+        "coverage": [
+          0.9582,
+          0.9582
+        ],
+        "mcse": [
+          0.0028302918577418814,
+          0.0028302918577418814
+        ]
+      },
+      "wald": {
+        "coverage": [
+          0.9502,
+          0.9506
+        ],
+        "mcse": [
+          0.0030763601869742093,
+          0.003064625262572897
+        ]
+      },
+      "negative_first_stage_rate": [
+        0.0738,
+        0.0738
+      ],
+      "confidence_set_counts_across_horizons": {
+        "all_real": 6132,
+        "disjoint": 1278,
+        "bounded": 2590
+      }
+    },
+    {
+      "regime": "zero",
+      "n_compliers": 0,
+      "truth_itt_y": [
+        0.0,
+        0.0
+      ],
+      "truth_itt_d": [
+        0.0,
+        0.0
+      ],
+      "truth_wald": null,
+      "itt_y": {
+        "coverage": [
+          0.9504,
+          0.9512
+        ],
+        "mcse": [
+          0.0030704996336101387,
+          0.0030469184432800286
+        ]
+      },
+      "itt_d": {
+        "coverage": [
+          0.9276,
+          0.9276
+        ],
+        "mcse": [
+          0.0036649212815557178,
+          0.0036649212815557178
+        ]
+      },
+      "wald": null,
+      "negative_first_stage_rate": [
+        0.4436,
+        0.4436
+      ],
+      "confidence_set_counts_across_horizons": {
+        "all_real": 8378,
+        "bounded": 724,
+        "disjoint": 898
+      }
+    }
+  ]
+}

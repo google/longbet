@@ -1,0 +1,227 @@
+{
+  "scenario": "long_smooth",
+  "seed": 73111,
+  "purpose": "prediction budget stability only; no IV truth or comparator performance inspected",
+  "versions": {
+    "numpy": "2.5.2",
+    "scipy": "1.18.1"
+  },
+  "python": "3.12.3",
+  "source_sha256": "7725e3262ec4b0ad81c329450ac1348fa9f3451fae688828d27b474f9ef107f3",
+  "training_accounts": 120,
+  "test_accounts": 120,
+  "horizons": 16,
+  "features": 15,
+  "runs": [
+    {
+      "config": {
+        "baseline_trees": 4,
+        "effect_trees": 4,
+        "cutpoints": 4,
+        "burnin": 100,
+        "draws": 200,
+        "chains": 2,
+        "length_scales": [
+          0.0,
+          2.0,
+          8.0
+        ],
+        "validation_fraction": 0.2,
+        "nugget": 0.1,
+        "interaction_partitions": true,
+        "max_interaction_rules": 64,
+        "seed": 10073111
+      },
+      "seconds": 6.258601818233728,
+      "metadata": {
+        "learner": "longbet_direct_gp_finite_depth_two_forest",
+        "role": "experimental_nuisance_prediction_only",
+        "config": {
+          "baseline_trees": 4,
+          "effect_trees": 4,
+          "cutpoints": 4,
+          "burnin": 100,
+          "draws": 200,
+          "chains": 2,
+          "length_scales": [
+            0.0,
+            2.0,
+            8.0
+          ],
+          "validation_fraction": 0.2,
+          "nugget": 0.1,
+          "interaction_partitions": true,
+          "max_interaction_rules": 64,
+          "seed": 10073111
+        },
+        "selected_length_scale": 8.0,
+        "length_scale_units": "median_post_period_spacing",
+        "validation_scores": [
+          {
+            "length_scale": 0.0,
+            "validation_mse": 0.42163793624985385
+          },
+          {
+            "length_scale": 2.0,
+            "validation_mse": 0.3604094186660058
+          },
+          {
+            "length_scale": 8.0,
+            "validation_mse": 0.2946536926263974
+          }
+        ],
+        "inner_validation_indices": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          13,
+          22,
+          29,
+          30,
+          49,
+          63,
+          80,
+          84,
+          85,
+          88,
+          89,
+          90,
+          96,
+          97,
+          100,
+          102,
+          113,
+          118
+        ],
+        "inner_holdout_sha256": "d16f4ed848f8daf623ab290336dcb62a4c4cab07209e3e12651559f2138dbb7c",
+        "inner_training_count": 96,
+        "inner_validation_count": 24,
+        "new_unit_intercept": "integrated_prior_mean_zero",
+        "adoption_prediction": "clipped_gaussian_working_mean",
+        "posterior_interval_inference": false,
+        "n_training_accounts": 120,
+        "n_horizons": 16,
+        "n_finite_tree_rules": 73,
+        "prediction_chain_rms_discrepancy": [
+          0.1599888525783742,
+          0.09270834360850673
+        ],
+        "prediction_chain_rms_scale": "training_factual_predictions_per_response_training_sd",
+        "random_intercept_sampling": "integrated_during_tree_updates_refreshed_before_variances"
+      },
+      "heldout_observed_arm_normalized_mse": 0.30454729880440057
+    },
+    {
+      "config": {
+        "baseline_trees": 4,
+        "effect_trees": 4,
+        "cutpoints": 4,
+        "burnin": 200,
+        "draws": 400,
+        "chains": 2,
+        "length_scales": [
+          0.0,
+          2.0,
+          8.0
+        ],
+        "validation_fraction": 0.2,
+        "nugget": 0.1,
+        "interaction_partitions": true,
+        "max_interaction_rules": 64,
+        "seed": 10073111
+      },
+      "seconds": 12.856242707930505,
+      "metadata": {
+        "learner": "longbet_direct_gp_finite_depth_two_forest",
+        "role": "experimental_nuisance_prediction_only",
+        "config": {
+          "baseline_trees": 4,
+          "effect_trees": 4,
+          "cutpoints": 4,
+          "burnin": 200,
+          "draws": 400,
+          "chains": 2,
+          "length_scales": [
+            0.0,
+            2.0,
+            8.0
+          ],
+          "validation_fraction": 0.2,
+          "nugget": 0.1,
+          "interaction_partitions": true,
+          "max_interaction_rules": 64,
+          "seed": 10073111
+        },
+        "selected_length_scale": 8.0,
+        "length_scale_units": "median_post_period_spacing",
+        "validation_scores": [
+          {
+            "length_scale": 0.0,
+            "validation_mse": 0.4191713729087403
+          },
+          {
+            "length_scale": 2.0,
+            "validation_mse": 0.38486820463483706
+          },
+          {
+            "length_scale": 8.0,
+            "validation_mse": 0.2971292172036561
+          }
+        ],
+        "inner_validation_indices": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          13,
+          22,
+          29,
+          30,
+          49,
+          63,
+          80,
+          84,
+          85,
+          88,
+          89,
+          90,
+          96,
+          97,
+          100,
+          102,
+          113,
+          118
+        ],
+        "inner_holdout_sha256": "d16f4ed848f8daf623ab290336dcb62a4c4cab07209e3e12651559f2138dbb7c",
+        "inner_training_count": 96,
+        "inner_validation_count": 24,
+        "new_unit_intercept": "integrated_prior_mean_zero",
+        "adoption_prediction": "clipped_gaussian_working_mean",
+        "posterior_interval_inference": false,
+        "n_training_accounts": 120,
+        "n_horizons": 16,
+        "n_finite_tree_rules": 73,
+        "prediction_chain_rms_discrepancy": [
+          0.16159792146651575,
+          0.028875416445998614
+        ],
+        "prediction_chain_rms_scale": "training_factual_predictions_per_response_training_sd",
+        "random_intercept_sampling": "integrated_during_tree_updates_refreshed_before_variances"
+      },
+      "heldout_observed_arm_normalized_mse": 0.3031983395246657
+    }
+  ],
+  "heldout_prediction_rms_change_per_response_training_sd": [
+    0.013403260811940076,
+    0.02883743473706355
+  ],
+  "heldout_prediction_max_change_per_response_training_sd": [
+    0.0589835545869867,
+    0.16596890633382158
+  ]
+}

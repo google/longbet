@@ -1,0 +1,216 @@
+{
+  "model": "cells_monotone",
+  "scenario": "one_sided",
+  "replicate": 40,
+  "specification": {
+    "n": 240,
+    "chains": 4,
+    "draws": 1000,
+    "burnin": 1000,
+    "prior": 1.0,
+    "seed": 19037,
+    "forest": {
+      "trees": 3,
+      "cutpoints": 4,
+      "split_probability": 0.5,
+      "prior_sd": 1.0
+    },
+    "max_candidates": 500000,
+    "permutations": 499
+  },
+  "sampler_seed": 1351133298,
+  "targets": {
+    "conditional": {
+      "itt_y": 0.07599999999999997,
+      "itt_d": 0.45,
+      "wald": 0.1688888888888888,
+      "complier_encouragement": 0.16888888888888884,
+      "treatment_z0": 0.16888888888888884,
+      "treatment_z1": 0.16888888888888884
+    },
+    "finite": {
+      "itt_y": 0.075,
+      "itt_d": 0.42083333333333334,
+      "wald": 0.1782178217821782,
+      "complier_encouragement": 0.1782178217821782,
+      "treatment_z0": 0.1782178217821782,
+      "treatment_z1": 0.1782178217821782
+    }
+  },
+  "status": "complete",
+  "summary": {
+    "itt_y": {
+      "lower": -0.11441274975418778,
+      "median": -0.006769064757139957,
+      "upper": 0.0992726138168988,
+      "width": 0.21368536357108658,
+      "mean": -0.00598508654495744,
+      "coverage": {
+        "conditional": true,
+        "finite": true
+      }
+    },
+    "itt_d": {
+      "lower": 0.27093644095904484,
+      "median": 0.35691458675580945,
+      "upper": 0.4440277928886029,
+      "width": 0.17309135192955805,
+      "mean": 0.35640642132323114,
+      "coverage": {
+        "conditional": false,
+        "finite": true
+      }
+    },
+    "wald": {
+      "lower": -0.34259596274321186,
+      "median": -0.019438198149222936,
+      "upper": 0.27886054462092835,
+      "width": 0.6214565073641403,
+      "mean": null,
+      "coverage": {
+        "conditional": true,
+        "finite": true
+      }
+    },
+    "posterior_itt_covariance": [
+      [
+        0.0029695763885902986,
+        0.0004550388931462374
+      ],
+      [
+        0.0004550388931462374,
+        0.0019514361264773752
+      ]
+    ],
+    "negative_stage_probability": 0.0,
+    "stage_below_005_probability": 0.0,
+    "bounds": {
+      "0.0": {
+        "compatible_fraction": 0.7295,
+        "defined_fraction": 1.0,
+        "available_fraction": 0.7295,
+        "complier_encouragement": {
+          "status": "withheld: some draws have empty sets or zero complier mass"
+        },
+        "treatment_z0": {
+          "status": "withheld: some draws have empty sets or zero complier mass"
+        },
+        "treatment_z1": {
+          "status": "withheld: some draws have empty sets or zero complier mass"
+        }
+      },
+      "0.05": {
+        "compatible_fraction": 0.85975,
+        "defined_fraction": 1.0,
+        "available_fraction": 0.85975,
+        "complier_encouragement": {
+          "status": "withheld: some draws have empty sets or zero complier mass"
+        },
+        "treatment_z0": {
+          "status": "withheld: some draws have empty sets or zero complier mass"
+        },
+        "treatment_z1": {
+          "status": "withheld: some draws have empty sets or zero complier mass"
+        }
+      },
+      "0.1": {
+        "compatible_fraction": 0.93425,
+        "defined_fraction": 1.0,
+        "available_fraction": 0.93425,
+        "complier_encouragement": {
+          "status": "withheld: some draws have empty sets or zero complier mass"
+        },
+        "treatment_z0": {
+          "status": "withheld: some draws have empty sets or zero complier mass"
+        },
+        "treatment_z1": {
+          "status": "withheld: some draws have empty sets or zero complier mass"
+        }
+      },
+      "1.0": {
+        "compatible_fraction": 1.0,
+        "defined_fraction": 1.0,
+        "available_fraction": 1.0,
+        "complier_encouragement": {
+          "endpoint_quantiles": [
+            [
+              -0.5669637414804496,
+              0.337035699313241
+            ],
+            [
+              -0.3156472189820506,
+              0.4826989481127227
+            ],
+            [
+              -0.08561941285470187,
+              0.6440187408305753
+            ]
+          ],
+          "outer_envelope": [
+            -0.5669637414804496,
+            0.6440187408305753
+          ],
+          "truth_in_envelope": {
+            "conditional": true,
+            "finite": true
+          }
+        },
+        "treatment_z0": {
+          "endpoint_quantiles": [
+            [
+              -0.9264113168186543,
+              1.0
+            ],
+            [
+              -0.7299713176437459,
+              1.0
+            ],
+            [
+              -0.5479822095762107,
+              1.0
+            ]
+          ],
+          "outer_envelope": [
+            -0.9264113168186543,
+            1.0
+          ],
+          "truth_in_envelope": {
+            "conditional": true,
+            "finite": true
+          }
+        },
+        "treatment_z1": {
+          "endpoint_quantiles": [
+            [
+              -0.7358077074482203,
+              0.337035699313241
+            ],
+            [
+              -0.5840020247196127,
+              0.4829558251196475
+            ],
+            [
+              -0.4355564964413889,
+              0.6440187408305753
+            ]
+          ],
+          "outer_envelope": [
+            -0.7358077074482203,
+            0.6440187408305753
+          ],
+          "truth_in_envelope": {
+            "conditional": true,
+            "finite": true
+          }
+        }
+      }
+    },
+    "diagnostics": {},
+    "diagnostic_mode": "iid_exact_draws",
+    "iid_mean_mcse": {
+      "itt_y": 0.0008616229437216575,
+      "itt_d": 0.0006984690627503438
+    }
+  },
+  "seconds": 0.02901502139866352
+}

@@ -1,0 +1,72 @@
+{
+  "status": "complete independent audit",
+  "checks": {
+    "packet_file_hashes": 19,
+    "packet_records_and_original_hashes": 900,
+    "independent_pointwise_metrics": 432,
+    "matched_secondary_seeds_targets_reference_rows": 300,
+    "independent_paired_rmse_bootstraps": 12,
+    "report_numeric_tables": 6
+  },
+  "groups": {
+    "primary": {
+      "records": 600,
+      "fit_failures": {
+        "linear:unadjusted": 0,
+        "linear:linear_ancova": 0,
+        "linear:spline_ancova": 0,
+        "linear:longbet_direct": 0,
+        "smooth:unadjusted": 0,
+        "smooth:linear_ancova": 0,
+        "smooth:spline_ancova": 0,
+        "smooth:longbet_direct": 0,
+        "abrupt:unadjusted": 0,
+        "abrupt:linear_ancova": 0,
+        "abrupt:spline_ancova": 0,
+        "abrupt:longbet_direct": 0,
+        "weak:unadjusted": 0,
+        "weak:linear_ancova": 0,
+        "weak:spline_ancova": 0,
+        "weak:longbet_direct": 0,
+        "zero:unadjusted": 0,
+        "zero:linear_ancova": 0,
+        "zero:spline_ancova": 0,
+        "zero:longbet_direct": 0,
+        "serial_heteroskedastic:unadjusted": 0,
+        "serial_heteroskedastic:linear_ancova": 0,
+        "serial_heteroskedastic:spline_ancova": 0,
+        "serial_heteroskedastic:longbet_direct": 0
+      },
+      "diagnostic_failures": {
+        "linear": 10,
+        "smooth": 6,
+        "abrupt": 1,
+        "weak": 7,
+        "zero": 9,
+        "serial_heteroskedastic": 2
+      }
+    },
+    "correlated": {
+      "records": 300,
+      "fit_failures": {
+        "linear:unadjusted": 0,
+        "linear:linear_ancova": 0,
+        "linear:spline_ancova": 0,
+        "linear:longbet_direct": 0,
+        "smooth:unadjusted": 0,
+        "smooth:linear_ancova": 0,
+        "smooth:spline_ancova": 0,
+        "smooth:longbet_direct": 0,
+        "abrupt:unadjusted": 0,
+        "abrupt:linear_ancova": 0,
+        "abrupt:spline_ancova": 0,
+        "abrupt:longbet_direct": 0
+      },
+      "diagnostic_failures": {
+        "linear": 14,
+        "smooth": 5,
+        "abrupt": 2
+      }
+    }
+  }
+}

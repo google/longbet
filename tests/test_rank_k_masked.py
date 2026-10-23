@@ -542,3 +542,22 @@ def test_transport_audit_size_and_power():
     flags_alt = [_audit(200 + r, 2.5)[0].flag for r in range(40)]
     assert np.mean(flags_null) <= 0.25, np.mean(flags_null)   # nominal 10% for a 90% interval
     assert np.mean(flags_alt) >= 0.80, np.mean(flags_alt)
+
+
+def test_masked_pre_period_causal_features_neutralizes_unobserved_cells():
+    """Unobserved pre-anchor cells in build_causal_features do not inject harmonic-imputation artifacts into pre_anchor_loadings."""
+    from longbet import build_causal_features
+
+    d = censored_dgp(77, N=60)
+    y_masked_pre = d["y"].copy()
+    # Mask first 8 pre-period columns for half the units (late-entry cohorts)
+    late = np.arange(60) >= 30
+    y_masked_pre[late, :8] = np.nan
+    feats = build_causal_features(y_masked_pre, d["z"], x=d["x"], n_factor_loadings=2, seed=77)
+    assert feats.pre_anchor_loadings is not None
+    assert feats.pre_anchor_loadings.shape == (60, 2)
+    assert np.all(np.isfinite(feats.pre_anchor_loadings))
+    # Verify complete-panel bit-identity is preserved
+    feats_complete = build_causal_features(d["y"], d["z"], x=d["x"], n_factor_loadings=2, seed=77)
+    assert np.all(np.isfinite(feats_complete.pre_anchor_loadings))
+

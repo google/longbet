@@ -1221,7 +1221,20 @@ def build_causal_features(
     # Step 1: Zero-shot temporal forecast across the panel window
     lc_spec = resolve_late_context(late_context)
     zero_shot, ctx_features, ctx_resid = _zero_shot_stage(context, T, anchor_t, lc_spec, forecaster_fn)
-    pre_anchor_loadings = extract_pre_anchor_loadings(ctx_resid, q=int(n_factor_loadings))
+    ctx_resid_for_loadings = ctx_resid
+    if anchor_t > 0:
+        obs_in_panel = np.isfinite(np.asarray(y, dtype=np.float64)[:, :anchor_t])
+        if not np.all(obs_in_panel):
+            if y_pre_history is not None:
+                obs_ctx = np.hstack([np.ones((N, np.asarray(y_pre_history).shape[1]), dtype=bool), obs_in_panel])
+            else:
+                obs_ctx = obs_in_panel
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                row_means_resid = np.nanmean(np.where(obs_ctx, ctx_resid, np.nan), axis=1, keepdims=True)
+            row_means_resid = np.where(np.isfinite(row_means_resid), row_means_resid, 0.0)
+            ctx_resid_for_loadings = np.where(obs_ctx, ctx_resid, row_means_resid)
+    pre_anchor_loadings = extract_pre_anchor_loadings(ctx_resid_for_loadings, q=int(n_factor_loadings))
 
     # Step 2: Control-group out-of-fold cross-learning adapter
     rng = np.random.default_rng(seed)

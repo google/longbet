@@ -3095,14 +3095,20 @@ def _fit_rank_k_longbet(
         def _tau_tilde_mean() -> list[np.ndarray]:
             return [fitted[j]["tau_draws"].mean(axis=1) for j in range(1, K_eff)]
 
+        def _stratum_order_and_means(m: int) -> tuple[list[np.ndarray], list[list[np.ndarray]]]:
+            """Partition higher-mode posterior draws into ``m`` equal strata sorted by Mode-1 correction."""
+            tt_all = [fitted[j]["tau_draws"].T for j in range(1, K_eff)]  # each (S_total, N)
+            corr_all = mode1_dynamic_correction(layout, tt_all)  # (S_total, N)
+            score = np.einsum("sn,n->s", corr_all, att_unit_weights)
+            strata = [np.sort(np.asarray(idx, dtype=np.int64)) for idx in np.array_split(np.argsort(score), m)]
+            comps: list[list[np.ndarray]] = []
+            for idx in strata:
+                comps.append([fitted[j]["tau_draws"][:, idx].mean(axis=1) for j in range(1, K_eff)])
+            return strata, comps
+
         def _tau_tilde_draws(m: int) -> list[list[np.ndarray]]:
-            """``m`` evenly spaced posterior draws (spanning the chains) of every higher mode, per component."""
-            per_mode = []
-            for j in range(1, K_eff):
-                td = fitted[j]["tau_draws"]
-                cols = np.round(np.linspace(0, td.shape[1] - 1, m)).astype(int)
-                per_mode.append(td[:, cols].T)  # (m, N)
-            return [[per_mode[j][c] for j in range(K_eff - 1)] for c in range(m)]
+            """``m`` quantile-stratum means of every higher mode, per component (exact grand mean)."""
+            return _stratum_order_and_means(m)[1]
 
         def _mode1_targets(m: int | None) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
             """Mode-1 outcome, forecast projection and (optionally) ``m`` propagated targets."""
@@ -3193,14 +3199,6 @@ def _fit_rank_k_longbet(
                     f_gap_1 = float(np.sum(att_unit_weights * df_k) - np.mean(df_k[ctrl]))
                     th_var = float(np.var(res_k["theta_f_draws"], ddof=1)) if res_k["theta_f_draws"].size > 1 else 0.0
                     att_var_slope = float((f_gap_1 ** 2) * th_var)
-                chains_raw = res_k["tau_chains"]
-                chains_proj = _project_mode1_tau_draws(
-                    chains_raw.reshape(-1, N).T, cohorts_arr=cohorts_arr, ever=ever, waves=waves,
-                    att_unit_weights=att_unit_weights, tau_clip=cfg.tau_clip, catt_floor=cfg.catt_floor,
-                ).T.reshape(chains_raw.shape)
-                att_chains = np.einsum("csn,n->cs", chains_proj, att_unit_weights)
-                rhat_att = float(compute_rhat(att_chains))
-                ess_att = float(compute_ess(att_chains, method="bulk"))
             fitted[k] = res_k
             fitted_m[k] = int(m_eff)
 
@@ -3223,6 +3221,64 @@ def _fit_rank_k_longbet(
                 n_trees_tau=int(cfg.num_trees_tau_higher), draws_per_chain_k=m_eff * draws_per_chain, idx=None,
             )
             fitted_m[k] = int(m_eff)
+
+        # Pair each Mode-1 posterior draw with its within-stratum higher-mode draw and propagate
+        # the mean-zero within-stratum dynamic residual when mode_coupling == "propagated".
+        half_s = draws_per_chain // 2
+        comp_grid = np.broadcast_to(
+            np.arange(m_eff, dtype=np.int64)[None, :, None], (num_chains, m_eff, draws_per_chain)
+        )
+        if m_eff > 1 and half_s >= 1:
+            comp_chains = np.concatenate(
+                [
+                    comp_grid[:, :, :half_s].reshape(num_chains, m_eff * half_s),
+                    comp_grid[:, :, half_s:].reshape(num_chains, m_eff * (draws_per_chain - half_s)),
+                ],
+                axis=1,
+            )
+        else:
+            comp_chains = comp_grid.reshape(num_chains, m_eff * draws_per_chain)
+        comp_of_col = comp_chains.reshape(-1)
+
+        chains_raw = fitted[0]["tau_chains"]
+        chains_proj = _project_mode1_tau_draws(
+            chains_raw.reshape(-1, N).T, cohorts_arr=cohorts_arr, ever=ever, waves=waves,
+            att_unit_weights=att_unit_weights, tau_clip=cfg.tau_clip, catt_floor=cfg.catt_floor,
+        ).T.reshape(chains_raw.shape)
+        att_chains = np.einsum("csn,n->cs", chains_proj, att_unit_weights)
+        rhat_att = float(compute_rhat(att_chains))
+        if propagate_modes and m_eff > 1:
+            att_chains_ess = att_chains.copy()
+            grand_att = float(np.mean(att_chains))
+            for c_idx in range(m_eff):
+                sel_c = comp_chains[0] == c_idx
+                att_chains_ess[:, sel_c] -= float(np.mean(att_chains[:, sel_c])) - grand_att
+            ess_att = float(compute_ess(att_chains_ess, method="bulk"))
+        else:
+            ess_att = float(compute_ess(att_chains, method="bulk"))
+
+        if propagate_modes and m_eff > 1:
+            strata, comps = _stratum_order_and_means(m_eff)
+            inv_perm = np.empty_like(comp_of_col)
+            stratum_of_col = np.empty_like(comp_of_col)
+            for c_idx in range(m_eff):
+                inv_perm[strata[c_idx]] = np.nonzero(comp_of_col == c_idx)[0]
+                stratum_of_col[strata[c_idx]] = c_idx
+            res0 = dict(fitted[0])
+            res0["tau_draws"] = res0["tau_draws"][:, inv_perm]
+            if cfg.projection == "two_pass":
+                resid_tt = [
+                    fitted[j]["tau_draws"].T
+                    - np.stack([comps[c_idx][j - 1] for c_idx in range(m_eff)], axis=0)[stratum_of_col]
+                    for j in range(1, K_eff)
+                ]
+                corr_resid = mode1_dynamic_correction(layout, resid_tt).T  # (N, S_total)
+                res0["tau_draws"] = res0["tau_draws"] - corr_resid
+                comp_raw_new = np.empty_like(res0["comp_tau_draws"])
+                for c_idx in range(m_eff):
+                    comp_raw_new[c_idx] = res0["tau_draws"][:, strata[c_idx]].T
+                res0["comp_tau_draws"] = comp_raw_new
+            fitted[0] = res0
 
         for k in range(K_eff):
             res_k = fitted[k]

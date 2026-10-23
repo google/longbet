@@ -126,8 +126,14 @@ from longbet._forecast import (
     extract_pre_anchor_loadings,
     patch_ridge_forecaster,
 )
+from longbet._aggregates import (
+    TransportAuditResult,
+    cumulative_effect,
+    event_time_trajectory,
+    rank_k_transport_audit,
+)
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 
 def build_causal_timesfm_features(*args, **kwargs):  # pragma: no cover - thin deprecated alias
@@ -179,6 +185,7 @@ __all__ = [
     "RankKLongBetResult",
     "RankKPriorDraws",
     "StabilityResult",
+    "TransportAuditResult",
     "adoption_cohorts",
     "adoption_distribution",
     "assert_nested_additivity",
@@ -188,6 +195,7 @@ __all__ = [
     "compose_offer_effect",
     "compute_ess",
     "compute_rhat",
+    "cumulative_effect",
     "derive_exposure",
     "design_encouragement_effects",
     "effect_draws",
@@ -195,6 +203,7 @@ __all__ = [
     "encouragement_effects",
     "encouragement_summary",
     "evaluate_prior_sensitivity",
+    "event_time_trajectory",
     "extrapolate_rank_k_decay",
     "fit_rank_k_hybrid",
     "fit_rank_k_longbet",
@@ -223,6 +232,7 @@ __all__ = [
     "prior_data_conflict_report",
     "prior_vs_posterior_summary",
     "rank_k_placebo_audit",
+    "rank_k_transport_audit",
     "reconcile_nested_3arm_draws",
     "reconcile_nested_3arm_monthly_draws",
     "resolve_device",

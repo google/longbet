@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "longbet-jax"
-version = "0.6.0"
+version = "0.7.0"
 description = "Bayesian causal forests for longitudinal experiments and panel data (LongBet, Rank-K exposure-basis BCF) in JAX"
 readme = "README.md"
 requires-python = ">=3.10"

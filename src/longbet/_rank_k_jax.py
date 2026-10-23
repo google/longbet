@@ -497,6 +497,13 @@ class RankKModeState(State):
     N_units: int = field(static=True, default=0)
     N_ctrl: int = field(static=True, default=0)
     N_trt: int = field(static=True, default=0)
+    # Units with a positive precision weight (all of them on complete panels). A unit
+    # with ``w_unit == 0`` -- a masked panel's unit whose window does not support the
+    # mode -- adds nothing to the weighted sums of squares, so it must not count in
+    # the shape parameter of the inverse-gamma variance updates either.
+    N_ctrl_dof: int = field(static=True, default=0)
+    N_trt_dof: int = field(static=True, default=0)
+    N_all_dof: int = field(static=True, default=0)
     q_factors: int = field(static=True, default=0)
     has_forecast: bool = field(static=True, default=True)
     use_forests: bool = field(static=True, default=True)
@@ -596,6 +603,10 @@ def init_rank_k_mode(
     n0 = int(ctrl_idx.size)
     n1 = int(trt_idx.size)
     q = int(lam32.shape[1])
+    w_np = np.asarray(w_unit, dtype=np.float64)
+    n0_dof = int(np.sum(w_np[np.asarray(ctrl_idx, dtype=np.int64)] > 0.0))
+    n1_dof = int(np.sum(w_np[np.asarray(trt_idx, dtype=np.int64)] > 0.0))
+    n_all_dof = int(np.sum(w_np > 0.0))
 
     ctrl_mask = z32 == 0.0
     trt_mask = z32 == 1.0
@@ -748,6 +759,9 @@ def init_rank_k_mode(
         N_units=N,
         N_ctrl=n0,
         N_trt=n1,
+        N_ctrl_dof=n0_dof,
+        N_trt_dof=n1_dof,
+        N_all_dof=n_all_dof,
         q_factors=q,
         has_forecast=bool(has_forecast),
         use_forests=bool(use_forests),
@@ -1057,7 +1071,7 @@ def _update_conjugate_blocks(
         logdet_gh = jnp.sum(jnp.log(jnp.maximum(denom_gh, 1e-12)), axis=-1)         # (G, H)
         quad_gh = jnp.sum(v_g2[:, None, :] / denom_gh, axis=-1)                     # (G, H)
 
-        a_post = jnp.asarray(state.sigma_prior_a, dtype=f64) + 0.5 * state.N_ctrl
+        a_post = jnp.asarray(state.sigma_prior_a, dtype=f64) + 0.5 * state.N_ctrl_dof
         b_post_gh = jnp.asarray(state.sigma_prior_b, dtype=f64) + 0.5 * quad_gh
         log_post_gh = (
             spatial_cache.ratio_log_prior[None, :]
@@ -1124,7 +1138,7 @@ def _update_conjugate_blocks(
         zeta_new64 = jnp.zeros(state.N_units, dtype=f64)
         delta_zeta1 = jnp.zeros(state.N_trt, dtype=f64)
         if state.baseline_untreated_only:
-            n_base = jnp.sum(base_mask.astype(f64))
+            n_base = jnp.float64(state.N_ctrl_dof)  # positive-weight never-treated units (all of them on complete panels)
             ssr_base = jnp.sum(w_base * jnp.square(r_z))
             sig2_new64 = _sample_inv_gamma_64(
                 k_sig,
@@ -1383,7 +1397,7 @@ def rank_k_mode_single_step(
                 # kriging mean (delta_zeta1 removed, as in the intercept draw).
                 r_trt = jnp.asarray(R, dtype=f64)[state.trt_idx] - dz1_64
                 ssr_1 = jnp.sum(w1_vec * jnp.square(r_trt))
-                n_1 = jnp.float64(state.N_trt)
+                n_1 = jnp.float64(state.N_trt_dof)
                 sig0 = jnp.sqrt(sig2_64)
 
                 def _log_cond_log_s2(u):  # u = log s_eta^2 (Jacobian included)
@@ -1451,7 +1465,7 @@ def rank_k_mode_single_step(
             ssr_all = jnp.sum(jnp.asarray(state.w_unit, dtype=f64) * jnp.square(jnp.asarray(R, dtype=f64)))
             sig2_all = _sample_inv_gamma_64(
                 random.fold_in(key, 9901),
-                jnp.asarray(state.sigma_prior_a, dtype=f64) + 0.5 * state.N_units,
+                jnp.asarray(state.sigma_prior_a, dtype=f64) + 0.5 * state.N_all_dof,
                 jnp.asarray(state.sigma_prior_b, dtype=f64) + 0.5 * ssr_all,
             )
             sigma2_new = jnp.clip(sig2_all, 1e-8, 1e6).astype(jnp.float32)
@@ -1706,18 +1720,15 @@ def _bin_mode_predictors(
     )
 
 
-def _run_chain_loop(
+def _scan_sweeps(
     key: jax.Array,
-    df_vec: jax.Array,
-    init_state: RankKModeState,
+    st0: RankKModeState,
     spatial_cache: SpatialKernelCache,
     num_burnin: int,
     num_draws: int,
-    thin: int = 1,
+    thin: int,
 ) -> tuple[RankKModeState, dict[str, jax.Array]]:
-    """Run ``num_burnin + num_draws * thin`` sweeps in one ``lax.scan``; keep every ``thin``-th post-burn-in sweep."""
-    R_init = init_state.resid + init_state.theta_f * (init_state.df_vec - df_vec)
-    st0 = eqx.tree_at(lambda s: (s.df_vec, s.resid), init_state, (df_vec, R_init))
+    """Run ``num_burnin + num_draws * thin`` sweeps from ``st0`` in one ``lax.scan``; keep every ``thin``-th post-burn-in sweep."""
 
     def scan_body(carry: tuple[jax.Array, RankKModeState], _: None) -> tuple[tuple[jax.Array, RankKModeState], dict[str, jax.Array]]:
         k_c, st = carry
@@ -1745,10 +1756,54 @@ def _run_chain_loop(
     return final_state, trace
 
 
+def _run_chain_loop(
+    key: jax.Array,
+    df_vec: jax.Array,
+    init_state: RankKModeState,
+    spatial_cache: SpatialKernelCache,
+    num_burnin: int,
+    num_draws: int,
+    thin: int = 1,
+) -> tuple[RankKModeState, dict[str, jax.Array]]:
+    """Run ``num_burnin + num_draws * thin`` sweeps in one ``lax.scan``; keep every ``thin``-th post-burn-in sweep."""
+    R_init = init_state.resid + init_state.theta_f * (init_state.df_vec - df_vec)
+    st0 = eqx.tree_at(lambda s: (s.df_vec, s.resid), init_state, (df_vec, R_init))
+    return _scan_sweeps(key, st0, spatial_cache, num_burnin, num_draws, thin)
+
+
+def _run_chain_loop_shifted(
+    key: jax.Array,
+    df_vec: jax.Array,
+    dy_shift: jax.Array,
+    init_state: RankKModeState,
+    spatial_cache: SpatialKernelCache,
+    num_burnin: int,
+    num_draws: int,
+    thin: int = 1,
+) -> tuple[RankKModeState, dict[str, jax.Array]]:
+    """:func:`_run_chain_loop` for a track whose mode outcome is ``dy_k + dy_shift`` (scaled units).
+
+    The sampler only ever reads the outcome through the residual, so a per-track
+    outcome shift is a per-track shift of the initial residual. Used to propagate
+    higher-mode posterior draws into the Mode-1 target of masked panels, exactly as
+    forecast draws are propagated through ``df_vec``.
+    """
+    R_init = init_state.resid + dy_shift + init_state.theta_f * (init_state.df_vec - df_vec)
+    st0 = eqx.tree_at(lambda s: (s.df_vec, s.resid), init_state, (df_vec, R_init))
+    return _scan_sweeps(key, st0, spatial_cache, num_burnin, num_draws, thin)
+
+
 _run_chains_vmap = enable_x64()(
     jax.jit(
         enable_x64()(jax.vmap(_run_chain_loop, in_axes=(0, 0, None, None, None, None, None))),
         static_argnums=(4, 5, 6),
+    )
+)
+
+_run_chains_vmap_shifted = enable_x64()(
+    jax.jit(
+        enable_x64()(jax.vmap(_run_chain_loop_shifted, in_axes=(0, 0, 0, None, None, None, None, None))),
+        static_argnums=(5, 6, 7),
     )
 )
 
@@ -1795,6 +1850,7 @@ def sample_rank_k_mode_jax(
     sigma_nu_prior_scale: float = 0.5,
     treated_extra_variance: bool = False,
     thin: int = 1,
+    dy_k_draws: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Sample one mode ``k`` across either a single point forecast or ``M`` posterior forecast draws.
 
@@ -1819,6 +1875,15 @@ def sample_rank_k_mode_jax(
     which case the treatment forest is re-centered with them so that
     ``tau_intercept`` is the ATT. ``thin`` keeps every ``thin``-th post-burn-in
     sweep (``num_draws_per_chain`` retained draws per track either way).
+
+    ``dy_k_draws`` (``(M, N)``, optional) gives every track its own mode outcome
+    in place of ``dy_k`` -- the Mode-1 targets of a masked panel under ``M``
+    higher-mode posterior draws. Tracks are paired with the forecast draws when
+    both are given (equal ``M``); the outcome enters as a per-track shift of the
+    initial residual, so a single track or ``None`` reproduces the plain path.
+    Units with ``w_unit == 0`` take no part in any likelihood (their forest
+    predictions are still returned) and are excluded from the variance updates'
+    sample counts and from the outcome scale.
     """
     base_key = random.key(int(random_seed))
     k_bin, k_main = random.split(base_key)
@@ -1838,8 +1903,10 @@ def sample_rank_k_mode_jax(
     )
 
     # Standardize dy_k by the control-group post-forecast residual SD so leaf priors
-    # operate on exact post-CUPED residual units (strictly pre/control-only).
+    # operate on exact post-CUPED residual units (strictly pre/control-only). Units
+    # with weight 0 (unsupported modes of masked panels) carry no information.
     c_idx_np = np.asarray(ctrl_idx, dtype=np.int32)
+    w_pos_c = np.asarray(w_unit[c_idx_np], dtype=np.float64) > 0.0
     if has_forecast and c_idx_np.size > 0:
         w_c = np.asarray(w_unit[c_idx_np], dtype=np.float64)
         df_c = np.asarray(df_k_point[c_idx_np], dtype=np.float64)
@@ -1852,7 +1919,7 @@ def sample_rank_k_mode_jax(
         resid_ctrl = dy_c - th_c * df_c
     else:
         resid_ctrl = np.asarray(dy_k[c_idx_np], dtype=np.float64)
-    ctrl_sd = float(np.std(resid_ctrl))
+    ctrl_sd = float(np.std(resid_ctrl[w_pos_c]))
     y_scale = max(ctrl_sd, 1e-4)
     dy_scaled = dy_k / y_scale
     df_pt_scaled = df_k_point / y_scale
@@ -1899,22 +1966,39 @@ def sample_rank_k_mode_jax(
     thin_eff = max(int(thin), 1)
 
     C = int(num_chains)
-    if df_k_draws is None or not has_forecast or df_k_draws.shape[0] <= 1:
+    m_df = int(df_k_draws.shape[0]) if (df_k_draws is not None and has_forecast) else 1
+    m_dy = int(dy_k_draws.shape[0]) if dy_k_draws is not None else 1
+    if m_df > 1 and m_dy > 1 and m_df != m_dy:
+        raise ValueError(f"df_k_draws ({m_df}) and dy_k_draws ({m_dy}) must hold the same number of draws")
+    if m_df <= 1 and m_dy <= 1:
         chain_keys = random.split(k_main, C)
         if df_k_draws is not None and has_forecast and df_k_draws.shape[0] == 1:
             df_single = jnp.asarray(np.asarray(df_k_draws[0], dtype=np.float64) / y_scale, dtype=jnp.float32)
         else:
             df_single = init_state.df_vec
         df_batch = jnp.repeat(df_single[None, :], C, axis=0)
-        _, trace = _run_chains_vmap(
-            chain_keys,
-            df_batch,
-            init_state,
-            spatial_cache,
-            int(num_burnin),
-            int(num_draws_per_chain),
-            thin_eff,
-        )
+        if dy_k_draws is not None and dy_k_draws.shape[0] == 1:
+            dy_shift = jnp.asarray((np.asarray(dy_k_draws[0], dtype=np.float64) - np.asarray(dy_k, dtype=np.float64)) / y_scale, dtype=jnp.float32)
+            _, trace = _run_chains_vmap_shifted(
+                chain_keys,
+                df_batch,
+                jnp.repeat(dy_shift[None, :], C, axis=0),
+                init_state,
+                spatial_cache,
+                int(num_burnin),
+                int(num_draws_per_chain),
+                thin_eff,
+            )
+        else:
+            _, trace = _run_chains_vmap(
+                chain_keys,
+                df_batch,
+                init_state,
+                spatial_cache,
+                int(num_burnin),
+                int(num_draws_per_chain),
+                thin_eff,
+            )
         # trace["tau"] has shape (C, S, N) -> rescale by y_scale
         tau_chains = np.asarray(trace["tau"], dtype=np.float64) * y_scale  # (C, S, N)
         theta_chains = np.asarray(trace["theta_f"], dtype=np.float64)      # (C, S)
@@ -1945,22 +2029,41 @@ def sample_rank_k_mode_jax(
             "y_scale": float(y_scale),
         }
 
-    # Multi-component propagation over M forecast draws via flat depth-1 jax.vmap
-    df_draws_scaled = jnp.asarray(np.asarray(df_k_draws, dtype=np.float64) / y_scale, dtype=jnp.float32)
-    M = int(df_draws_scaled.shape[0])
+    # Multi-component propagation over M forecast draws (and / or M Mode-1 targets) via flat depth-1 jax.vmap
+    M = max(m_df, m_dy)
+    if m_df > 1:
+        df_draws_scaled = jnp.asarray(np.asarray(df_k_draws, dtype=np.float64) / y_scale, dtype=jnp.float32)
+    else:
+        df_draws_scaled = jnp.repeat(init_state.df_vec[None, :], M, axis=0)
     comp_keys_flat = random.split(k_main, C * M)
     df_batch = jnp.tile(df_draws_scaled, (C, 1))
     total_burn = max(int(num_burnin), int(warm_burnin))
 
-    _, trace_flat = _run_chains_vmap(
-        comp_keys_flat,
-        df_batch,
-        init_state,
-        spatial_cache,
-        int(total_burn),
-        int(num_draws_per_chain),
-        thin_eff,
-    )
+    if m_dy > 1:
+        dy_shift_scaled = jnp.asarray(
+            (np.asarray(dy_k_draws, dtype=np.float64) - np.asarray(dy_k, dtype=np.float64)[None, :]) / y_scale,
+            dtype=jnp.float32,
+        )
+        _, trace_flat = _run_chains_vmap_shifted(
+            comp_keys_flat,
+            df_batch,
+            jnp.tile(dy_shift_scaled, (C, 1)),
+            init_state,
+            spatial_cache,
+            int(total_burn),
+            int(num_draws_per_chain),
+            thin_eff,
+        )
+    else:
+        _, trace_flat = _run_chains_vmap(
+            comp_keys_flat,
+            df_batch,
+            init_state,
+            spatial_cache,
+            int(total_burn),
+            int(num_draws_per_chain),
+            thin_eff,
+        )
     S = int(num_draws_per_chain)
     N = int(dy_k.shape[0])
     tau_cm = np.asarray(trace_flat["tau"], dtype=np.float64).reshape(C, M, S, N) * y_scale

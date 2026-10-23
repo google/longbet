@@ -83,6 +83,17 @@ except ImportError:
     )
     from longbet._latecontext import resolve_late_context
 
+from longbet._rank_k_event_time import (
+    EventTimeLayout,
+    build_event_time_layout,
+    check_observation_structure,
+    event_time_precision_weights,
+    mode1_dynamic_correction,
+    project_event_time_mode,
+    restricted_wls_precision_weights,
+    restricted_wls_projection,
+)
+
 
 def _get_rhat_ess():
     try:
@@ -183,7 +194,11 @@ class ExposureBasisSpec:
 DEFAULT_BASIS_SPEC = ExposureBasisSpec()
 _SHORT_COHORT_POLICIES = ("drop_mode", "reduce_k", "error")
 _TAU_PRIOR_FAMILIES = ("normal", "halfstudentt", "gamma_spike")
-
+_ATT_WEIGHTINGS = ("cell", "unit")
+_PROJECTIONS = ("two_pass", "restricted_wls")
+_MODE_COUPLINGS = ("propagated", "plug_in", "none")
+# Config fields that only the common-basis (masked / event-time) path reads.
+_EVENT_TIME_ONLY_OPTIONS = ("projection", "min_support_modes", "mode_coupling", "support_covariate")
 
 
 # Validated budget of each uncertainty variant: RankKLongBetConfig.__post_init__
@@ -467,6 +482,31 @@ class RankKLongBetConfig:
         (default ``None``: the paper's ``{1, 1 - exp(-s / 3), s / L}`` plus cosines).
       keep_unprojected_draws: Keep the unprojected posterior draws (``*_raw``) whenever
         ``catt_floor`` or ``tau_clip`` is active (default True).
+      att_weighting: Weights of the treated units in ``att_draws``: ``"cell"``
+        (default; ``L_i / |O_trt|``, the paper's convention, ``L_i`` being the
+        observed post-adoption cells under a mask) or ``"unit"`` (``1 / N_trt``,
+        the population estimand of masked event-time panels).
+      projection: Per-unit projection on the common event-time basis when windows
+        differ (masked panels): ``"two_pass"`` (default; single-mode projections of
+        the higher modes on their supported units, Mode 1 as the window mean after
+        the fitted dynamics are removed) or ``"restricted_wls"`` (joint
+        ``(Psi_O' Psi_O)^{-1} Psi_O' r_O`` of the supported modes, condition-number
+        guarded; a sensitivity option).
+      min_support_modes: Minimum observed post-adoption periods a unit needs to
+        project mode ``k`` (index ``k``, 0-based; the last entry applies to higher
+        modes), non-decreasing whole numbers (default ``(1, 6, 8)``). Units below
+        support get precision weight 0 for that mode and a cross-sectional
+        posterior prediction; units below ``min_support_modes[0]`` are an error.
+      common_basis: ``None`` (default: one common basis on ``s = 1..H`` for masked
+        and single-wave panels, the paper's per-cohort bases otherwise), ``True`` or
+        ``False`` (not available for masked panels).
+      mode_coupling: How the fitted higher modes enter the Mode-1 targets of
+        partially observed units: ``"propagated"`` (default; ``n_forecast_draws``
+        Mode-1 tracks, one higher-mode posterior draw each, paired with the
+        forecast draws when present), ``"plug_in"`` (posterior means) or ``"none"``
+        (no correction; an ablation). Irrelevant on fully observed panels.
+      support_covariate: Append the observed window length ``L_i`` to the forest
+        covariates when windows differ (default True).
     """
 
     rank_k: int = 2
@@ -514,6 +554,13 @@ class RankKLongBetConfig:
     treated_extra_variance: bool = False
     basis_spec: ExposureBasisSpec | None = None
     keep_unprojected_draws: bool = True
+    # Masked event-time panels (0.7.0): population estimand, per-unit windows, common basis
+    att_weighting: str = "cell"
+    projection: str = "two_pass"
+    min_support_modes: tuple[int, ...] = (1, 6, 8)
+    common_basis: bool | None = None
+    mode_coupling: str = "propagated"
+    support_covariate: bool = True
 
     def __post_init__(self) -> None:
         """Resolve the variant and its defaults; reject invalid values (raises ``ValueError``)."""
@@ -698,6 +745,29 @@ class RankKLongBetConfig:
         if self.basis_spec is not None and not isinstance(self.basis_spec, ExposureBasisSpec):
             _fail("basis_spec must be an ExposureBasisSpec or None")
 
+        # ---- Masked event-time options ------------------------------------------------------
+        if self.att_weighting not in _ATT_WEIGHTINGS:
+            _fail(f"att_weighting must be one of {_ATT_WEIGHTINGS}; got {self.att_weighting!r}")
+        if self.projection not in _PROJECTIONS:
+            _fail(f"projection must be one of {_PROJECTIONS}; got {self.projection!r}")
+        if self.mode_coupling not in _MODE_COUPLINGS:
+            _fail(f"mode_coupling must be one of {_MODE_COUPLINGS}; got {self.mode_coupling!r}")
+        support = _reals("min_support_modes")
+        if (
+            support is None
+            or len(support) == 0
+            or any(not float(v).is_integer() or v < 1 for v in support)
+            or any(b < a for a, b in zip(support, support[1:]))
+        ):
+            _fail(
+                "min_support_modes must be a non-empty, non-decreasing sequence of whole numbers >= 1 (the minimum "
+                f"observed post-adoption periods needed to project mode k); got {self.min_support_modes!r}"
+            )
+        _set("min_support_modes", tuple(int(v) for v in support))
+        if self.common_basis is not None:
+            _set("common_basis", _flag("common_basis", self.common_basis, allowed="None, True or False"))
+        _set("support_covariate", _flag("support_covariate", self.support_covariate))
+
     @property
     def has_att_constraint(self) -> bool:
         """Whether a prior or truncation acts on the ATT (then the sampler uses ATT-weight centering)."""
@@ -773,6 +843,28 @@ class RankKLongBetResult:
     variant: str = "propagated"
     basis_spec: Any = None
     active_units: list[np.ndarray] = dc_field(default_factory=list)
+    # Masked event-time additions (0.7.0). ``catt_observed[i, t]`` marks the treated
+    # post cells inside the horizon that were observed (the other treated cells of
+    # ``catt_draws`` are posterior-predictive); ``horizon`` is the event-time horizon
+    # ``H`` of the common basis (``None`` for per-cohort bases); ``unit_weights`` are
+    # the ATT weights behind ``att_draws`` (``att_weighting`` "cell" or "unit");
+    # ``support_mask[i, k]`` tells whether unit ``i``'s observed window supported the
+    # projection of mode ``k``; ``post_window_length`` is ``L_i``; ``cohorts`` the
+    # first-adoption period of every unit (``T`` for never-treated units).
+    catt_observed: np.ndarray | None = None
+    horizon: int | None = None
+    att_weighting: str = "cell"
+    unit_weights: np.ndarray | None = None
+    support_mask: np.ndarray | None = None
+    post_window_length: np.ndarray | None = None
+    cohorts: np.ndarray | None = None
+
+    @property
+    def treated_units(self) -> np.ndarray:
+        """``(N,)`` ever-treated indicator (units with a positive ATT weight)."""
+        if self.unit_weights is not None:
+            return np.asarray(self.unit_weights) > 0.0
+        return np.any(np.abs(np.asarray(self.catt_draws)) > 0.0, axis=(0, 2))
 
     @property
     def att_var_total(self) -> float:
@@ -889,6 +981,49 @@ def _infer_cohorts(z: np.ndarray) -> np.ndarray:
         if ones.size > 0:
             cohorts[i] = int(ones[0])
     return cohorts
+
+
+def _nanmean_rows(a: np.ndarray) -> np.ndarray:
+    """Row means over the observed (non-NaN) cells, shape ``(n, 1)``; NaN for all-NaN rows (silently)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        return np.nanmean(np.asarray(a, dtype=np.float64), axis=1, keepdims=True)
+
+
+def _nanmean_cols(a: np.ndarray) -> np.ndarray:
+    """Column means over the observed (non-NaN) cells, shape ``(1, m)``; NaN for all-NaN columns (silently)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        return np.nanmean(np.asarray(a, dtype=np.float64), axis=0, keepdims=True)
+
+
+def _att_unit_weights(
+    cohorts_arr: np.ndarray,
+    waves: list[int],
+    T: int,
+    total_trt_cells: float,
+    weighting: str,
+    layout: EventTimeLayout | None,
+) -> np.ndarray:
+    """ATT weights ``a_i`` on the treated units (0 on never-treated units).
+
+    ``"cell"``: ``L_i / |O_trt|`` -- the paper's convention (``L_{G_i} / |O_trt|``),
+    ``L_i`` being the observed post-adoption cells inside the horizon under a mask.
+    ``"unit"``: ``1 / N_trt``, the population estimand (every treated unit counts once).
+    """
+    N = int(cohorts_arr.shape[0])
+    att_w = np.zeros(N, dtype=np.float64)
+    ever = cohorts_arr < T
+    if weighting == "unit":
+        att_w[ever] = 1.0 / max(float(np.sum(ever)), 1.0)
+        return att_w
+    for g in waves:
+        rows = cohorts_arr == g
+        if layout is None:
+            att_w[rows] = float(T - g) / max(total_trt_cells, 1.0)
+        else:
+            att_w[rows] = layout.window_len[g][rows].astype(np.float64) / max(total_trt_cells, 1.0)
+    return att_w
 
 
 def _project_panel_to_mode(
@@ -1020,8 +1155,14 @@ def _resolve_forecast_draws(
     ctrl_idx: np.ndarray,
     t0: int,
     seed: int,
+    allow_fallback: bool = True,
 ) -> np.ndarray | None:
-    """Obtain ``n_draws`` leak-free posterior forecast panels of shape ``(n_draws, N, T)``."""
+    """Obtain ``n_draws`` leak-free posterior forecast panels of shape ``(n_draws, N, T)``.
+
+    ``allow_fallback=False`` (masked panels) skips the internal Normal-inverse-gamma
+    generator, which needs complete control outcomes, and warns that no forecast
+    draws are propagated.
+    """
     if n_draws <= 1:
         return None
     if baseline_forecast_draws is not None:
@@ -1042,6 +1183,13 @@ def _resolve_forecast_draws(
             if out is not None:
                 return np.asarray(out[0], dtype=np.float64)
     if ctrl_idx.size >= 6 and t0 >= 1:
+        if not allow_fallback:
+            _warn_rank_k(
+                "Masked panel: the internal forecast-draw generator needs complete outcomes, so no forecast draws "
+                "are propagated (the sampler conditions on the point forecast). Pass baseline_forecast_draws, or "
+                "features built on the complete common pre window, to propagate forecast uncertainty."
+            )
+            return None
         return _fallback_posterior_forecast_draws(
             y_arr=y_arr,
             f_arr=f_arr,
@@ -1109,17 +1257,18 @@ def _assemble_catt_draws(
             mask_g = cohorts_arr == g
             contrib = tau_k[mask_g].T[:, :, None] * psi_k[None, None, :]
             if k == 0:
-                catt_level[:, mask_g, g:] += contrib
+                catt_level[:, mask_g, g : g + psi_k.shape[0]] += contrib
             else:
-                catt_dyn[:, mask_g, g:] += contrib
+                catt_dyn[:, mask_g, g : g + psi_k.shape[0]] += contrib
     if catt_floor is None:
         return catt_level + catt_dyn
     floor_val = float(catt_floor)
     catt_draws = catt_level.copy()
     for g in waves:
         mask_g = cohorts_arr == g
-        level_g = catt_level[:, mask_g, g:]
-        dyn_g = catt_dyn[:, mask_g, g:]
+        end = g + bases[g].shape[0]
+        level_g = catt_level[:, mask_g, g:end]
+        dyn_g = catt_dyn[:, mask_g, g:end]
         max_neg_dyn = np.max(np.maximum(-dyn_g, 0.0), axis=2, keepdims=True)
         headroom = np.maximum(level_g - floor_val, 0.0)
         alpha_g = np.where(
@@ -1127,7 +1276,7 @@ def _assemble_catt_draws(
             np.minimum(1.0, headroom / np.maximum(max_neg_dyn, 1e-12)),
             1.0,
         )
-        catt_draws[:, mask_g, g:] = np.maximum(level_g + alpha_g * dyn_g, floor_val)
+        catt_draws[:, mask_g, g:end] = np.maximum(level_g + alpha_g * dyn_g, floor_val)
     return catt_draws
 
 
@@ -1343,8 +1492,14 @@ def _fit_rank_k_stochtree(
     bases: dict[int, np.ndarray],
     cfg: RankKLongBetConfig,
     t_start: float,
+    att_w: np.ndarray | None = None,
+    result_fields: dict[str, Any] | None = None,
 ) -> RankKLongBetResult:
-    """Legacy plug-in ``stochtree.BCFModel`` implementation (``engine='stochtree'``)."""
+    """Legacy plug-in ``stochtree.BCFModel`` implementation (``engine='stochtree'``).
+
+    ``att_w`` are the ATT weights (default: the paper's ``L_{G_i} / |O_trt|``) and
+    ``result_fields`` extra :class:`RankKLongBetResult` fields of the caller.
+    """
     try:
         from stochtree import BCFModel
     except ImportError as exc:  # pragma: no cover
@@ -1374,9 +1529,12 @@ def _fit_rank_k_stochtree(
     active_units: list[np.ndarray] = []
     trt_keep_vars = list(range(x_mod.shape[1]))
     total_trt_cells_st = float(np.sum(z_arr == 1))
-    att_w = np.zeros(N, dtype=np.float64)
-    for g in waves:
-        att_w[cohorts_arr == g] = float(T - g) / max(total_trt_cells_st, 1.0)
+    if att_w is None:
+        att_w = np.zeros(N, dtype=np.float64)
+        for g in waves:
+            att_w[cohorts_arr == g] = float(T - g) / max(total_trt_cells_st, 1.0)
+    else:
+        att_w = np.asarray(att_w, dtype=np.float64)
 
     for k in range(K):
         active_waves = [g for g in waves if k < bases[g].shape[1]]
@@ -1480,6 +1638,7 @@ def _fit_rank_k_stochtree(
         t_start=t_start,
         compute_rhat=compute_rhat,
         compute_ess=compute_ess,
+        result_fields=result_fields,
     )
 
 
@@ -1509,6 +1668,8 @@ def _finalize_result(
     t_start: float,
     compute_rhat: Any,
     compute_ess: Any,
+    result_fields: dict[str, Any] | None = None,
+    treated_cells: np.ndarray | None = None,
 ) -> RankKLongBetResult:
     """Apply the (declared) post-processing projections, assemble cell draws and build the result.
 
@@ -1518,7 +1679,9 @@ def _finalize_result(
     ``catt_floor`` projection); the cell draws are assembled with the zero-sum
     higher-mode damping of ``catt_floor``. Whenever a projection is active the
     unprojected draws are kept (``cfg.keep_unprojected_draws``) and quantified in
-    ``projection_report``.
+    ``projection_report``. ``result_fields`` are extra :class:`RankKLongBetResult`
+    fields (the masked event-time additions) and ``treated_cells`` the ``(N, T)``
+    cells the projection report averages over (default: ``z == 1``).
     """
     N, T = np.asarray(z_arr).shape
     mode1_raw = mode_tau_draws_raw[0]
@@ -1558,7 +1721,7 @@ def _finalize_result(
             catt_raw=catt_draws_raw,
             catt_proj=catt_draws,
             att_unit_weights=att_unit_weights,
-            z_arr=z_arr,
+            z_arr=z_arr if treated_cells is None else treated_cells.astype(np.int32),
             tau_clip=cfg.tau_clip,
             catt_floor=cfg.catt_floor,
         )
@@ -1579,6 +1742,8 @@ def _finalize_result(
     diag = dict(diagnostics)
     diag.setdefault("variant", variant)
     diag.setdefault("basis_spec", cfg.resolved_basis_spec)
+    extra = {"unit_weights": np.asarray(att_unit_weights, dtype=np.float64), "cohorts": np.asarray(cohorts_arr)}
+    extra.update(result_fields or {})
     return RankKLongBetResult(
         catt_draws=catt_draws,
         catt_hat=catt_hat,
@@ -1610,6 +1775,7 @@ def _finalize_result(
         variant=variant,
         basis_spec=cfg.resolved_basis_spec,
         active_units=active_units,
+        **extra,
     )
 
 
@@ -1749,9 +1915,11 @@ def _validate_rank_k_inputs(
     cluster_ids: Any | None = None,
     cohorts: Any | None = None,
     t_0_panel: Any | None = None,
+    mask: Any | None = None,
+    horizon: Any | None = None,
     warn: bool = True,
     warn_short_cohorts: bool = True,
-) -> None:
+) -> dict[str, Any]:
     """Validate the inputs of :func:`fit_rank_k_longbet`; warn about ignored or conflicting ones.
 
     Cheap (no model fitting), so it runs before any heavy computation and can be
@@ -1766,6 +1934,15 @@ def _validate_rank_k_inputs(
     deprecated ``warm_burnin`` and for cohorts too short for ``rank_k`` modes.
     Choosing a supported variant or option, such as
     ``uncertainty_propagation=True``, never warns.
+
+    Masked panels: ``y`` may hold ``NaN`` where a cell is unobserved (never
+    ``inf``), or ``mask`` (``(N, T)``, ``True`` = observed) may be given; the two
+    must agree exactly. Unobserved cells are allowed only as trailing
+    (administrative) censoring of every unit's post-adoption window and as missing
+    pre-period cells (at least one pre-period cell per unit must be observed); see
+    :func:`longbet._rank_k_event_time.check_observation_structure`. Masked panels
+    need a single adoption period (align the panel in event time) and the JAX
+    engine (``NotImplementedError`` for the plug-in ``stochtree`` engine).
 
     Args:
       y: Outcome panel.
@@ -1782,21 +1959,45 @@ def _validate_rank_k_inputs(
       cluster_ids: Unit cluster labels.
       cohorts: First-adoption periods.
       t_0_panel: Pre-period length override.
+      mask: Explicit observation mask.
+      horizon: Event-time horizon override.
       warn: Emit the warnings (errors are always raised).
       warn_short_cohorts: Warn about cohorts with fewer post-adoption periods than
         ``cfg.rank_k``; disabled for the placebo panel, whose capped
         pseudo-cohorts do not affect the audited ATT.
 
+    Returns:
+      ``{"obs": (N, T) observed-cell indicator, "masked": bool, "common_basis": bool,
+      "horizon": int | None}``: the observation structure the fit uses.
+
     Raises:
       ValueError: If an input is malformed or would leak treated outcomes into
         the baseline (see :func:`fit_rank_k_longbet`).
+      NotImplementedError: Masked panel with the plug-in (``stochtree``) engine.
     """
     # ---- Panel ------------------------------------------------------------------
     y_arr = _as_float_array(y, "y")
     if y_arr.ndim != 2 or y_arr.shape[1] < 2:
         raise ValueError(f"y must be a 2-D (N, T) outcome panel with T >= 2; got shape {y_arr.shape}")
-    _require_finite(y_arr, "y")
     N, T = y_arr.shape
+    n_inf = int(np.count_nonzero(np.isinf(y_arr)))
+    if n_inf:
+        raise ValueError(f"y contains {n_inf} infinite value(s); only NaN marks an unobserved cell")
+    obs = ~np.isnan(y_arr)
+    if mask is not None:
+        m_arr = np.asarray(mask)
+        if m_arr.shape != (N, T):
+            raise ValueError(f"mask must be a boolean (N, T) = {(N, T)} array (True = observed); got shape {m_arr.shape}")
+        if m_arr.dtype != bool and not np.all((m_arr == 0) | (m_arr == 1)):
+            raise ValueError("mask must hold booleans (True = observed)")
+        m_arr = m_arr.astype(bool)
+        if not np.array_equal(m_arr, obs):
+            n_bad = int(np.count_nonzero(m_arr != obs))
+            raise ValueError(
+                f"mask and NaN pattern of y disagree on {n_bad} cell(s): a cell must be NaN in y if and only if "
+                "mask is False (set y to NaN where you want a cell unobserved)"
+            )
+    masked = bool(not np.all(obs))
 
     z_arr = _as_float_array(z, "z")
     if z_arr.shape != (N, T):
@@ -1864,6 +2065,52 @@ def _validate_rank_k_inputs(
                 "outcomes, which would leak into the pre-period means."
             )
         t0 = int(t0_val)
+
+    # ---- Observation structure (masked panels and the common event-time basis) ------------
+    waves_all = sorted({int(g) for g in first_adopt[ever]})
+    single_wave = len(waves_all) == 1
+    if cfg.common_basis is None:
+        common_basis = bool(masked or single_wave)
+    else:
+        common_basis = bool(cfg.common_basis)
+        if masked and not common_basis:
+            raise ValueError(
+                "common_basis=False is not available for masked panels: unobserved cells are handled on the "
+                "common event-time basis (leave common_basis=None or set it to True)"
+            )
+    if masked:
+        if cfg.engine == "stochtree":
+            raise NotImplementedError(
+                "Masked panels (NaN in y or a mask) are implemented for the JAX engine only "
+                "(RankKLongBetConfig(uncertainty_propagation=True)); the plug-in stochtree engine does not "
+                "support unobserved cells yet"
+            )
+        if not single_wave:
+            raise ValueError(
+                f"Masked panels need a single adoption period, but the treated units adopt in periods {waves_all}: "
+                "align the panel in event time (every unit's first post-adoption period in the same column, "
+                "unobserved cells set to NaN) before fitting"
+            )
+        if cfg.resolved_basis_spec.family == "pca_empirical":
+            raise ValueError("ExposureBasisSpec(family='pca_empirical') is not available for masked panels")
+    if horizon is not None:
+        h_arr = np.asarray(horizon)
+        h_val = float(h_arr.reshape(-1)[0]) if h_arr.size == 1 and h_arr.dtype.kind in "iuf" else np.nan
+        if not np.isfinite(h_val) or h_val != round(h_val) or not 1 <= h_val <= T - first_wave:
+            raise ValueError(
+                f"horizon must be a single integer in [1, {T - first_wave}] (at most the post-adoption length of "
+                f"the first wave); got {horizon!r}. To predict beyond the last panel period, append all-NaN columns to y."
+            )
+        if not common_basis:
+            raise ValueError("horizon applies to the common event-time basis only; set common_basis=True")
+    horizon_eff: int | None = None
+    if common_basis:
+        info = check_observation_structure(
+            obs, first_adopt, t0, horizon=None if horizon is None else int(float(np.asarray(horizon).reshape(-1)[0])),
+            min_support=cfg.min_support_modes,
+        )
+        horizon_eff = int(info["horizon"])
+    structure = {"obs": obs, "masked": masked, "common_basis": common_basis, "horizon": horizon_eff}
 
     # ---- Features built on the same panel -------------------------------------------
     if features is not None:
@@ -1962,7 +2209,7 @@ def _validate_rank_k_inputs(
             raise ValueError("cluster_ids contains NaN or infinite labels; give every unit a finite cluster label")
 
     if not warn:
-        return
+        return structure
 
     is_jax = cfg.engine == "jax"
     has_forecast = bool(cfg.use_forecast and bf_val is not None)
@@ -2076,9 +2323,17 @@ def _validate_rank_k_inputs(
             # engine 'jax' implies uncertainty_propagation=True (enforced by the config).
             reason = no_forecast if not has_forecast else f"n_forecast_draws={cfg.n_forecast_draws}"
             ignored = ["baseline_forecast_draws"] if baseline_forecast_draws is not None else []
+            # On a masked panel with mode_coupling="propagated" the higher-mode draws run
+            # through n_forecast_draws Mode-1 tracks of draws_per_component draws, so those
+            # two options are used even without forecast draws.
+            modes_propagated = bool(masked and cfg.mode_coupling == "propagated" and cfg.rank_k >= 2 and cfg.n_forecast_draws >= 2)
             draw_counts = {"n_forecast_draws": cfg.n_forecast_draws, "max_forecast_draws": m_max}
+            if modes_propagated:
+                draw_counts.pop("n_forecast_draws")
             ignored += _non_default_options(cfg, tuple(name for name, m in draw_counts.items() if m > 1))
-            ignored += _non_default_options(cfg, ("between_var_threshold", "draws_per_component"))
+            ignored += _non_default_options(
+                cfg, ("between_var_threshold",) if modes_propagated else ("between_var_threshold", "draws_per_component")
+            )
             if ignored:
                 _warn_rank_k(
                     f"No forecast draws are propagated ({reason}), so {_ignored(ignored)}; num_mcmc sets "
@@ -2143,6 +2398,18 @@ def _validate_rank_k_inputs(
         waves = sorted({int(g) for g in first_adopt[ever]})
         _resolve_short_cohorts(cfg, waves, T, warn=True)
 
+    # ---- Options of the common event-time basis on the per-cohort path --------------------------
+    if not common_basis:
+        ignored = _non_default_options(cfg, _EVENT_TIME_ONLY_OPTIONS)
+        if ignored:
+            _warn_rank_k(
+                f"{_ignored(ignored)}: with per-cohort exposure bases (staggered adoption without a mask and "
+                "common_basis=None or False) every unit is fully observed on its own window, so the two-pass "
+                "projection, its support thresholds and the mode coupling do not apply. Set common_basis=True "
+                "for the common event-time basis."
+            )
+    return structure
+
 
 def fit_rank_k_longbet(
     y: np.ndarray,
@@ -2159,6 +2426,8 @@ def fit_rank_k_longbet(
     cluster_ids: np.ndarray | None = None,
     cohorts: np.ndarray | None = None,
     t_0_panel: int | None = None,
+    mask: np.ndarray | None = None,
+    horizon: int | None = None,
     cfg: RankKLongBetConfig | None = None,
 ) -> RankKLongBetResult:
     """Fit Forecast-Augmented Rank-K Exposure-Basis BCF on a panel ``(y, z, x)``.
@@ -2212,8 +2481,37 @@ def fit_rank_k_longbet(
     ``catt_ci_low`` / ``catt_ci_high`` (2.5% / 97.5% posterior percentiles) are
     approximate as well; treat both as descriptive.
 
+    Masked event-time panels (0.7.0). ``y`` may hold ``NaN`` where a unit is not
+    observed (or an explicit ``mask``): each unit's observed post-adoption cells
+    must be a contiguous prefix ``s = 1, ..., L_i`` of the event-time horizon
+    ``H`` (administrative censoring) and at least one pre-period cell must be
+    observed. All treated units must then share one adoption period (align the
+    panel in event time). Every unit is projected on the *common* orthonormal
+    basis on ``s = 1..H`` (``cfg.common_basis``, the default for masked and
+    single-wave panels) with the two-pass projection of
+    :mod:`longbet._rank_k_event_time`: higher modes on the units whose window
+    supports them (``cfg.min_support_modes``), mode 1 on every unit as the
+    observed-window mean of the residual after the fitted treatment dynamics are
+    removed (``cfg.mode_coupling``: higher-mode posterior draws propagated through
+    Mode-1 tracks, or the posterior mean), with precision weights from the
+    observed window. ``catt_draws`` then holds the posterior-predictive cell
+    effect ``tau_1(x_i) + sum_k tau_k(x_i) psi_k(s)`` on *every* post cell
+    ``s <= H`` of every treated unit (``catt_observed`` marks the observed ones),
+    ``att_draws`` the ``cfg.att_weighting`` ("cell": observed-cell weights, the
+    paper's convention; "unit": one weight per treated unit, the population
+    estimand) average of the mode-1 levels, and :func:`longbet.cumulative_effect`
+    / :func:`longbet.event_time_trajectory` / :func:`longbet.rank_k_transport_audit`
+    the population aggregates and the transport diagnostic. The observed window
+    length ``L_i`` is appended to the forest covariates (``cfg.support_covariate``).
+    Under a mask the ATT depends on the fitted dynamics (``rank_k``, basis family)
+    through the correction, so report a ``rank_k`` sensitivity; on fully observed
+    panels the correction is exactly zero and the fit reproduces the per-cohort
+    estimator bit for bit. The plug-in ``stochtree`` engine raises
+    ``NotImplementedError`` for masked panels.
+
     Args:
-      y: Outcome panel, shape ``(N, T)``, finite.
+      y: Outcome panel, shape ``(N, T)``; ``NaN`` marks an unobserved cell (see
+        above), ``inf`` is never allowed.
       z: Binary absorbing treatment panel, shape ``(N, T)``: ``z[i, t] = 1`` from
         unit ``i``'s first adoption period on. The panel needs both ever-treated
         and never-treated units, and every treated unit at least one
@@ -2254,6 +2552,14 @@ def fit_rank_k_longbet(
       t_0_panel: Number ``t0`` of leading periods forming the pre-period, an
         integer in ``[1, first adoption period]``. Default: the first adoption
         period.
+      mask: Optional boolean ``(N, T)`` observation indicator (``True`` =
+        observed); must agree with the ``NaN`` pattern of ``y`` exactly. ``NaN``
+        in ``y`` alone is sufficient.
+      horizon: Event-time horizon ``H`` of the common basis, an integer in
+        ``[1, T - first adoption period]``. Default: the longest observed
+        post-adoption window of a treated unit. Observed cells beyond ``H``
+        leave the likelihood; to predict beyond the panel, append all-``NaN``
+        columns to ``y``.
       cfg: :class:`RankKLongBetConfig`; default ``RankKLongBetConfig()``, the
         propagated variant at its validated benchmark budget.
 
@@ -2264,22 +2570,30 @@ def fit_rank_k_longbet(
       ``catt_ci_low`` / ``catt_ci_high`` of shape ``(S, N, T)`` / ``(N, T)``;
       ``mode_tau_draws`` (``K`` arrays of shape ``(N, S)``, row ``i`` of
       ``mode_tau_draws[0]`` being treated unit ``i``'s time-averaged effect);
-      slope, spatial and variance-decomposition diagnostics; and the
-      convergence diagnostics ``rhat_att`` (NaN for the plug-in variant, which
-      runs one chain) and ``ess_att``.
+      slope, spatial and variance-decomposition diagnostics; the convergence
+      diagnostics ``rhat_att`` (NaN for the plug-in variant, which runs one
+      chain) and ``ess_att``; and, for the common event-time basis, the
+      observation fields ``catt_observed``, ``horizon``, ``unit_weights``,
+      ``att_weighting``, ``support_mask``, ``post_window_length`` and ``cohorts``.
 
     Raises:
-      ValueError: If ``y`` or ``x`` is non-finite or ``x`` does not have ``N``
-        rows; ``z`` is not 0/1 or not absorbing; the panel lacks treated or
-        never-treated units or has units treated in period 0; ``cohorts``
-        disagrees with ``z``; ``t_0_panel`` is outside ``[1, first adoption
-        period]``; ``features`` was built on a panel of another shape or with an
-        anchor after the first adoption period; ``ps``, ``unit_features``,
-        ``baseline_forecast``, ``baseline_forecast_draws`` or
+      ValueError: If ``y`` holds ``inf`` or ``x`` is non-finite or ``x`` does not
+        have ``N`` rows; ``z`` is not 0/1 or not absorbing; the panel lacks
+        treated or never-treated units or has units treated in period 0;
+        ``cohorts`` disagrees with ``z``; ``t_0_panel`` is outside ``[1, first
+        adoption period]``; ``features`` was built on a panel of another shape or
+        with an anchor after the first adoption period; ``ps``,
+        ``unit_features``, ``baseline_forecast``, ``baseline_forecast_draws`` or
         ``pre_anchor_loadings`` is misshapen or non-finite (or ``ps`` is outside
         ``[0, 1]``); ``coords`` is not ``(N, 2)``, non-finite or outside
-        ``[-90, 90] x [-180, 360]``; or ``cluster_ids`` does not have length
-        ``N``.
+        ``[-90, 90] x [-180, 360]``; ``cluster_ids`` does not have length ``N``;
+        or, for masked panels, ``mask`` disagrees with the ``NaN`` pattern, a
+        unit has a gap inside its post-adoption window or no observed pre-period
+        cell, a unit observes fewer than ``min_support_modes[0]`` post-adoption
+        periods, a period has observed treated but no observed never-treated
+        outcomes, the treated units adopt in several periods, or ``horizon`` is
+        out of range.
+      NotImplementedError: Masked panel with the plug-in ``stochtree`` engine.
 
     Warns:
       RankKConfigWarning: Only for explicit inputs that the fit would silently
@@ -2325,6 +2639,8 @@ def fit_rank_k_longbet(
         cluster_ids=cluster_ids,
         cohorts=cohorts,
         t_0_panel=t_0_panel,
+        mask=mask,
+        horizon=horizon,
         cfg=cfg,
     )
 
@@ -2344,6 +2660,8 @@ def _fit_rank_k_longbet(
     cluster_ids: np.ndarray | None = None,
     cohorts: np.ndarray | None = None,
     t_0_panel: int | None = None,
+    mask: np.ndarray | None = None,
+    horizon: int | None = None,
     cfg: RankKLongBetConfig | None = None,
     warn_short_cohorts: bool = True,
 ) -> RankKLongBetResult:
@@ -2358,7 +2676,7 @@ def _fit_rank_k_longbet(
 
     # Validate the explicit arguments before they are filled in from ``features``, so
     # the warnings can tell explicit inputs from the ones that ``features`` supplies.
-    _validate_rank_k_inputs(
+    structure = _validate_rank_k_inputs(
         y,
         z,
         x,
@@ -2373,6 +2691,8 @@ def _fit_rank_k_longbet(
         cluster_ids=cluster_ids,
         cohorts=cohorts,
         t_0_panel=t_0_panel,
+        mask=mask,
+        horizon=horizon,
         warn_short_cohorts=warn_short_cohorts,
     )
     if t_0_panel is not None:
@@ -2409,18 +2729,32 @@ def _fit_rank_k_longbet(
     if t0 <= 0:
         raise ValueError(f"First adoption period t0 must be >= 1; got {t0}")
 
-    y_pre = y_arr[:, :t0].mean(axis=1, keepdims=True)
-    dy = y_arr - y_pre
-    dy_dm = dy - dy[ctrl].mean(axis=0, keepdims=True)
+    obs = np.asarray(structure["obs"], dtype=bool)
+    masked = bool(structure["masked"])
+    # Complete panels keep the paper's arithmetic verbatim; masked panels average the
+    # observed cells only (unit pre-period anchor and control period means).
+    if masked:
+        y_pre = _nanmean_rows(y_arr[:, :t0])
+        dy = y_arr - y_pre
+        dy_dm = dy - _nanmean_cols(dy[ctrl])
+    else:
+        y_pre = y_arr[:, :t0].mean(axis=1, keepdims=True)
+        dy = y_arr - y_pre
+        dy_dm = dy - dy[ctrl].mean(axis=0, keepdims=True)
 
     has_forecast = bool(cfg.use_forecast and baseline_forecast is not None)
     if has_forecast:
         f_arr = np.asarray(baseline_forecast, dtype=np.float64)
         if f_arr.ndim == 3:
             f_arr = f_arr[:, :, 0]
-        f_pre = f_arr[:, :t0].mean(axis=1, keepdims=True)
-        df = f_arr - f_pre
-        df_dm = df - df[ctrl].mean(axis=0, keepdims=True)
+        if masked:
+            f_pre = _nanmean_rows(np.where(obs[:, :t0], f_arr[:, :t0], np.nan))
+            df = f_arr - f_pre
+            df_dm = df - _nanmean_cols(np.where(obs[ctrl], df[ctrl], np.nan))
+        else:
+            f_pre = f_arr[:, :t0].mean(axis=1, keepdims=True)
+            df = f_arr - f_pre
+            df_dm = df - df[ctrl].mean(axis=0, keepdims=True)
     else:
         f_arr = np.zeros_like(y_arr)
         df_dm = np.zeros_like(dy_dm)
@@ -2439,26 +2773,71 @@ def _fit_rank_k_longbet(
         ps_vec = np.full(N, float(np.mean(ever)), dtype=np.float64)
 
     waves = sorted(int(g) for g in np.unique(cohorts_arr[ever]))
-    total_trt_cells = float(np.sum(z_arr == 1))
-    wave_weights = {
-        g: float(np.sum(cohorts_arr == g) * (T - g)) / max(total_trt_cells, 1.0)
-        for g in waves
-    }
     K = _resolve_short_cohorts(cfg, waves, T, warn=False)
     spec = cfg.resolved_basis_spec
-    if spec.is_default:
-        bases = {g: orthonormal_exposure_basis(T - g, K) for g in waves}
-    else:
-        bases = {
-            g: orthonormal_exposure_basis(
-                T - g, K, spec,
-                empirical_trajectories=dy_dm[ctrl, g:] if spec.family == "pca_empirical" else None,
+    layout: EventTimeLayout | None = None
+    if structure["common_basis"]:
+        # Common event-time basis on s = 1..H; per-unit observed windows (masked panels,
+        # single-wave panels, or staggered panels with common_basis=True).
+        def _basis_factory(h: int, k_req: int) -> np.ndarray:
+            if spec.is_default:
+                return orthonormal_exposure_basis(h, k_req)
+            return orthonormal_exposure_basis(
+                h, k_req, spec,
+                empirical_trajectories=dy_dm[ctrl, t0 : t0 + h] if spec.family == "pca_empirical" else None,
             )
+
+        layout = build_event_time_layout(
+            obs, cohorts_arr, t0, horizon=structure["horizon"], rank_k=K,
+            min_support=cfg.min_support_modes, basis_factory=_basis_factory,
+        )
+        bases = layout.bases
+        wave_weights = layout.wave_weights
+        total_trt_cells = float(sum(int(np.sum(layout.window_len[g][cohorts_arr == g])) for g in waves))
+        if layout.has_partial_windows() and cfg.support_covariate:
+            x_mod = np.column_stack([x_mod, layout.post_len.astype(np.float64)])
+    else:
+        total_trt_cells = float(np.sum(z_arr == 1))
+        wave_weights = {
+            g: float(np.sum(cohorts_arr == g) * (T - g)) / max(total_trt_cells, 1.0)
             for g in waves
         }
+        if spec.is_default:
+            bases = {g: orthonormal_exposure_basis(T - g, K) for g in waves}
+        else:
+            bases = {
+                g: orthonormal_exposure_basis(
+                    T - g, K, spec,
+                    empirical_trajectories=dy_dm[ctrl, g:] if spec.family == "pca_empirical" else None,
+                )
+                for g in waves
+            }
     cfg = dc_replace(cfg, rank_k=K) if K != int(cfg.rank_k) else cfg
 
+    # Unit weights of the ATT: "cell" (the paper's L_{G_i} / |O_trt|, observed cells under a
+    # mask) or "unit" (1 / N_trt, the population estimand).
+    att_unit_weights = _att_unit_weights(cohorts_arr, waves, T, total_trt_cells, cfg.att_weighting, layout)
+    event_time_fields: dict[str, Any] | None = None
+    treated_cells_modeled: np.ndarray | None = None
+    if layout is not None:
+        event_time_fields = {
+            "catt_observed": layout.treated_cells_observed(),
+            "horizon": int(layout.horizon),
+            "att_weighting": cfg.att_weighting,
+            "support_mask": layout.support_matrix(),
+            "post_window_length": layout.post_len.copy(),
+        }
+        treated_cells_modeled = layout.treated_cells_modeled()
+    else:
+        event_time_fields = {"att_weighting": cfg.att_weighting}
+
     if cfg.engine == "stochtree":
+        if layout is not None and layout.has_partial_windows():
+            raise NotImplementedError(
+                "The common event-time basis with heterogeneous observed windows requires engine='jax' "
+                "(RankKLongBetConfig(uncertainty_propagation=True)); the plug-in stochtree engine fits "
+                "fully observed per-cohort windows only"
+            )
         return _fit_rank_k_stochtree(
             y_arr=y_arr,
             z_arr=z_arr,
@@ -2475,6 +2854,8 @@ def _fit_rank_k_longbet(
             bases=bases,
             cfg=cfg,
             t_start=t_start,
+            att_w=att_unit_weights,
+            result_fields=event_time_fields,
         )
 
     build_spatial_kernel_cache, sample_rank_k_mode_jax = _get_rank_k_jax()
@@ -2488,6 +2869,10 @@ def _fit_rank_k_longbet(
                 lam_mat = lam_mat[:, None]
         elif t0 >= 2:
             pre_resid = y_arr[:, :t0] - (f_arr[:, :t0] if has_forecast else 0.0)
+            if masked:
+                # Unobserved pre-period residuals enter the SVD at the unit's own observed
+                # pre-period mean, i.e. with a neutral (zero) deviation pattern.
+                pre_resid = np.where(obs[:, :t0], pre_resid, _nanmean_rows(pre_resid))
             lam_mat = np.asarray(
                 extract_pre_anchor_loadings(pre_resid, q=int(cfg.n_factor_loadings)),
                 dtype=np.float64,
@@ -2521,21 +2906,24 @@ def _fit_rank_k_longbet(
         ctrl_idx=ctrl_idx,
         t0=t0,
         seed=int(cfg.random_seed),
+        allow_fallback=not masked,
     )
     if f_draws_all is None:
         m_init = 1
         m_max = 1
         draws_per_chain = max(int(round(float(cfg.num_mcmc) / float(num_chains))), 2)
         df_dm_draws_all = None
+    elif masked:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            f_pre_draws = np.nanmean(np.where(obs[None, :, :t0], f_draws_all[:, :, :t0], np.nan), axis=2, keepdims=True)
+            df_draws = f_draws_all - f_pre_draws
+            ctrl_means = np.nanmean(np.where(obs[None, ctrl, :], df_draws[:, ctrl, :], np.nan), axis=1, keepdims=True)
+        df_dm_draws_all = df_draws - ctrl_means
     else:
         f_pre_draws = f_draws_all[:, :, :t0].mean(axis=2, keepdims=True)
         df_draws = f_draws_all - f_pre_draws
         df_dm_draws_all = df_draws - df_draws[:, ctrl, :].mean(axis=1, keepdims=True)
-
-    # Unit weights in overall ATT from mode 1 (sum_{i in I_1} L_{G_i} tau_{i,1} / |O_trt|)
-    att_unit_weights = np.zeros(N, dtype=np.float64)
-    for g in waves:
-        att_unit_weights[cohorts_arr == g] = float(T - g) / max(total_trt_cells, 1.0)
 
     def _decompose_mode1_att(comp_tau: np.ndarray) -> tuple[float, float, float]:
         """Exact algebraic within/between variance decomposition of ATT draws."""
@@ -2609,13 +2997,14 @@ def _fit_rank_k_longbet(
         n_trees_tau: int,
         draws_per_chain_k: int,
         idx: np.ndarray | None,
+        dy_k_draws_m: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """Sample mode ``k``; with ``idx`` the problem is restricted to the active units and scattered back."""
         if idx is None:
             sub = dict(
                 dy_k=dy_k, df_k=df_k, df_k_draws=df_k_draws_m, x_mod=x_mod, ps_vec=ps_vec,
                 z_vec=ever.astype(np.float64), w_unit=w_unit, lambda_mat=lam_mat, ctrl_idx=ctrl_idx,
-                trt_idx=trt_idx, coords_s=coords, cluster_s=cluster_ids,
+                trt_idx=trt_idx, coords_s=coords, cluster_s=cluster_ids, dy_k_draws=dy_k_draws_m,
             )
         else:
             pos = np.full(N, -1, dtype=np.int64)
@@ -2628,6 +3017,7 @@ def _fit_rank_k_longbet(
                 trt_idx=pos[trt_idx[np.isin(trt_idx, idx)]].astype(np.int32),
                 coords_s=None if coords is None else np.asarray(coords)[idx],
                 cluster_s=None if cluster_ids is None else np.asarray(cluster_ids)[idx],
+                dy_k_draws=None if dy_k_draws_m is None else dy_k_draws_m[:, idx],
             )
         spatial_cache = build_spatial_kernel_cache(
             coords=sub["coords_s"],
@@ -2638,6 +3028,7 @@ def _fit_rank_k_longbet(
             ell_grid_km=cfg.lengthscale_grid_km,
             use_spatial_gp=bool(cfg.use_spatial_gp),
         )
+        extra_draws = {} if sub["dy_k_draws"] is None else {"dy_k_draws": sub["dy_k_draws"]}
         res = sample_rank_k_mode_jax(
             dy_k=sub["dy_k"],
             df_k_point=sub["df_k"],
@@ -2669,6 +3060,7 @@ def _fit_rank_k_longbet(
             tau_clip=(cfg.tau_clip if k == 0 else (-float("inf"), float("inf"))),
             random_seed=int(cfg.random_seed + 101 * k),
             **_sampler_kwargs(k),
+            **extra_draws,
         )
         if idx is not None:
             res = dict(res)
@@ -2676,6 +3068,217 @@ def _fit_rank_k_longbet(
             res["tau_chains"] = _scatter_rows(res["tau_chains"], idx, N, axis=2)
             res["comp_tau_draws"] = _scatter_rows(res["comp_tau_draws"], idx, N, axis=2)
         return res
+
+    if layout is not None:
+        # ---- Common event-time basis: higher modes first, then the coupled Mode 1 -----------
+        K_eff = layout.k_eff
+        partial = layout.has_partial_windows()
+        coupling = cfg.mode_coupling if (partial and K_eff >= 2) else "none"
+        propagate_modes = coupling == "propagated" and int(cfg.n_forecast_draws) >= 2
+        if propagate_modes and m_init <= 1:
+            # Higher-mode draws are propagated through Mode-1 tracks exactly like forecast
+            # draws: n_forecast_draws components of draws_per_component draws per chain.
+            m_init = m_max = int(cfg.n_forecast_draws)
+            draws_per_chain = max(int(cfg.draws_per_component), 2)
+        m_eff = m_init
+        wls_df: list[np.ndarray] | None = None
+        if cfg.projection == "restricted_wls":
+            wls_df = restricted_wls_projection(df_dm, layout, None)[0]
+        fitted: dict[int, dict[str, Any]] = {}
+        fitted_m: dict[int, int] = {}
+        w_units: dict[int, np.ndarray] = {}
+        # Without a live correction the modes run in the paper's order (mode 1 first, so the
+        # adaptive forecast-draw expansion is decided exactly as before); with partial windows
+        # the higher modes come first because Mode 1 needs their posteriors.
+        order = list(range(K_eff)) if coupling == "none" else list(range(K_eff - 1, 0, -1)) + [0]
+
+        def _tau_tilde_mean() -> list[np.ndarray]:
+            return [fitted[j]["tau_draws"].mean(axis=1) for j in range(1, K_eff)]
+
+        def _tau_tilde_draws(m: int) -> list[list[np.ndarray]]:
+            """``m`` evenly spaced posterior draws (spanning the chains) of every higher mode, per component."""
+            per_mode = []
+            for j in range(1, K_eff):
+                td = fitted[j]["tau_draws"]
+                cols = np.round(np.linspace(0, td.shape[1] - 1, m)).astype(int)
+                per_mode.append(td[:, cols].T)  # (m, N)
+            return [[per_mode[j][c] for j in range(K_eff - 1)] for c in range(m)]
+
+        def _mode1_targets(m: int | None) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+            """Mode-1 outcome, forecast projection and (optionally) ``m`` propagated targets."""
+            tt_mean = _tau_tilde_mean() if coupling != "none" else None
+            if cfg.projection == "two_pass":
+                base = project_event_time_mode(dy_dm, layout, 0)
+                df0 = project_event_time_mode(df_dm, layout, 0)
+                point = base if tt_mean is None else base - mode1_dynamic_correction(layout, tt_mean)
+                draws = None
+                if m is not None:
+                    comps = _tau_tilde_draws(m)
+                    draws = np.stack([base - mode1_dynamic_correction(layout, comp) for comp in comps], axis=0)
+                return point, df0, draws
+            theta, _, _ = restricted_wls_projection(dy_dm, layout, tt_mean)
+            draws = None
+            if m is not None:
+                comps = _tau_tilde_draws(m)
+                draws = np.stack([restricted_wls_projection(dy_dm, layout, comp)[0][0] for comp in comps], axis=0)
+            return theta[0], wls_df[0], draws
+
+        for k in order:
+            n_trees_tau = int(cfg.num_trees_tau_mode1 if k == 0 else cfg.num_trees_tau_higher)
+            dy_k_draws_m = None
+            df_k_draws_m = None
+            if k >= 1:
+                if cfg.projection == "two_pass":
+                    dy_k = project_event_time_mode(dy_dm, layout, k)
+                    df_k = project_event_time_mode(df_dm, layout, k)
+                    w_unit = event_time_precision_weights(layout, k)
+                else:
+                    tt = [fitted[j]["tau_draws"].mean(axis=1) if j in fitted else np.zeros(N) for j in range(1, K_eff)]
+                    theta, var_factor, _ = restricted_wls_projection(dy_dm, layout, tt)
+                    dy_k = theta[k]
+                    df_k = wls_df[k]
+                    w_unit = restricted_wls_precision_weights(layout, var_factor, k)
+                draws_per_chain_k = m_eff * draws_per_chain
+            else:
+                dy_k, df_k, dy_k_draws_m = _mode1_targets(m_eff if propagate_modes else None)
+                if cfg.projection == "two_pass":
+                    w_unit = event_time_precision_weights(layout, 0)
+                else:
+                    _, var_factor, _ = restricted_wls_projection(dy_dm, layout, None)
+                    w_unit = restricted_wls_precision_weights(layout, var_factor, 0)
+                if df_dm_draws_all is not None and m_eff > 1:
+                    df_k_draws_m = project_event_time_mode(df_dm_draws_all[:m_eff], layout, 0)
+                multi = df_k_draws_m is not None or dy_k_draws_m is not None
+                draws_per_chain_k = draws_per_chain if multi else (m_eff * draws_per_chain)
+            if not np.all(np.isfinite(dy_k[w_unit > 0])) or not np.all(np.isfinite(df_k)):
+                raise RuntimeError(f"non-finite mode-{k + 1} projection on a supported unit; this is a bug")
+            dy_k = np.where(w_unit > 0, dy_k, 0.0)
+            w_units[k] = w_unit
+            res_k = _run_mode(
+                k, dy_k=dy_k, df_k=df_k, df_k_draws_m=df_k_draws_m, w_unit=w_unit, n_trees_tau=n_trees_tau,
+                draws_per_chain_k=draws_per_chain_k, idx=None, dy_k_draws_m=dy_k_draws_m,
+            )
+
+            if k == 0:
+                comp_raw = res_k["comp_tau_draws"]
+                comp_proj = _project_mode1_tau_draws(
+                    comp_raw.reshape(-1, N).T, cohorts_arr=cohorts_arr, ever=ever, waves=waves,
+                    att_unit_weights=att_unit_weights, tau_clip=cfg.tau_clip, catt_floor=cfg.catt_floor,
+                ).T.reshape(comp_raw.shape)
+                v_w, v_b, v_tot = _decompose_mode1_att(comp_proj)
+                if (
+                    df_dm_draws_all is not None
+                    and m_max > m_eff
+                    and v_tot > 1e-12
+                    and (v_b / v_tot) > float(cfg.between_var_threshold)
+                ):
+                    m_eff = m_max
+                    df_k_draws_m = project_event_time_mode(df_dm_draws_all[:m_eff], layout, 0)
+                    if propagate_modes:
+                        dy_k, _, dy_k_draws_m = _mode1_targets(m_eff)
+                        dy_k = np.where(w_unit > 0, dy_k, 0.0)
+                    res_k = _run_mode(
+                        k, dy_k=dy_k, df_k=df_k, df_k_draws_m=df_k_draws_m, w_unit=w_unit, n_trees_tau=n_trees_tau,
+                        draws_per_chain_k=draws_per_chain, idx=None, dy_k_draws_m=dy_k_draws_m,
+                    )
+                    comp_raw = res_k["comp_tau_draws"]
+                    comp_proj = _project_mode1_tau_draws(
+                        comp_raw.reshape(-1, N).T, cohorts_arr=cohorts_arr, ever=ever, waves=waves,
+                        att_unit_weights=att_unit_weights, tau_clip=cfg.tau_clip, catt_floor=cfg.catt_floor,
+                    ).T.reshape(comp_raw.shape)
+                    v_w, v_b, v_tot = _decompose_mode1_att(comp_proj)
+                att_var_within = v_w
+                att_var_between = v_b
+                if has_forecast:
+                    f_gap_1 = float(np.sum(att_unit_weights * df_k) - np.mean(df_k[ctrl]))
+                    th_var = float(np.var(res_k["theta_f_draws"], ddof=1)) if res_k["theta_f_draws"].size > 1 else 0.0
+                    att_var_slope = float((f_gap_1 ** 2) * th_var)
+                chains_raw = res_k["tau_chains"]
+                chains_proj = _project_mode1_tau_draws(
+                    chains_raw.reshape(-1, N).T, cohorts_arr=cohorts_arr, ever=ever, waves=waves,
+                    att_unit_weights=att_unit_weights, tau_clip=cfg.tau_clip, catt_floor=cfg.catt_floor,
+                ).T.reshape(chains_raw.shape)
+                att_chains = np.einsum("csn,n->cs", chains_proj, att_unit_weights)
+                rhat_att = float(compute_rhat(att_chains))
+                ess_att = float(compute_ess(att_chains, method="bulk"))
+            fitted[k] = res_k
+            fitted_m[k] = int(m_eff)
+
+        # Higher modes fitted before Mode 1 expanded the component count would hold fewer
+        # draws than Mode 1: refit them at the expanded budget (adaptive expansion only).
+        for k in range(1, K_eff):
+            if fitted_m.get(k) == int(m_eff):
+                continue
+            if cfg.projection == "two_pass":
+                dy_k = project_event_time_mode(dy_dm, layout, k)
+                df_k = project_event_time_mode(df_dm, layout, k)
+            else:
+                tt = [fitted[j]["tau_draws"].mean(axis=1) for j in range(1, K_eff)]
+                dy_k = restricted_wls_projection(dy_dm, layout, tt)[0][k]
+                df_k = wls_df[k]
+            w_unit = w_units[k]
+            dy_k = np.where(w_unit > 0, dy_k, 0.0)
+            fitted[k] = _run_mode(
+                k, dy_k=dy_k, df_k=df_k, df_k_draws_m=None, w_unit=w_unit,
+                n_trees_tau=int(cfg.num_trees_tau_higher), draws_per_chain_k=m_eff * draws_per_chain, idx=None,
+            )
+            fitted_m[k] = int(m_eff)
+
+        for k in range(K_eff):
+            res_k = fitted[k]
+            trt_chains = res_k["tau_chains"][:, :, trt_idx]
+            if trt_chains.shape[0] >= 2 and trt_chains.shape[1] >= 4:
+                diag_k = _mode1_diagnostics(trt_chains, compute_rhat, compute_ess)
+                diagnostics["rhat_mode"].append(diag_k["rhat_unit"])
+                diagnostics["ess_bulk_mode"].append(diag_k["ess_bulk_unit"])
+                diagnostics["ess_tail_mode"].append(diag_k["ess_tail_unit"])
+            else:
+                diagnostics["rhat_mode"].append(np.full(trt_idx.size, np.nan))
+                diagnostics["ess_bulk_mode"].append(np.full(trt_idx.size, np.nan))
+                diagnostics["ess_tail_mode"].append(np.full(trt_idx.size, np.nan))
+            diagnostics["s_eta2_draws"].append(np.asarray(res_k.get("s_eta2_draws", np.zeros(0))))
+            diagnostics["sigma_nu_total_draws"].append(np.asarray(res_k.get("sigma_nu_total_draws", np.zeros(0))))
+            diagnostics["tau_intercept_draws"].append(np.asarray(res_k.get("tau_intercept_draws", np.zeros(0))))
+            diagnostics["y_scale_mode"].append(float(res_k.get("y_scale", float("nan"))))
+            mode_tau_draws.append(res_k["tau_draws"])  # (N, S_total), unprojected
+            theta_f_draws.append(res_k["theta_f_draws"])
+            theta_f_modes.append(float(np.mean(res_k["theta_f_draws"])))
+            sigma_modes.append(float(np.mean(res_k["sigma_draws"])))
+            gp_hyper_draws.append({"s_zeta": res_k["s_zeta_draws"], "ell": res_k["ell_draws"]})
+        active_units = [w_units[k] > 0 for k in range(K_eff)]
+        diagnostics["mode_coupling"] = coupling
+        diagnostics["projection"] = cfg.projection
+        diagnostics["precision_weights"] = [w_units[k] for k in range(K_eff)]
+        diagnostics["n_mode_components"] = int(m_eff if propagate_modes else 1)
+        diagnostics["n_forecast_components"] = int(m_eff if df_dm_draws_all is not None else 1)
+        return _finalize_result(
+            mode_tau_draws_raw=mode_tau_draws,
+            cohorts_arr=cohorts_arr,
+            ever=ever,
+            waves=waves,
+            bases=bases,
+            att_unit_weights=att_unit_weights,
+            z_arr=z_arr,
+            cfg=cfg,
+            theta_f_modes=theta_f_modes,
+            sigma_modes=sigma_modes,
+            theta_f_draws=theta_f_draws,
+            gp_hyper_draws=gp_hyper_draws,
+            att_var_within=att_var_within,
+            att_var_between=att_var_between,
+            att_var_slope=att_var_slope,
+            n_components=int(m_eff),
+            rhat_att=rhat_att,
+            ess_att=ess_att,
+            diagnostics=diagnostics,
+            variant="propagated" if (cfg.uncertainty_propagation and m_eff > 1) else "jax",
+            active_units=active_units,
+            t_start=t_start,
+            compute_rhat=compute_rhat,
+            compute_ess=compute_ess,
+            result_fields=event_time_fields,
+            treated_cells=treated_cells_modeled,
+        )
 
     for k in range(K):
         active_waves = [g for g in waves if k < bases[g].shape[1]]
@@ -2967,9 +3570,15 @@ def rank_k_placebo_audit(
         # int() would silently truncate 2.5 to 2.
         raise ValueError(f"pseudo_anchor_offset must be a whole number of periods; got {offset!r}")
     # Fail fast, before the feature rebuild; warnings come from the placebo fit.
-    _validate_rank_k_inputs(
+    structure = _validate_rank_k_inputs(
         y, z, x, cfg=cfg, coords=coords, cluster_ids=cluster_ids, cohorts=cohorts, warn=False
     )
+    if structure["masked"]:
+        raise ValueError(
+            "rank_k_placebo_audit does not support masked panels (NaN in y): the placebo features are rebuilt "
+            "with build_causal_features on the pre-adoption window, which needs complete outcomes. Run the "
+            "audit on the complete pre-period rows (e.g. the common observed pre window)."
+        )
     if features is not None:
         # The placebo rebuilds features strictly on the pre-adoption window.
         _warn_rank_k(
@@ -3063,14 +3672,28 @@ def _infer_panel_masks_from_result(
     ever: np.ndarray | None,
     att_w: np.ndarray | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Resolve ``(cohorts, ever, att_w)`` from explicit arguments or infer from ``res``."""
+    """Resolve ``(cohorts, ever, att_w)`` from explicit arguments, the result's own fields, or ``res``.
+
+    Results of 0.7.0 and later carry ``cohorts`` and ``unit_weights`` (the ATT
+    weights behind ``att_draws``, cell- or unit-weighted); they are used unless the
+    caller passes explicit values. Older results fall back to the single-wave
+    inference from ``catt_draws``.
+    """
     n_units = int(res.catt_draws.shape[1])
     n_periods = int(res.catt_draws.shape[2])
     waves = sorted(int(g) for g in res.bases.keys())
     t0 = min(waves) if waves else 1
+    stored_cohorts = getattr(res, "cohorts", None)
+    stored_w = getattr(res, "unit_weights", None)
+    if cohorts is None and stored_cohorts is not None:
+        cohorts = np.asarray(stored_cohorts, dtype=np.int32)
+    if att_w is None and stored_w is not None:
+        att_w = np.asarray(stored_w, dtype=np.float64)
     if ever is None:
         if cohorts is not None:
             ever_arr = np.asarray(cohorts, dtype=np.int32) < n_periods
+        elif att_w is not None:
+            ever_arr = np.asarray(att_w, dtype=np.float64) > 0.0
         else:
             ever_arr = np.any(np.abs(res.catt_draws) > 0.0, axis=(0, 2))
     else:
@@ -3108,6 +3731,9 @@ def _project_cohort_damped_trajectory(
     t0 = min(waves) if waves else 1
     n_periods = int(res.catt_draws.shape[2])
     t_post = n_periods - t0
+    res_horizon = getattr(res, "horizon", None)
+    if res_horizon is not None:
+        t_post = min(t_post, int(res_horizon))
     n_draws = int(joint_att.shape[0])
 
     low_clip, high_clip = float(tau_clip[0]), float(tau_clip[1])
@@ -3528,6 +4154,12 @@ def fit_rank_k_hybrid(
     if cfg.engine != "jax":
         raise ValueError("fit_rank_k_hybrid needs a propagated (engine='jax') cfg for the mode-1 level")
     cfg_p = dc_replace(cfg, rank_k=1, catt_floor=None)
+    if np.any(np.isnan(np.asarray(y, dtype=np.float64))):
+        raise NotImplementedError(
+            "fit_rank_k_hybrid does not support masked panels (NaN in y): its heterogeneity surface comes from "
+            "the plug-in stochtree engine, which fits fully observed windows only. Use fit_rank_k_longbet with "
+            "the JAX engine for masked panels."
+        )
     if plugin_cfg is None:
         plugin_cfg = RankKLongBetConfig(
             rank_k=int(cfg.rank_k),
@@ -3565,6 +4197,8 @@ def fit_rank_k_hybrid(
     att_w = np.zeros(N, dtype=np.float64)
     for g in waves:
         att_w[cohorts_arr == g] = float(T - g) / max(total_trt_cells, 1.0)
+    if res_p.unit_weights is not None and cfg.att_weighting != "cell":
+        att_w = np.asarray(res_p.unit_weights, dtype=np.float64)
 
     att_p = np.asarray(res_p.att_draws, dtype=np.float64)
     s_p = int(att_p.shape[0])

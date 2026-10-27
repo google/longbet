@@ -94,6 +94,7 @@ _TOPOLOGIES = ("chain", "poset")
 _SAMPLERS = ("auto", "sir", "slice")
 _BIPARTITE_POLICIES = ("allocation", "conservative", "marginalize")
 _PROJECTIONS = ("ols", "huber")
+_ARM_VARIANCE_SOURCES = ("backsolve", "direct")
 _HUBER_K = 1.345
 # Prior family used when ``prior_mode=None`` on a non-bipartite / bipartite contrast graph.
 # The bipartite default only moves away from the bundle prior if the Tier A v2 C13' gate
@@ -590,6 +591,7 @@ class MultiArmReconciliationResult:
       projection_weights: ``{pair: weight}`` final IRLS Huber weights (``None`` for ``"ols"``).
       flagged_pairs: Fitted pairs down-weighted by the robust projection (weight ``< 1``),
         most down-weighted first.
+      arm_variance_source: ``"backsolve"`` or ``"direct"`` (see :func:`reconcile_multi_arm_draws`).
     """
 
     arms: tuple[str, ...]
@@ -628,6 +630,7 @@ class MultiArmReconciliationResult:
     projection: str = "ols"
     projection_weights: dict[tuple[str, str], float] | None = None
     flagged_pairs: tuple[tuple[str, str], ...] = ()
+    arm_variance_source: str = "backsolve"
 
     @property
     def all_pairs(self) -> tuple[tuple[str, str], ...]:
@@ -1625,6 +1628,53 @@ def _sigma_lik_from_arm_variances(v_vec: np.ndarray) -> np.ndarray:
     return np.diag(v_arr[1:]) + float(v_arr[0]) * np.ones((d_dim, d_dim), dtype=np.float64)
 
 
+def _direct_arm_variances(
+    arms: tuple[str, ...],
+    pair_indices: Sequence[tuple[int, int]],
+    s_sq: np.ndarray,
+    arm_outcome_variances: Mapping[str, float] | Sequence[float],
+    arm_sample_sizes: np.ndarray,
+) -> tuple[_ArmVarianceArray, float]:
+    """Arm sampling variances from per-arm outcome variances instead of back-solving.
+
+    ``v_a = c * sigma_a^2 / n_a`` where ``sigma_a^2`` is the arm's residual outcome variance
+    (e.g. its within-arm pre-period residual variance), ``n_a`` its unit count, and the single
+    scale ``c = sum_p s_p^2 w_p / sum_p w_p^2`` (``w_p = r_j + r_l``, ``r_a = sigma_a^2 / n_a``)
+    matches the pairwise posterior variances ``s_p^2`` in least squares. The allocation
+    across arms therefore comes from the arms' own data, so a bipartite design no longer
+    leaves the shared-arm covariance unidentified and odd cycles serve only as a diagnostic.
+
+    Args:
+      arms: Arm labels.
+      pair_indices: Fitted contrasts as ``(treated_idx, ref_idx)``.
+      s_sq: ``(P,)`` pairwise posterior Mode-1 variances.
+      arm_outcome_variances: ``{arm: sigma_a^2}`` or length-``A`` sequence.
+      arm_sample_sizes: ``(A,)`` arm unit counts.
+
+    Returns:
+      ``(arm_variances, residual)`` with ``residual = ||A_var v - s^2||_2``.
+    """
+    n_arms = len(arms)
+    if isinstance(arm_outcome_variances, Mapping):
+        sig2 = np.array([float(arm_outcome_variances[a]) for a in arms], dtype=np.float64)
+    else:
+        sig2 = np.asarray(arm_outcome_variances, dtype=np.float64)
+    if sig2.shape != (n_arms,) or np.any(~np.isfinite(sig2)) or np.any(sig2 <= 0.0):
+        raise ValueError(
+            f"arm_outcome_variances must provide {n_arms} finite positive variances; got {arm_outcome_variances!r}"
+        )
+    r_vec = sig2 / np.maximum(np.asarray(arm_sample_sizes, dtype=np.float64), 1e-12)
+    a_var = np.zeros((len(pair_indices), n_arms), dtype=np.float64)
+    for p_idx, (j_idx, l_idx) in enumerate(pair_indices):
+        a_var[p_idx, j_idx] = 1.0
+        a_var[p_idx, l_idx] = 1.0
+    w_pair = a_var @ r_vec
+    c_scale = float(np.dot(s_sq, w_pair) / max(float(np.dot(w_pair, w_pair)), 1e-300))
+    v_vec = c_scale * r_vec
+    residual = float(np.linalg.norm(a_var @ v_vec - s_sq))
+    return _ArmVarianceArray(v_vec, arms), residual
+
+
 def _huber_cut_space_projection(
     b_cut: np.ndarray,
     y_hat: np.ndarray,
@@ -2469,6 +2519,8 @@ def reconcile_multi_arm_draws(
     spike_prob: float = 0.5,
     prior_scale_floor: float | None = None,
     projection: str = "ols",
+    arm_variance_source: str = "backsolve",
+    arm_outcome_variances: Mapping[str, float] | Sequence[float] | None = None,
     _force_general: bool = False,
 ) -> MultiArmReconciliationResult:
     """Reconcile ``P >= A - 1`` pairwise Rank-K BCF posteriors across ``A >= 2`` arms.
@@ -2558,6 +2610,13 @@ def reconcile_multi_arm_draws(
         so one biased pairwise fit cannot drag the whole reconciliation; the down-weighted
         fits are reported in ``flagged_pairs`` / ``projection_weights``). Identical to
         ``"ols"`` under the exact shared-arm model.
+      arm_variance_source: ``"backsolve"`` (default, 0.9.0: arm variances back-solved from the
+        pairwise posterior variances, with ``bipartite_policy`` on bipartite graphs) or
+        ``"direct"`` (``v_a = c * sigma_a^2 / n_a`` from ``arm_outcome_variances`` and the arm
+        sample sizes, with one scale ``c`` matched to the pairwise variances; no bipartite
+        under-identification and no design warning).
+      arm_outcome_variances: ``{arm: sigma_a^2}`` (or length-``A`` sequence) of per-arm residual
+        outcome variances, required by ``arm_variance_source="direct"``.
       prior_scale_floor: Lower bound of the ``"empirical_bayes"`` scale (default: the in-sample
         posterior SD of the scale-defining contrast, i.e. its noise scale).
       spike_prob: Prior spike probability ``pi`` of ``prior_mode="bundle_spike_halfnormal"``
@@ -2590,6 +2649,12 @@ def reconcile_multi_arm_draws(
         raise ValueError(f"prior_mode must be one of {_ALL_PRIOR_MODES}; got {prior_mode!r}")
     if sampler not in _SAMPLERS:
         raise ValueError(f"sampler must be one of {_SAMPLERS}; got {sampler!r}")
+    if arm_variance_source not in _ARM_VARIANCE_SOURCES:
+        raise ValueError(
+            f"arm_variance_source must be one of {_ARM_VARIANCE_SOURCES}; got {arm_variance_source!r}"
+        )
+    if arm_variance_source == "direct" and arm_outcome_variances is None:
+        raise ValueError("arm_variance_source='direct' requires arm_outcome_variances")
     if projection not in _PROJECTIONS:
         raise ValueError(f"projection must be one of {_PROJECTIONS}; got {projection!r}")
     if bipartite_policy not in _BIPARTITE_POLICIES:
@@ -2701,17 +2766,22 @@ def reconcile_multi_arm_draws(
         flagged_pairs = tuple(fitted_pairs[i] for i in order if w_proj[i] < 1.0 - 1e-12)
 
     sample_sizes_vec = _infer_arm_sample_sizes(arms_tuple, results_map, arm_sample_sizes)
-    arm_variances, nnls_residual = _recover_arm_variances(
-        arms_tuple,
-        pair_indices,
-        s_sq,
-        is_bipartite=is_bipartite,
-        colors=colors,
-        arm_sample_sizes=sample_sizes_vec,
-        min_group_var_share=min_group_var_share,
-        bipartite_ridge_weight=bipartite_ridge_weight,
-        bipartite_policy=bipartite_policy,
-    )
+    if arm_variance_source == "direct":
+        arm_variances, nnls_residual = _direct_arm_variances(
+            arms_tuple, pair_indices, s_sq, arm_outcome_variances, sample_sizes_vec
+        )
+    else:
+        arm_variances, nnls_residual = _recover_arm_variances(
+            arms_tuple,
+            pair_indices,
+            s_sq,
+            is_bipartite=is_bipartite,
+            colors=colors,
+            arm_sample_sizes=sample_sizes_vec,
+            min_group_var_share=min_group_var_share,
+            bipartite_ridge_weight=bipartite_ridge_weight,
+            bipartite_policy=bipartite_policy,
+        )
     sigma_lik = np.diag(np.asarray(arm_variances[1:], dtype=np.float64)) + float(
         arm_variances[0]
     ) * np.ones((d_dim, d_dim), dtype=np.float64)
@@ -2748,6 +2818,7 @@ def reconcile_multi_arm_draws(
         and isinstance(prior_scale, (int, float, str, type(None)))
         and prior_scale != "empirical_bayes"
         and projection == "ols"
+        and arm_variance_source == "backsolve"
         and isinstance(prior_mean, (int, float))
     )
     if can_delegate_3arm:
@@ -3186,7 +3257,7 @@ def reconcile_multi_arm_draws(
     lik_logpdf_override: Any = None
     null_interval: tuple[float, float] | None = None
     null_shift: float | None = None
-    if is_bipartite:
+    if is_bipartite and arm_variance_source == "backsolve":
         z_null, xi_lo, xi_hi = _bipartite_null_interval(
             np.asarray(arm_variances, dtype=np.float64),
             pair_indices,
@@ -3536,11 +3607,12 @@ def reconcile_multi_arm_draws(
         prior_contrast_mode1_draws=pri_m1_out,
         prior_contrast_trajectory_draws=pri_traj_out,
         legacy_3arm_result=None,
-        bipartite_policy=bipartite_policy if is_bipartite else None,
+        bipartite_policy=bipartite_policy if (is_bipartite and arm_variance_source == "backsolve") else None,
         null_shift_interval=null_interval,
         null_shift=null_shift,
         spike_posterior_prob=spike_weight,
         projection=projection,
         projection_weights=projection_weights,
         flagged_pairs=flagged_pairs,
+        arm_variance_source=arm_variance_source,
     )

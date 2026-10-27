@@ -1545,6 +1545,7 @@ def _permute_multi_arm_reconciliation_result(
         projection=rec.projection,
         projection_weights=rec.projection_weights,
         flagged_pairs=rec.flagged_pairs,
+        arm_variance_source=rec.arm_variance_source,
     )
 
 
@@ -1887,6 +1888,7 @@ def _rescale_multi_arm_outcome(
         projection=rec.projection,
         projection_weights=rec.projection_weights,
         flagged_pairs=rec.flagged_pairs,
+        arm_variance_source=rec.arm_variance_source,
     )
 
 
@@ -1918,6 +1920,8 @@ def reconcile_multi_arm_multi_outcome_draws(
     bipartite_ridge: float = 1e-2,
     bipartite_policy: str = "allocation",
     projection: str = "ols",
+    arm_variance_source: str = "backsolve",
+    arm_outcome_variances: Mapping[str, Any] | Sequence[float] | None = None,
     horizon: int | None = None,
     sampler: str = "auto",
     n_proposals: int = 250_000,
@@ -1984,6 +1988,10 @@ def reconcile_multi_arm_multi_outcome_draws(
       bipartite_policy: See :func:`reconcile_multi_arm_draws` (default ``"allocation"``).
       projection: ``"ols"`` (default) or ``"huber"`` robust cut-space projection per outcome
         (see :func:`reconcile_multi_arm_draws`).
+      arm_variance_source: ``"backsolve"`` (default) or ``"direct"`` (see
+        :func:`reconcile_multi_arm_draws`); the direct-composite fits always back-solve.
+      arm_outcome_variances: ``{arm: sigma_a^2}`` or ``{outcome: {arm: sigma_a^2}}`` for
+        ``arm_variance_source="direct"``.
       horizon: Optional number of post-adoption periods summed into cumulative draws.
       sampler: ``"auto"``, ``"sir"``, or ``"slice"``.
       n_proposals: Importance-sampling proposal count per outcome (default ``250_000``).
@@ -2101,6 +2109,8 @@ def reconcile_multi_arm_multi_outcome_draws(
             bipartite_ridge=bipartite_ridge,
             bipartite_policy=bipartite_policy,
             projection=projection,
+            arm_variance_source=arm_variance_source,
+            arm_outcome_variances=_extract_outcome_nested_arg(arm_outcome_variances, m),
             horizon=horizon,
             sampler=sampler,
             n_proposals=int(n_proposals),

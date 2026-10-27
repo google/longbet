@@ -37,6 +37,8 @@ Each pairwise fit $p = (j_p, \ell_p)$ provides a Mode-1 posterior variance $s_p^
   * `"conservative"`: the $\xi$ that maximizes the Gaussian-approximate posterior variance of the top contrast (prior second moments from prior draws).
   * `"marginalize"`: integrates $\xi$ under a flat prior on the feasible interval, i.e. replaces the Gaussian likelihood by the 9-point scale mixture $\frac{1}{9}\sum_k \mathcal{N}(\hat{\boldsymbol{\mu}} \mid \boldsymbol{\mu}, \boldsymbol{\Sigma}(\xi_k))$.
 
+* **Direct arm variances (`arm_variance_source="direct"`, new in 0.10.0, opt-in):** instead of back-solving $\mathbf{A}_{\text{var}}\mathbf{v} \approx \mathbf{s}^2$, set $v_a = c\,\hat{\sigma}_a^2 / n_a$ from the arms' own residual outcome variances (`arm_outcome_variances`, e.g. within-arm pre-period residual variances) and unit counts, with one scale $c = \sum_p s_p^2 w_p / \sum_p w_p^2$, $w_p = \hat{\sigma}_{j_p}^2/n_{j_p} + \hat{\sigma}_{\ell_p}^2/n_{\ell_p}$. The allocation across arms then comes from data, so bipartite designs are identified and odd cycles serve only as a diagnostic.
+
   Since 0.10.0 a chain order fitted without all of its adjacent edges (e.g. only the vs-control star) is accepted with `topology="chain"`: it is reconciled as the poset whose cover relations are the chain edges plus the fitted pairs, so the spanning tree comes from the fitted pairs and the chain order remains the monotonicity constraint (with the default uniform split this prior equals the chain's $\operatorname{Dirichlet}(\mathbf{1})$ bundle prior).
 
 ---

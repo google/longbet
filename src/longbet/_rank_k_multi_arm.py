@@ -85,7 +85,11 @@ _INDEPENDENT_PRIOR_MODES = (
     "independent_halfnormal",
     "independent_normal",
 )
-_ALL_PRIOR_MODES = (*_BUNDLE_PRIOR_MODES, *_INDEPENDENT_PRIOR_MODES, "flat")
+# Spike-and-slab bundle priors: tau_top ~ pi delta_0 + (1 - pi) slab, increments split by the
+# slab's Dirichlet only on the slab component (v0.10 item B1).
+_SPIKE_PRIOR_MODES = ("bundle_spike_halfnormal",)
+_SPIKE_SLAB_MODE = {"bundle_spike_halfnormal": "bundle_halfnormal"}
+_ALL_PRIOR_MODES = (*_BUNDLE_PRIOR_MODES, *_SPIKE_PRIOR_MODES, *_INDEPENDENT_PRIOR_MODES, "flat")
 _TOPOLOGIES = ("chain", "poset")
 _SAMPLERS = ("auto", "sir", "slice")
 _BIPARTITE_POLICIES = ("allocation", "conservative", "marginalize")
@@ -114,6 +118,55 @@ def _fast_bundle_prior_logpdf(prior_mode: str, sd_ac: float, t: np.ndarray) -> n
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         val = np.log(2.0) + (-x_arr**2 / 2.0 - _NORM_PDF_LOGC) - np.log(sd_ac)
     return np.where(t_arr > 0.0, val, -np.inf)
+
+
+def _spike_slab_mix(
+    rng: np.random.Generator,
+    post_mu_slab: np.ndarray,
+    log_z_slab: float,
+    mu_hat: np.ndarray,
+    sigma_lik: np.ndarray,
+    spike_prob: float,
+    lik_logpdf: Any = None,
+) -> tuple[np.ndarray, float]:
+    """Mixes slab posterior draws with the point mass at ``mu = 0`` (spike-and-slab prior).
+
+    The posterior spike weight is exact given the slab evidence:
+    ``Pr(spike | y) = pi L(0) / (pi L(0) + (1 - pi) Z_slab)`` with ``L(0)`` the Gaussian
+    cut-space likelihood at ``mu = 0`` (closed form) and ``Z_slab = int p_slab(mu) L(mu) dmu``.
+
+    Args:
+      rng: Random generator for the draw-wise spike indicators.
+      post_mu_slab: ``(S, d)`` draws from the slab posterior.
+      log_z_slab: Log evidence of the slab component.
+      mu_hat: ``(d,)`` likelihood mean.
+      sigma_lik: ``(d, d)`` likelihood covariance.
+      spike_prob: Prior spike probability ``pi`` in ``(0, 1)``.
+      lik_logpdf: Optional non-Gaussian likelihood (evaluated at ``mu = 0``).
+
+    Returns:
+      ``(post_mu, spike_weight)`` where rows of ``post_mu`` drawn from the spike are zero.
+    """
+    d_dim = int(mu_hat.shape[0])
+    zero = np.zeros((1, d_dim), dtype=np.float64)
+    if lik_logpdf is None:
+        log_l0 = float(
+            sp_stats.multivariate_normal(mean=mu_hat, cov=sigma_lik, allow_singular=True).logpdf(zero[0])
+        )
+    else:
+        log_l0 = float(np.asarray(lik_logpdf(zero), dtype=np.float64).reshape(-1)[0])
+    log_a = math.log(float(spike_prob)) + log_l0
+    log_b = math.log1p(-float(spike_prob)) + float(log_z_slab)
+    if not math.isfinite(log_b):
+        weight = 1.0
+    elif not math.isfinite(log_a):
+        weight = 0.0
+    else:
+        weight = float(math.exp(log_a - np.logaddexp(log_a, log_b)))
+    is_spike = rng.random(post_mu_slab.shape[0]) < weight
+    post_mu = np.array(post_mu_slab, dtype=np.float64, copy=True)
+    post_mu[is_spike] = 0.0
+    return post_mu, weight
 
 
 class RankKDesignWarning(UserWarning):
@@ -421,6 +474,8 @@ class MultiArmReconciliationResult:
         floor (``None`` when the graph has an odd cycle).
       null_shift: Shift ``xi`` used by the policy (``0`` for ``"allocation"``; ``None`` for
         ``"marginalize"``, which integrates ``xi`` uniformly over ``null_shift_interval``).
+      spike_posterior_prob: Posterior probability of the spike ``mu = 0`` under a
+        spike-and-slab bundle prior (``None`` for other priors).
     """
 
     arms: tuple[str, ...]
@@ -455,6 +510,7 @@ class MultiArmReconciliationResult:
     bipartite_policy: str | None = None
     null_shift_interval: tuple[float, float] | None = None
     null_shift: float | None = None
+    spike_posterior_prob: float | None = None
 
     @property
     def all_pairs(self) -> tuple[tuple[str, str], ...]:
@@ -1541,11 +1597,15 @@ def _sir_posterior_nd(
     n_draws: int,
     n_prop: int,
     lik_logpdf: Any = None,
-) -> tuple[np.ndarray, np.ndarray, float]:
+    return_log_evidence: bool = False,
+) -> Any:
     """Defensive-mixture SIR in ``d = A - 1`` dimensions on the linear polyhedron support.
 
     ``lik_logpdf`` optionally replaces the Gaussian ``N(mu_lik, sigma_lik)`` target likelihood
-    (for example by a scale mixture); ``N(mu_lik, sigma_lik)`` remains the proposal.
+    (for example by a scale mixture); ``N(mu_lik, sigma_lik)`` remains the proposal. With
+    ``return_log_evidence=True`` a fourth element is returned: the deterministic-mixture
+    importance-sampling estimate of ``log int p(mu) L(mu) dmu`` (both densities normalized),
+    ``-inf`` when no proposal has positive weight.
     """
     if mu_lik is None:
         if mu_hat is None:
@@ -1614,6 +1674,8 @@ def _sir_posterior_nd(
 
     pts = np.concatenate([pri, lik], axis=0)
     if pts.shape[0] < 10:
+        if return_log_evidence:
+            return np.zeros((0, d_dim), dtype=np.float64), pri, 0.0, -np.inf
         return np.zeros((0, d_dim), dtype=np.float64), pri, 0.0
 
     log_prior = prior_logpdf(pts)
@@ -1644,12 +1706,18 @@ def _sir_posterior_nd(
     log_w = np.where(np.isfinite(log_w), log_w, -np.inf)
     max_log_w = float(np.max(log_w))
     if not math.isfinite(max_log_w):
+        if return_log_evidence:
+            return np.zeros((0, d_dim), dtype=np.float64), pri, 0.0, -np.inf
         return np.zeros((0, d_dim), dtype=np.float64), pri, 0.0
     log_w -= max_log_w
     weights = np.exp(log_w)
-    weights /= float(np.sum(weights))
+    sum_w = float(np.sum(weights))
+    weights /= sum_w
     ess = float(1.0 / np.sum(weights**2))
     idx = rng.choice(pts.shape[0], size=n_draws, replace=True, p=weights)
+    if return_log_evidence:
+        log_z = max_log_w + math.log(sum_w) - math.log(float(pts.shape[0]))
+        return pts[idx], pri, ess, log_z
     return pts[idx], pri, ess
 
 
@@ -2233,6 +2301,7 @@ def reconcile_multi_arm_draws(
     max_iter_multiplier: float = 8.0,
     seed: int = 2026,
     return_prior_draws: bool = False,
+    spike_prob: float = 0.5,
     _force_general: bool = False,
 ) -> MultiArmReconciliationResult:
     """Reconcile ``P >= A - 1`` pairwise Rank-K BCF posteriors across ``A >= 2`` arms.
@@ -2268,8 +2337,9 @@ def reconcile_multi_arm_draws(
       edges: Cover edges of the Hasse diagram when ``topology="poset"``.
       prior_mode: ``None`` (default: ``"bundle_halfnormal"``; on a bipartite contrast graph the
         bipartite default family), ``"bundle_halfnormal"``, ``"bundle_halfstudentt"``,
-        ``"bundle_gamma_spike"``, ``"independent"``, ``"independent_halfnormal"``,
-        ``"independent_normal"``, or ``"flat"``.
+        ``"bundle_gamma_spike"``, ``"bundle_spike_halfnormal"`` (spike-and-slab: point mass at
+        ``mu = 0`` with probability ``spike_prob``, else the half-normal bundle prior),
+        ``"independent"``, ``"independent_halfnormal"``, ``"independent_normal"``, or ``"flat"``.
       prior_scale: Positive float in outcome units, ``"in_sample"``, or per-arm sequence/mapping
         for the ``independent`` prior family.
       prior_mean: Prior mean(s) for the ``independent`` prior family (default ``0.0``).
@@ -2312,6 +2382,11 @@ def reconcile_multi_arm_draws(
       max_iter_multiplier: Cap on slice sweeps relative to the default (default ``8``).
       seed: Random seed.
       return_prior_draws: Attach prior Mode-1 and trajectory draws to the result.
+      spike_prob: Prior spike probability ``pi`` of ``prior_mode="bundle_spike_halfnormal"``
+        (``tau_top ~ pi delta_0 + (1 - pi) HalfNormal(prior_scale)``; default ``0.5``, which is
+        also what a ``Beta(1, 1)`` prior on ``pi`` integrates to for one reconciliation). The
+        posterior spike weight is exact given the slab evidence and is reported as
+        ``spike_posterior_prob``; spike draws are exactly zero on every contrast and period.
       _force_general: Bypass the ``A = 3`` legacy delegation path (for testing equivalence).
 
     Returns:
@@ -2378,6 +2453,17 @@ def reconcile_multi_arm_draws(
         )
     if prior_mode is None:
         prior_mode = _BIPARTITE_DEFAULT_PRIOR_MODE if is_bipartite else _DEFAULT_PRIOR_MODE
+    prior_mode_requested = prior_mode
+    spike_mode = prior_mode in _SPIKE_PRIOR_MODES
+    if spike_mode:
+        if not 0.0 < float(spike_prob) < 1.0:
+            raise ValueError(f"spike_prob must lie in (0, 1); got {spike_prob!r}")
+        if resolved_tau_clip[0] > 0.0:
+            raise ValueError(
+                f"prior_mode={prior_mode!r} puts a spike at zero, which needs tau_clip[0] <= 0; "
+                f"got tau_clip={tau_clip!r}"
+            )
+        prior_mode = _SPIKE_SLAB_MODE[prior_mode]
 
     tree_edges, redundant_pairs, cover_pairs, reachability, maximal_arms = _validate_and_orient_poset(
         arms_tuple, topology, edges, results_map
@@ -2468,6 +2554,7 @@ def reconcile_multi_arm_draws(
         and np.allclose(alpha_vec, 1.0)
         and sampler in ("auto", "sir")
         and prior_mode in (*_BUNDLE_PRIOR_MODES, "independent_halfnormal")
+        and not spike_mode
         and (arms_tuple[1], arms_tuple[0]) in results_map
         and (arms_tuple[2], arms_tuple[1]) in results_map
         and (arms_tuple[2], arms_tuple[0]) in results_map
@@ -2920,8 +3007,9 @@ def reconcile_multi_arm_draws(
     use_sir = sampler == "sir" or (sampler == "auto" and d_dim <= 3)
     fallback_triggered = False
 
+    log_z_slab: float | None = None
     if use_sir:
-        post_mu, pri_mu_pool, sir_ess = _sir_posterior_nd(
+        post_mu, pri_mu_pool, sir_ess, log_z_slab = _sir_posterior_nd(
             rng,
             prior_draw=_prior_draw,
             prior_logpdf=_prior_logpdf,
@@ -2933,6 +3021,7 @@ def reconcile_multi_arm_draws(
             n_draws=n_draws,
             n_prop=n_prop,
             lik_logpdf=lik_logpdf_override,
+            return_log_evidence=True,
         )
         if sampler == "auto" and (post_mu.shape[0] < n_draws or sir_ess < ess_gate):
             fallback_triggered = True
@@ -2990,6 +3079,26 @@ def reconcile_multi_arm_draws(
             fallback_triggered=fallback_triggered,
             n_iterations=int(slice_info["n_iterations"]),
             converged=slice_info["converged"],
+        )
+
+    spike_weight: float | None = None
+    if spike_mode:
+        if log_z_slab is None:
+            _, _, _, log_z_slab = _sir_posterior_nd(
+                rng,
+                prior_draw=_prior_draw,
+                prior_logpdf=_prior_logpdf,
+                mu_lik=mu_hat,
+                sigma_lik=sigma_lik,
+                a_ineq=a_ineq,
+                b_ineq=b_ineq,
+                n_draws=1,
+                n_prop=n_prop,
+                lik_logpdf=lik_logpdf_override,
+                return_log_evidence=True,
+            )
+        post_mu, spike_weight = _spike_slab_mix(
+            rng, post_mu, float(log_z_slab), mu_hat, sigma_lik, float(spike_prob), lik_logpdf_override
         )
 
     tau_increment_draws = post_mu @ t_tree.T
@@ -3111,6 +3220,9 @@ def reconcile_multi_arm_draws(
             replace=pri_mu_pool.shape[0] < n_draws,
         )
         pri_mu_out = pri_mu_pool[sel]
+        if spike_mode:
+            pri_mu_out = np.array(pri_mu_out, dtype=np.float64, copy=True)
+            pri_mu_out[rng.random(n_draws) < float(spike_prob)] = 0.0
         pri_inc_out = pri_mu_out @ t_tree.T
         pri_edge_trajs: list[np.ndarray] = []
         for e_idx, edge_pair in enumerate(tree_edges):
@@ -3181,7 +3293,7 @@ def reconcile_multi_arm_draws(
         trajectory_additivity_max_gap=cycle_traj_max_gap,
         sampler_diagnostics=diag,
         trajectory_additivity_gaps=trajectory_additivity_gaps,
-        prior_mode=prior_mode,
+        prior_mode=prior_mode_requested,
         prior_scale=scale_used,
         horizon=h_eff,
         own_vs_implied_trajectory_max_gap=own_vs_implied_max_gap,
@@ -3193,4 +3305,5 @@ def reconcile_multi_arm_draws(
         bipartite_policy=bipartite_policy if is_bipartite else None,
         null_shift_interval=null_interval,
         null_shift=null_shift,
+        spike_posterior_prob=spike_weight,
     )

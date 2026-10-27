@@ -38,6 +38,8 @@ from longbet._rank_k import (
     reconcile_nested_3arm_draws,
 )
 from longbet._rank_k_multi_arm import (
+    _SPIKE_PRIOR_MODES,
+    _SPIKE_SLAB_MODE,
     _ArmVarianceArray,
     _build_support_inequalities,
     _chain_order_as_poset,
@@ -46,6 +48,7 @@ from longbet._rank_k_multi_arm import (
     _hit_and_run_slice_sampler,
     _prior_logpdf_mu,
     _sir_posterior_nd,
+    _spike_slab_mix,
     ContrastReconciliationResult,
     MultiArmReconciliationResult,
     SamplerDiagnostics,
@@ -72,7 +75,7 @@ _CORRELATION_TYPES = ("spearman", "pearson", "score")
 # ``bottom_up`` warns when the unconstrained composite posterior puts more than this mass on
 # ``tau <= 0`` for the key contrast (the regime where per-component truncation inflates the floor).
 _BOTTOM_UP_NULL_WARN_PROB = 0.10
-_POSITIVE_PRIOR_MODES = (*_BUNDLE_PRIOR_MODES, "independent_halfnormal")
+_POSITIVE_PRIOR_MODES = (*_BUNDLE_PRIOR_MODES, *_SPIKE_PRIOR_MODES, "independent_halfnormal")
 
 
 def _composite_null_floor_diagnostic(
@@ -1537,6 +1540,7 @@ def _permute_multi_arm_reconciliation_result(
         bipartite_policy=rec.bipartite_policy,
         null_shift_interval=rec.null_shift_interval,
         null_shift=rec.null_shift,
+        spike_posterior_prob=rec.spike_posterior_prob,
     )
 
 
@@ -1612,12 +1616,17 @@ def _sample_synthetic_composite_multi_arm(
     thin: int,
     seed: int,
     cover_edges: Sequence[tuple[str, str]] | None = None,
+    spike_prob: float = 0.5,
     auto_continue: bool = False,
     target_rhat: float = 1.01,
     target_ess: float = 400.0,
     max_iter_multiplier: float = 8.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, SamplerDiagnostics]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, SamplerDiagnostics, float | None]:
     """Sample single-truncation ``mu_comp`` of shape ``(S, A - 1)`` from component GLS moments.
+
+    Returns ``(mu_comp, mu_hat, sigma_lik, v_comp, scale, diagnostics, spike_weight)`` where
+    ``spike_weight`` is the posterior spike probability under a spike-and-slab prior (else
+    ``None``).
 
     ``cover_edges`` (``(higher, lower)`` arm pairs) overrides ``tree_edges`` as the poset cover
     relations, used when a chain order is fitted without all of its adjacent edges.
@@ -1626,6 +1635,9 @@ def _sample_synthetic_composite_multi_arm(
     n_arms = len(arms)
     dim = n_arms - 1
     arm_to_idx = {arm: i for i, arm in enumerate(arms)}
+    spike_mode = prior_mode in _SPIKE_PRIOR_MODES
+    if spike_mode:
+        prior_mode = _SPIKE_SLAB_MODE[prior_mode]
 
     mu_hat_comp = sum(raw_by_outcome[m].mu_hat for m in comp_members)
     v_comp = np.zeros(n_arms, dtype=np.float64)
@@ -1724,8 +1736,11 @@ def _sample_synthetic_composite_multi_arm(
         )
 
     ess_gate = max(100.0, 0.02 * float(n_proposals))
+    log_z_slab: float | None = None
+    post_mu: np.ndarray | None = None
+    diag: SamplerDiagnostics | None = None
     if dim <= 3:
-        post_mu, _, sir_ess = _sir_posterior_nd(
+        post_mu, _, sir_ess, log_z_slab = _sir_posterior_nd(
             rng,
             prior_draw=_p_draw,
             prior_logpdf=_p_logpdf,
@@ -1736,49 +1751,57 @@ def _sample_synthetic_composite_multi_arm(
             b_ineq=b_ineq,
             n_draws=n_draws,
             n_prop=max(int(n_proposals), 10_000),
+            return_log_evidence=True,
         )
         if sir_ess >= ess_gate:
-            return (
-                post_mu,
-                mu_hat_comp,
-                sigma_lik_comp,
-                v_comp,
-                scale_val,
-                SamplerDiagnostics(method="sir", ess=sir_ess, r_hat=1.0),
-            )
+            diag = SamplerDiagnostics(method="sir", ess=sir_ess, r_hat=1.0)
 
-    post_mu, slice_ess, slice_rhat, slice_info = _hit_and_run_slice_sampler(
-        rng,
-        prior_draw=_p_draw,
-        prior_logpdf=_p_logpdf,
-        mu_hat=mu_hat_comp,
-        sigma_lik=sigma_lik_comp,
-        n_draws=n_draws,
-        num_chains=num_chains,
-        num_warmup=num_warmup,
-        thin=thin,
-        a_ineq=a_ineq,
-        b_ineq=b_ineq,
-        auto_continue=auto_continue,
-        target_rhat=target_rhat,
-        target_ess=target_ess,
-        max_iter_multiplier=max_iter_multiplier,
-        return_info=True,
-    )
-    return (
-        post_mu,
-        mu_hat_comp,
-        sigma_lik_comp,
-        v_comp,
-        scale_val,
-        SamplerDiagnostics(
+    if diag is None:
+        post_mu, slice_ess, slice_rhat, slice_info = _hit_and_run_slice_sampler(
+            rng,
+            prior_draw=_p_draw,
+            prior_logpdf=_p_logpdf,
+            mu_hat=mu_hat_comp,
+            sigma_lik=sigma_lik_comp,
+            n_draws=n_draws,
+            num_chains=num_chains,
+            num_warmup=num_warmup,
+            thin=thin,
+            a_ineq=a_ineq,
+            b_ineq=b_ineq,
+            auto_continue=auto_continue,
+            target_rhat=target_rhat,
+            target_ess=target_ess,
+            max_iter_multiplier=max_iter_multiplier,
+            return_info=True,
+        )
+        diag = SamplerDiagnostics(
             method="slice",
             ess=slice_ess,
             r_hat=slice_rhat,
             n_iterations=int(slice_info["n_iterations"]),
             converged=slice_info["converged"],
-        ),
-    )
+        )
+
+    spike_weight: float | None = None
+    if spike_mode:
+        if log_z_slab is None:
+            _, _, _, log_z_slab = _sir_posterior_nd(
+                rng,
+                prior_draw=_p_draw,
+                prior_logpdf=_p_logpdf,
+                mu_hat=mu_hat_comp,
+                sigma_lik=sigma_lik_comp,
+                a_ineq=a_ineq,
+                b_ineq=b_ineq,
+                n_draws=1,
+                n_prop=max(int(n_proposals), 10_000),
+                return_log_evidence=True,
+            )
+        post_mu, spike_weight = _spike_slab_mix(
+            rng, post_mu, float(log_z_slab), mu_hat_comp, sigma_lik_comp, float(spike_prob)
+        )
+    return (post_mu, mu_hat_comp, sigma_lik_comp, v_comp, scale_val, diag, spike_weight)
 
 
 def _rescale_multi_arm_outcome(
@@ -1845,6 +1868,7 @@ def _rescale_multi_arm_outcome(
         bipartite_policy=rec.bipartite_policy,
         null_shift_interval=rec.null_shift_interval,
         null_shift=rec.null_shift,
+        spike_posterior_prob=rec.spike_posterior_prob,
     )
 
 
@@ -1887,6 +1911,7 @@ def reconcile_multi_arm_multi_outcome_draws(
     max_iter_multiplier: float = 8.0,
     seed: int = 0,
     return_prior_draws: bool = False,
+    spike_prob: float = 0.5,
 ) -> MultiArmMultiOutcomeReconciliationResult:
     """Reconcile multi-arm Rank-K BCF posteriors across ``M`` outcomes with copula coupling and composites.
 
@@ -1951,6 +1976,8 @@ def reconcile_multi_arm_multi_outcome_draws(
       max_iter_multiplier: Cap on slice sweeps relative to the default (default ``8``).
       seed: Random seed.
       return_prior_draws: Attach prior Mode-1 and trajectory draws when ``True``.
+      spike_prob: Prior spike probability for ``prior_mode="bundle_spike_halfnormal"`` (used for
+        every structural outcome and for a ``coherent_total`` composite).
 
     Returns:
       :class:`MultiArmMultiOutcomeReconciliationResult`.
@@ -2063,6 +2090,7 @@ def reconcile_multi_arm_multi_outcome_draws(
             max_iter_multiplier=max_iter_multiplier,
             seed=int(seed) + 1009 * idx,
             return_prior_draws=return_prior_draws,
+            spike_prob=spike_prob,
         )
 
     first_rec = raw_by_outcome[structural_outcomes[0]]
@@ -2126,6 +2154,7 @@ def reconcile_multi_arm_multi_outcome_draws(
         key_vec[arm_to_idx[key_pair[1]] - 1] -= 1.0
 
     for comp_idx, (comp_name, comp_members) in enumerate(comp_spec.items()):
+        comp_spike_weight: float | None = None
         comp_idx_list = [structural_outcomes.index(m) for m in comp_members]
         floor_diags[comp_name] = _composite_null_floor_diagnostic(
             [float(key_vec @ raw_by_outcome[m].mu_hat) for m in comp_members],
@@ -2184,6 +2213,7 @@ def reconcile_multi_arm_multi_outcome_draws(
                     max_iter_multiplier=max_iter_multiplier,
                     seed=int(seed) + 20011 + 997 * comp_idx,
                     return_prior_draws=return_prior_draws,
+                    spike_prob=spike_prob,
                 )
                 comp_mu_raw = rec_comp_direct.tau_mu_draws
                 comp_mu_hat = rec_comp_direct.mu_hat
@@ -2191,6 +2221,7 @@ def reconcile_multi_arm_multi_outcome_draws(
                 comp_v = np.asarray(rec_comp_direct.arm_variances, dtype=np.float64)
                 comp_scale_used = rec_comp_direct.prior_scale
                 comp_diag = rec_comp_direct.sampler_diagnostics
+                comp_spike_weight = rec_comp_direct.spike_posterior_prob
             else:
                 (
                     comp_mu_raw,
@@ -2199,6 +2230,7 @@ def reconcile_multi_arm_multi_outcome_draws(
                     comp_v,
                     comp_scale_used,
                     comp_diag,
+                    comp_spike_weight,
                 ) = _sample_synthetic_composite_multi_arm(
                     comp_members,
                     structural_outcomes,
@@ -2220,6 +2252,7 @@ def reconcile_multi_arm_multi_outcome_draws(
                     thin=thin,
                     seed=int(seed) + 20011 + 997 * comp_idx,
                     cover_edges=cover_edges_eff,
+                    spike_prob=spike_prob,
                     auto_continue=auto_continue,
                     target_rhat=target_rhat,
                     target_ess=target_ess,
@@ -2384,6 +2417,7 @@ def reconcile_multi_arm_multi_outcome_draws(
             bipartite_policy=first_rec.bipartite_policy,
             null_shift_interval=first_rec.null_shift_interval,
             null_shift=first_rec.null_shift,
+            spike_posterior_prob=comp_spike_weight,
         )
 
         # Evaluate draw-wise composite additivity across ALL fitted/ordered pairs and periods

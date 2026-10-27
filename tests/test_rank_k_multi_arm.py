@@ -724,12 +724,15 @@ def test_row9_input_validation_raises_clear_value_errors() -> None:
             arms=["a0", "a1", "a2", "a3"],
         )
 
-    # 2. Missing spanning-tree edge fit
+    # 2. Missing spanning-tree edge fit (a poset whose A - 1 cover edges are all mandatory tree
+    # edges; since 0.10.0 a chain order fitted only through a vs-control star is reconciled as a
+    # poset and no longer raises, see tests/test_rank_k_v010_a4.py)
     with pytest.raises(ValueError, match="spanning-tree edge"):
         rkma.reconcile_multi_arm_draws(
             {("a1", "a0"): fit_600, ("a2", "a0"): fit_600, ("a3", "a0"): fit_600},
             arms=["a0", "a1", "a2", "a3"],
-            topology="chain",
+            topology="poset",
+            edges=[("a1", "a0"), ("a2", "a1"), ("a3", "a2")],
         )
 
     # 3. Inconsistent draw counts across fitted pairs

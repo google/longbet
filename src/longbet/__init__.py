@@ -118,6 +118,7 @@ from longbet._rank_k_multi import (
 from longbet._rank_k_multi_arm import (
     ContrastReconciliationResult,
     MultiArmReconciliationResult,
+    RankKDesignWarning,
     SamplerDiagnostics,
     reconcile_multi_arm_draws,
 )
@@ -235,6 +236,7 @@ __all__ = [
     "PseudoHorizonSeparationResult",
     "RankKConfigWarning",
     "RankKConvergenceCheck",
+    "RankKDesignWarning",
     "RankKLongBetConfig",
     "RankKLongBetResult",
     "RankKPriorDraws",

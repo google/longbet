@@ -75,6 +75,7 @@ from longbet._rank_k import (
 __all__ = [
     "ContrastReconciliationResult",
     "MultiArmReconciliationResult",
+    "RankKDesignWarning",
     "SamplerDiagnostics",
     "reconcile_multi_arm_draws",
 ]
@@ -87,6 +88,24 @@ _INDEPENDENT_PRIOR_MODES = (
 _ALL_PRIOR_MODES = (*_BUNDLE_PRIOR_MODES, *_INDEPENDENT_PRIOR_MODES, "flat")
 _TOPOLOGIES = ("chain", "poset")
 _SAMPLERS = ("auto", "sir", "slice")
+_BIPARTITE_POLICIES = ("allocation", "conservative", "marginalize")
+# Prior family used when ``prior_mode=None`` on a non-bipartite / bipartite contrast graph.
+# The bipartite default only moves away from the bundle prior if the Tier A v2 C13' gate
+# (reconciled RMSE <= naive, Cov95 >= 0.93) is met by the independent family.
+_DEFAULT_PRIOR_MODE = "bundle_halfnormal"
+_BIPARTITE_DEFAULT_PRIOR_MODE = "bundle_halfnormal"
+_N_NULL_GRID = 9
+
+
+class RankKDesignWarning(UserWarning):
+    """The fitted contrast design leaves part of the reconciliation unidentified.
+
+    Emitted by :func:`reconcile_multi_arm_draws` when the contrast graph is bipartite
+    (has no odd cycle): the arm sampling variances are then identified only up to the
+    alternating 2-coloring null direction, so the off-diagonal likelihood covariance
+    ``v_0`` rests on an assumption (``bipartite_policy``) instead of on the data. The
+    message names the one extra pairwise fit that would close an odd cycle.
+    """
 
 
 class _ArmVarianceArray(np.ndarray):
@@ -365,6 +384,14 @@ class MultiArmReconciliationResult:
         trajectory draws.
       legacy_3arm_result: Underlying :class:`Nested3ArmReconciliationResult` when ``A = 3``
         chain delegates to the legacy 3-arm path.
+      bipartite_policy: Policy that resolved the unidentified arm-variance direction on a
+        bipartite contrast graph (``None`` when the graph has an odd cycle).
+      null_shift_interval: Feasible interval ``[xi_lo, xi_hi]`` of the shift
+        ``v(xi) = v_alloc + xi z`` along the alternating null vector ``z`` (``z_a = +1`` on the
+        control's color class, ``-1`` on the other) that keeps every arm variance above its
+        floor (``None`` when the graph has an odd cycle).
+      null_shift: Shift ``xi`` used by the policy (``0`` for ``"allocation"``; ``None`` for
+        ``"marginalize"``, which integrates ``xi`` uniformly over ``null_shift_interval``).
     """
 
     arms: tuple[str, ...]
@@ -396,6 +423,9 @@ class MultiArmReconciliationResult:
     prior_contrast_mode1_draws: dict[tuple[str, str], np.ndarray] | None = None
     prior_contrast_trajectory_draws: dict[tuple[str, str], np.ndarray] | None = None
     legacy_3arm_result: Nested3ArmReconciliationResult | None = None
+    bipartite_policy: str | None = None
+    null_shift_interval: tuple[float, float] | None = None
+    null_shift: float | None = None
 
     @property
     def all_pairs(self) -> tuple[tuple[str, str], ...]:
@@ -663,6 +693,52 @@ def _normalize_results_mapping(
         seen_undirected.add(undir)
         normalized[(t_arm, r_arm)] = fit
     return normalized
+
+
+def _chain_order_as_poset(
+    arms: tuple[str, ...],
+    topology: str,
+    edges: Sequence[tuple[str, str]] | None,
+    fitted_pairs: Sequence[tuple[str, str]],
+    split_alpha: Sequence[float] | float | None = None,
+) -> tuple[str, Sequence[tuple[str, str]] | None]:
+    """Maps a chain order whose adjacent edges are not all fitted to an equivalent poset.
+
+    A chain ``arms[0] < ... < arms[A-1]`` fitted only through, e.g., a vs-control star has no
+    fitted chain spanning tree. It is reconciled as the poset whose cover relations are the
+    chain edges plus every fitted pair (oriented high -> low), so the spanning tree comes from
+    the fitted pairs while the chain order stays the monotonicity constraint. With the
+    default uniform split the poset's order-polytope bundle prior equals the chain's
+    ``Dirichlet(1, ..., 1)`` bundle prior.
+
+    Args:
+      arms: Arm labels in chain order.
+      topology: Requested topology.
+      edges: Requested poset edges (must be ``None`` for chains).
+      fitted_pairs: Fitted contrasts ``(treated, ref)``.
+      split_alpha: Requested Dirichlet split (only uniform is supported on the mapped poset).
+
+    Returns:
+      ``(topology, edges)`` to use internally (unchanged unless the mapping applies).
+    """
+    if topology != "chain" or edges is not None:
+        return topology, edges
+    arm_to_idx = {arm: idx for idx, arm in enumerate(arms)}
+    fitted_undir = {frozenset(p) for p in fitted_pairs}
+    chain_edges = [(arms[a], arms[a - 1]) for a in range(1, len(arms))]
+    if all(frozenset(e) in fitted_undir for e in chain_edges):
+        return topology, edges
+    if split_alpha is not None and not np.allclose(np.asarray(split_alpha, dtype=np.float64), 1.0):
+        raise ValueError(
+            "A chain whose adjacent edges are not all fitted is reconciled as a poset with the "
+            "chain as cover relations; only the uniform split (split_alpha=None) is supported"
+        )
+    extra = []
+    for t_arm, r_arm in fitted_pairs:
+        hi, lo = (t_arm, r_arm) if arm_to_idx[t_arm] > arm_to_idx[r_arm] else (r_arm, t_arm)
+        if frozenset((hi, lo)) not in {frozenset(e) for e in chain_edges}:
+            extra.append((hi, lo))
+    return "poset", [*chain_edges, *extra]
 
 
 def _check_connected_and_bipartite(
@@ -1148,6 +1224,7 @@ def _recover_arm_variances(
     arm_sample_sizes: np.ndarray,
     min_group_var_share: float,
     bipartite_ridge_weight: float,
+    bipartite_policy: str = "allocation",
 ) -> tuple[_ArmVarianceArray, float]:
     """Recover arm sampling variances ``v in R_+^A`` from pairwise posterior variances ``s_p^2``."""
     n_arms = len(arms)
@@ -1197,12 +1274,23 @@ def _recover_arm_variances(
         return _ArmVarianceArray(v_vec, arms), residual
 
     # Bipartite graph: rank(A_var) = A - 1 with null vector z_a = (-1)^{colors[a]}.
+    suggestion = _suggest_odd_cycle_fit(arms, pair_indices, colors)
+    if suggestion is None:
+        hint = "No single extra pairwise fit closes an odd cycle on these arms."
+    else:
+        (fit_j, fit_l), cycle = suggestion
+        hint = (
+            f"The missing odd cycle is {' -> '.join(arms[a] for a in cycle)}: fitting the "
+            f"contrast ({arms[fit_j]!r}, {arms[fit_l]!r}) would close it and identify every arm "
+            "variance."
+        )
     _warn_rank_k(
         f"reconcile_multi_arm_draws: contrast graph on arms {arms} is bipartite (contains no odd "
         "cycle), so the unsigned variance incidence matrix A_var has rank A - 1 and arm variances "
-        "are under-identified along the alternating 2-coloring null vector. Applying sample-size-"
-        "informed ridge-regularized NNLS.",
-        category=UserWarning,
+        "are under-identified along the alternating 2-coloring null vector; the shared-arm "
+        f"covariance of the likelihood then rests on bipartite_policy={bipartite_policy!r} "
+        f"rather than on the data. {hint}",
+        category=RankKDesignWarning,
     )
     inv_n = 1.0 / np.maximum(arm_sample_sizes, 1e-12)
     pair_weights = a_var @ inv_n
@@ -1234,6 +1322,105 @@ def _recover_arm_variances(
     v_vec = np.maximum(np.asarray(sol.x, dtype=np.float64), v_floor)
     residual = float(np.linalg.norm(a_var @ v_vec - s_sq))
     return _ArmVarianceArray(v_vec, arms), residual
+
+
+def _suggest_odd_cycle_fit(
+    arms: tuple[str, ...],
+    pair_indices: Sequence[tuple[int, int]],
+    colors: np.ndarray,
+) -> tuple[tuple[int, int], list[int]] | None:
+    """Return the extra fit ``(j, l)`` that closes the shortest odd cycle, and that cycle.
+
+    On a connected bipartite graph any unfitted pair of same-colored arms closes an odd
+    cycle (the tree path between them has even length). Pairs adjacent in ``arms`` order
+    are preferred, then pairs away from the control arm.
+
+    Args:
+      arms: Arm labels.
+      pair_indices: Fitted contrasts as ``(treated_idx, ref_idx)``.
+      colors: 2-coloring of the arms.
+
+    Returns:
+      ``((j, l), cycle)`` with ``j > l`` and ``cycle`` the arm-index path ``l -> ... -> j -> l``,
+      or ``None`` when every same-colored pair is already fitted (cannot happen on a
+      bipartite graph with ``A >= 3``).
+    """
+    n_arms = len(arms)
+    fitted = {frozenset(p) for p in pair_indices}
+    adj: list[list[int]] = [[] for _ in range(n_arms)]
+    for j_idx, l_idx in pair_indices:
+        adj[j_idx].append(l_idx)
+        adj[l_idx].append(j_idx)
+    candidates = [
+        (j, l)
+        for l in range(n_arms)
+        for j in range(l + 1, n_arms)
+        if colors[j] == colors[l] and frozenset((j, l)) not in fitted
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: (p[0] - p[1], p[1] == 0, p[1], p[0]))
+    j_best, l_best = candidates[0]
+    parent = {l_best: -1}
+    queue: deque[int] = deque([l_best])
+    while queue:
+        u = queue.popleft()
+        for v in sorted(adj[u]):
+            if v not in parent:
+                parent[v] = u
+                queue.append(v)
+    path = [j_best]
+    while parent[path[-1]] != -1:
+        path.append(parent[path[-1]])
+    path.reverse()  # l_best -> ... -> j_best
+    return (j_best, l_best), [*path, l_best]
+
+
+def _bipartite_null_interval(
+    arm_variances: np.ndarray,
+    pair_indices: Sequence[tuple[int, int]],
+    s_sq: np.ndarray,
+    colors: np.ndarray,
+    min_group_var_share: float,
+) -> tuple[np.ndarray, float, float]:
+    """Null vector ``z`` and the feasible shift interval keeping ``v + xi z >= floor``.
+
+    Args:
+      arm_variances: ``(A,)`` allocation solution ``v_alloc``.
+      pair_indices: Fitted contrasts as ``(treated_idx, ref_idx)``.
+      s_sq: ``(P,)`` pairwise posterior variances.
+      colors: 2-coloring of the arms (control has color ``0``).
+      min_group_var_share: Floor share ``eta`` of the minimum incident pairwise variance.
+
+    Returns:
+      ``(z, xi_lo, xi_hi)`` with ``z_a = +1`` on the control's color class and ``-1`` else.
+    """
+    n_arms = int(arm_variances.shape[0])
+    incident: list[list[float]] = [[] for _ in range(n_arms)]
+    for p_idx, (j_idx, l_idx) in enumerate(pair_indices):
+        var_p = max(float(s_sq[p_idx]), 1e-12)
+        incident[j_idx].append(var_p)
+        incident[l_idx].append(var_p)
+    floor = np.array(
+        [float(min_group_var_share) * min(inc) if inc else 1e-12 for inc in incident],
+        dtype=np.float64,
+    )
+    z_vec = np.where(colors == colors[0], 1.0, -1.0).astype(np.float64)
+    v_arr = np.asarray(arm_variances, dtype=np.float64)
+    lo_terms = [floor[a] - v_arr[a] for a in range(n_arms) if z_vec[a] > 0]
+    hi_terms = [v_arr[a] - floor[a] for a in range(n_arms) if z_vec[a] < 0]
+    xi_lo = max(lo_terms) if lo_terms else -np.inf
+    xi_hi = min(hi_terms) if hi_terms else np.inf
+    if xi_lo > xi_hi:
+        xi_lo = xi_hi = 0.0
+    return z_vec, float(min(xi_lo, 0.0)), float(max(xi_hi, 0.0))
+
+
+def _sigma_lik_from_arm_variances(v_vec: np.ndarray) -> np.ndarray:
+    """Cut-space likelihood covariance ``diag(v_1, ..., v_{A-1}) + v_0 1 1'``."""
+    v_arr = np.asarray(v_vec, dtype=np.float64)
+    d_dim = v_arr.shape[0] - 1
+    return np.diag(v_arr[1:]) + float(v_arr[0]) * np.ones((d_dim, d_dim), dtype=np.float64)
 
 
 def _build_support_inequalities(
@@ -1324,8 +1511,13 @@ def _sir_posterior_nd(
     b_ineq: np.ndarray | None = None,
     n_draws: int,
     n_prop: int,
+    lik_logpdf: Any = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Defensive-mixture SIR in ``d = A - 1`` dimensions on the linear polyhedron support."""
+    """Defensive-mixture SIR in ``d = A - 1`` dimensions on the linear polyhedron support.
+
+    ``lik_logpdf`` optionally replaces the Gaussian ``N(mu_lik, sigma_lik)`` target likelihood
+    (for example by a scale mixture); ``N(mu_lik, sigma_lik)`` remains the proposal.
+    """
     if mu_lik is None:
         if mu_hat is None:
             raise ValueError("Provide mu_lik or mu_hat")
@@ -1397,6 +1589,11 @@ def _sir_posterior_nd(
 
     log_prior = prior_logpdf(pts)
     log_lik = np.asarray(lik_dist.logpdf(pts), dtype=np.float64).reshape(-1)
+    log_target_lik = (
+        log_lik
+        if lik_logpdf is None
+        else np.asarray(lik_logpdf(pts), dtype=np.float64).reshape(-1)
+    )
     w_a = pri.shape[0] / float(pts.shape[0])
     w_b = 1.0 - w_a
 
@@ -1414,7 +1611,7 @@ def _sir_posterior_nd(
             math.log(w_a) + log_q_a - math.log(z_a),
             math.log(w_b) + log_lik - math.log(z_b),
         )
-    log_w = log_prior + log_lik - log_q
+    log_w = log_prior + log_target_lik - log_q
     log_w = np.where(np.isfinite(log_w), log_w, -np.inf)
     max_log_w = float(np.max(log_w))
     if not math.isfinite(max_log_w):
@@ -1511,8 +1708,13 @@ def _slice_posterior_nd(
     num_chains: int = 4,
     num_burnin: int = 200,
     thin: int = 2,
+    lik_logpdf: Any = None,
 ) -> tuple[np.ndarray, np.ndarray, tuple[float, ...], tuple[float, ...], int]:
-    """Vectorized multi-chain analytical-polyhedron hit-and-run slice sampler in ``R^d``."""
+    """Vectorized multi-chain analytical-polyhedron hit-and-run slice sampler in ``R^d``.
+
+    ``lik_logpdf`` optionally replaces the Gaussian ``N(mu_lik, sigma_lik)`` log likelihood in
+    the target; the Gaussian is still used to initialize and precondition the chains.
+    """
     d_dim = int(mu_lik.shape[0])
     n_chains = max(int(num_chains), 2)
     draws_per_chain = max(int(math.ceil(n_draws / float(n_chains))), 4)
@@ -1641,8 +1843,11 @@ def _slice_posterior_nd(
         lp = prior_logpdf(mu_valid)
         if use_radial_cone:
             lp = lp + float(d_dim - 1) * np.log(np.maximum(z_valid[:, -1], 1e-300))
-        diff = mu_valid - mu_lik[None, :]
-        ll = -0.5 * np.sum((diff @ prec_lik) * diff, axis=1)
+        if lik_logpdf is not None:
+            ll = np.asarray(lik_logpdf(mu_valid), dtype=np.float64).reshape(-1)
+        else:
+            diff = mu_valid - mu_lik[None, :]
+            ll = -0.5 * np.sum((diff @ prec_lik) * diff, axis=1)
         out[inside] = lp + ll
         return out
 
@@ -1853,7 +2058,7 @@ def reconcile_multi_arm_draws(
     *,
     topology: str = "chain",
     edges: Sequence[tuple[str, str]] | None = None,
-    prior_mode: str = "bundle_halfnormal",
+    prior_mode: str | None = None,
     prior_scale: float | str | Sequence[float] | Mapping[str, float] | None = "in_sample",
     prior_mean: float | Sequence[float] | Mapping[str, float] = 0.0,
     split_alpha: Sequence[float] | float | None = None,
@@ -1869,6 +2074,7 @@ def reconcile_multi_arm_draws(
     min_arm_var_share: float | None = None,
     bipartite_ridge_weight: float = 1e-2,
     bipartite_ridge: float | None = None,
+    bipartite_policy: str = "allocation",
     key_contrast: tuple[str, str] | None = None,
     horizon: int | None = None,
     n_proposals: int | None = None,
@@ -1912,8 +2118,10 @@ def reconcile_multi_arm_draws(
       topology: ``"chain"`` (nested sequence ``arms[0] < arms[1] < ... < arms[A-1]``) or
         ``"poset"`` (partial order specified by ``edges``).
       edges: Cover edges of the Hasse diagram when ``topology="poset"``.
-      prior_mode: ``"bundle_halfnormal"``, ``"bundle_halfstudentt"``, ``"bundle_gamma_spike"``,
-        ``"independent"``, ``"independent_halfnormal"``, ``"independent_normal"``, or ``"flat"``.
+      prior_mode: ``None`` (default: ``"bundle_halfnormal"``; on a bipartite contrast graph the
+        bipartite default family), ``"bundle_halfnormal"``, ``"bundle_halfstudentt"``,
+        ``"bundle_gamma_spike"``, ``"independent"``, ``"independent_halfnormal"``,
+        ``"independent_normal"``, or ``"flat"``.
       prior_scale: Positive float in outcome units, ``"in_sample"``, or per-arm sequence/mapping
         for the ``independent`` prior family.
       prior_mean: Prior mean(s) for the ``independent`` prior family (default ``0.0``).
@@ -1931,6 +2139,14 @@ def reconcile_multi_arm_draws(
       min_group_var_share: Floor share ``eta`` of the minimum incident pairwise variance per arm
         (default ``0.15``).
       bipartite_ridge_weight: Ridge penalty weight for bipartite variance recovery (default ``1e-2``).
+      bipartite_policy: How a bipartite contrast graph (no odd cycle, so the arm variances are
+        identified only up to the alternating null direction ``v + xi z``) resolves ``xi``:
+        ``"allocation"`` (default; 0.9.0 behavior) ridge-shrinks toward the sample-size
+        allocation ``v_a ~ sigma^2 / n_a``; ``"conservative"`` picks the ``xi`` in the feasible
+        interval (every ``v_a`` above its floor) that maximizes the Gaussian-approximate
+        posterior variance of the top contrast; ``"marginalize"`` integrates ``xi`` under a
+        flat prior on the feasible interval (a scale-mixture likelihood on a 9-point grid).
+        A :class:`RankKDesignWarning` names the extra fit that would close an odd cycle.
       key_contrast: Optional primary contrast ``(treated, ref)`` (defaults to ``(arms[-1], arms[0])``).
       horizon: Optional number of post-adoption periods summed into ``contrast_cumulative_draws``.
       n_proposals: Number of SIR importance proposals (default ``max(n_draws * 500, 100_000)``).
@@ -1961,10 +2177,14 @@ def reconcile_multi_arm_draws(
         raise ValueError(f"arms must contain at least 2 distinct arm names; got {arms!r}")
     if topology not in _TOPOLOGIES:
         raise ValueError(f"topology must be one of {_TOPOLOGIES}; got {topology!r}")
-    if prior_mode not in _ALL_PRIOR_MODES:
+    if prior_mode is not None and prior_mode not in _ALL_PRIOR_MODES:
         raise ValueError(f"prior_mode must be one of {_ALL_PRIOR_MODES}; got {prior_mode!r}")
     if sampler not in _SAMPLERS:
         raise ValueError(f"sampler must be one of {_SAMPLERS}; got {sampler!r}")
+    if bipartite_policy not in _BIPARTITE_POLICIES:
+        raise ValueError(
+            f"bipartite_policy must be one of {_BIPARTITE_POLICIES}; got {bipartite_policy!r}"
+        )
 
     resolved_tau_clip = (
         (-float("inf"), float("inf"))
@@ -1978,6 +2198,8 @@ def reconcile_multi_arm_draws(
     arm_to_idx = {arm: idx for idx, arm in enumerate(arms_tuple)}
     fitted_pairs = tuple(results_map.keys())
     n_pairs = len(fitted_pairs)
+    topology_requested = topology
+    topology, edges = _chain_order_as_poset(arms_tuple, topology, edges, fitted_pairs, split_alpha)
 
     # Validate draw counts across all fitted contrasts
     draw_counts: set[int] = set()
@@ -1998,6 +2220,8 @@ def reconcile_multi_arm_draws(
         raise ValueError(
             f"Contrast graph on arms {arms_tuple} is disconnected (not connected); fitted pairs are {fitted_pairs}"
         )
+    if prior_mode is None:
+        prior_mode = _BIPARTITE_DEFAULT_PRIOR_MODE if is_bipartite else _DEFAULT_PRIOR_MODE
 
     tree_edges, redundant_pairs, cover_pairs, reachability, maximal_arms = _validate_and_orient_poset(
         arms_tuple, topology, edges, results_map
@@ -2014,7 +2238,7 @@ def reconcile_multi_arm_draws(
 
     d_dim = n_arms - 1
     if split_alpha is not None:
-        if topology != "chain":
+        if topology_requested != "chain":
             raise ValueError("split_alpha is only supported when topology='chain'")
         if np.ndim(split_alpha) == 0:
             alpha_vec = np.full(d_dim, float(split_alpha), dtype=np.float64)
@@ -2057,6 +2281,7 @@ def reconcile_multi_arm_draws(
         arm_sample_sizes=sample_sizes_vec,
         min_group_var_share=min_group_var_share,
         bipartite_ridge_weight=bipartite_ridge_weight,
+        bipartite_policy=bipartite_policy,
     )
     sigma_lik = np.diag(np.asarray(arm_variances[1:], dtype=np.float64)) + float(
         arm_variances[0]
@@ -2480,6 +2705,59 @@ def reconcile_multi_arm_draws(
             valid = _inside_polyhedron(pts, a_ineq, b_ineq)
             return np.where(valid, 0.0, -np.inf)
 
+    # Step 3b: resolve the unidentified arm-variance direction on a bipartite contrast graph
+    lik_logpdf_override: Any = None
+    null_interval: tuple[float, float] | None = None
+    null_shift: float | None = None
+    if is_bipartite:
+        z_null, xi_lo, xi_hi = _bipartite_null_interval(
+            np.asarray(arm_variances, dtype=np.float64),
+            pair_indices,
+            s_sq,
+            colors,
+            min_group_var_share,
+        )
+        null_interval = (xi_lo, xi_hi)
+        v_alloc = np.asarray(arm_variances, dtype=np.float64).copy()
+        null_shift = 0.0
+        if bipartite_policy != "allocation" and xi_hi > xi_lo:
+            xi_grid = np.linspace(xi_lo, xi_hi, 41 if bipartite_policy == "conservative" else _N_NULL_GRID)
+            if bipartite_policy == "conservative":
+                top_vec = np.zeros(d_dim, dtype=np.float64)
+                top_vec[(top_idx if top_idx is not None else d_dim) - 1] = 1.0
+                if is_flat_prior:
+                    prior_prec = np.zeros((d_dim, d_dim), dtype=np.float64)
+                else:
+                    pri_probe = _prior_draw(4000)
+                    pri_probe = pri_probe[np.isfinite(_prior_logpdf(pri_probe))]
+                    prior_cov = np.atleast_2d(np.cov(pri_probe, rowvar=False))
+                    prior_prec = np.linalg.pinv(prior_cov + 1e-12 * np.eye(d_dim))
+                post_vars = []
+                for xi_val in xi_grid:
+                    sig_xi = _sigma_lik_from_arm_variances(v_alloc + xi_val * z_null)
+                    post_cov = np.linalg.inv(np.linalg.inv(sig_xi) + prior_prec)
+                    post_vars.append(float(top_vec @ post_cov @ top_vec))
+                null_shift = float(xi_grid[int(np.argmax(post_vars))])
+                arm_variances = _ArmVarianceArray(v_alloc + null_shift * z_null, arms_tuple)
+                sigma_lik = _sigma_lik_from_arm_variances(np.asarray(arm_variances))
+            else:
+                sig_grid = [_sigma_lik_from_arm_variances(v_alloc + xi_val * z_null) for xi_val in xi_grid]
+                comp_dists = [
+                    sp_stats.multivariate_normal(mean=mu_hat, cov=sig_k, allow_singular=True)
+                    for sig_k in sig_grid
+                ]
+                log_k = math.log(float(len(comp_dists)))
+
+                def lik_logpdf_override(pts: np.ndarray) -> np.ndarray:
+                    stack = np.vstack(
+                        [np.asarray(dist.logpdf(pts), dtype=np.float64).reshape(-1) for dist in comp_dists]
+                    )
+                    return sp_special.logsumexp(stack, axis=0) - log_k
+
+                null_shift = None
+                sigma_lik = np.mean(np.stack(sig_grid), axis=0)
+                arm_variances = _ArmVarianceArray(v_alloc + 0.5 * (xi_lo + xi_hi) * z_null, arms_tuple)
+
     # Step 4: Dimension-adaptive posterior sampling
     n_prop = int(n_proposals) if n_proposals is not None else max(n_draws * 400, 100_000)
     ess_gate = max(100.0, 0.02 * float(n_prop))
@@ -2498,6 +2776,7 @@ def reconcile_multi_arm_draws(
             b_ineq=b_ineq,
             n_draws=n_draws,
             n_prop=n_prop,
+            lik_logpdf=lik_logpdf_override,
         )
         if sampler == "auto" and (post_mu.shape[0] < n_draws or sir_ess < ess_gate):
             fallback_triggered = True
@@ -2538,6 +2817,7 @@ def reconcile_multi_arm_draws(
             num_chains=num_chains,
             num_burnin=num_burnin,
             thin=thin,
+            lik_logpdf=lik_logpdf_override,
         )
         diag = SamplerDiagnostics(
             method="slice",
@@ -2719,7 +2999,7 @@ def reconcile_multi_arm_draws(
 
     return MultiArmReconciliationResult(
         arms=arms_tuple,
-        topology=topology,
+        topology=topology_requested,
         tree_edges=tree_edges,
         fitted_pairs=fitted_pairs,
         redundant_pairs=redundant_pairs,
@@ -2747,4 +3027,7 @@ def reconcile_multi_arm_draws(
         prior_contrast_mode1_draws=pri_m1_out,
         prior_contrast_trajectory_draws=pri_traj_out,
         legacy_3arm_result=None,
+        bipartite_policy=bipartite_policy if is_bipartite else None,
+        null_shift_interval=null_interval,
+        null_shift=null_shift,
     )

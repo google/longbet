@@ -40,6 +40,7 @@ from longbet._rank_k import (
 from longbet._rank_k_multi_arm import (
     _ArmVarianceArray,
     _build_support_inequalities,
+    _chain_order_as_poset,
     _draw_prior_mu,
     _enumerate_linear_extensions,
     _hit_and_run_slice_sampler,
@@ -1533,6 +1534,9 @@ def _permute_multi_arm_reconciliation_result(
             else {p: arr[perm] for p, arr in rec.prior_contrast_trajectory_draws.items()}
         ),
         legacy_3arm_result=None,
+        bipartite_policy=rec.bipartite_policy,
+        null_shift_interval=rec.null_shift_interval,
+        null_shift=rec.null_shift,
     )
 
 
@@ -1607,8 +1611,13 @@ def _sample_synthetic_composite_multi_arm(
     num_warmup: int,
     thin: int,
     seed: int,
+    cover_edges: Sequence[tuple[str, str]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, SamplerDiagnostics]:
-    """Sample single-truncation ``mu_comp`` of shape ``(S, A - 1)`` from component GLS moments."""
+    """Sample single-truncation ``mu_comp`` of shape ``(S, A - 1)`` from component GLS moments.
+
+    ``cover_edges`` (``(higher, lower)`` arm pairs) overrides ``tree_edges`` as the poset cover
+    relations, used when a chain order is fitted without all of its adjacent edges.
+    """
     idx_list = [structural_outcomes.index(m) for m in comp_members]
     n_arms = len(arms)
     dim = n_arms - 1
@@ -1654,8 +1663,9 @@ def _sample_synthetic_composite_multi_arm(
     else:
         alpha_vec = np.asarray(split_alpha, dtype=np.float64)
 
-    poset_edges_idx = [(arm_to_idx[c], arm_to_idx[p]) for c, p in tree_edges]
-    cover_pairs = [(arm_to_idx[p], arm_to_idx[c]) for c, p in tree_edges]
+    order_edges = tree_edges if cover_edges is None else tuple(cover_edges)
+    poset_edges_idx = [(arm_to_idx[c], arm_to_idx[p]) for c, p in order_edges]
+    cover_pairs = [(arm_to_idx[p], arm_to_idx[c]) for c, p in order_edges]
     t_tree = np.zeros((dim, dim), dtype=np.float64)
     for e_idx, (child, parent) in enumerate(tree_edges):
         t_tree[e_idx, arm_to_idx[child] - 1] = 1.0
@@ -1817,6 +1827,9 @@ def _rescale_multi_arm_outcome(
         prior_contrast_mode1_draws=rec.prior_contrast_mode1_draws,
         prior_contrast_trajectory_draws=rec.prior_contrast_trajectory_draws,
         legacy_3arm_result=None,
+        bipartite_policy=rec.bipartite_policy,
+        null_shift_interval=rec.null_shift_interval,
+        null_shift=rec.null_shift,
     )
 
 
@@ -1830,7 +1843,7 @@ def reconcile_multi_arm_multi_outcome_draws(
     edges: Sequence[tuple[str, str]] | None = None,
     prior_scales: Mapping[str, float | str] | float | str = "in_sample",
     prior_scale: Mapping[str, float | str] | float | str | None = None,
-    prior_mode: str = "bundle_halfnormal",
+    prior_mode: str | None = None,
     split_alpha: Sequence[float] | float | None = None,
     monotone: bool = True,
     tau_clip: tuple[float, float] | None = (0.0, np.inf),
@@ -1846,6 +1859,7 @@ def reconcile_multi_arm_multi_outcome_draws(
     ever: Mapping[Any, Any] | None = None,
     min_arm_var_share: float = 0.15,
     bipartite_ridge: float = 1e-2,
+    bipartite_policy: str = "allocation",
     horizon: int | None = None,
     sampler: str = "auto",
     n_proposals: int = 250_000,
@@ -1924,7 +1938,9 @@ def reconcile_multi_arm_multi_outcome_draws(
         if tau_clip is None
         else (float(tau_clip[0]), float(tau_clip[1]))
     )
-    truncated_prior = prior_mode in _POSITIVE_PRIOR_MODES or resolved_tau_clip[0] >= 0.0
+    truncated_prior = (
+        prior_mode is None or prior_mode in _POSITIVE_PRIOR_MODES or resolved_tau_clip[0] >= 0.0
+    )
     composite_mode = _resolve_composite_mode(
         composite_mode, composite_outcomes, truncated=truncated_prior
     )
@@ -2009,6 +2025,7 @@ def reconcile_multi_arm_multi_outcome_draws(
             ever=ev_m,
             min_arm_var_share=min_arm_var_share,
             bipartite_ridge=bipartite_ridge,
+            bipartite_policy=bipartite_policy,
             horizon=horizon,
             sampler=sampler,
             n_proposals=int(n_proposals),
@@ -2020,6 +2037,7 @@ def reconcile_multi_arm_multi_outcome_draws(
         )
 
     first_rec = raw_by_outcome[structural_outcomes[0]]
+    prior_mode = first_rec.prior_mode
     tree_edges = first_rec.tree_edges
     fitted_pairs = first_rec.fitted_pairs
     redundant_pairs = first_rec.redundant_pairs
@@ -2063,6 +2081,10 @@ def reconcile_multi_arm_multi_outcome_draws(
         if arm_to_idx[parent] > 0:
             m_tree[e_idx, arm_to_idx[parent] - 1] = -1.0
     m_tree_inv = m_tree.copy()
+    topology_eff, edges_eff = _chain_order_as_poset(
+        arms_tuple, topology, edges, fitted_pairs, split_alpha
+    )
+    cover_edges_eff = edges_eff if topology_eff != topology else None
 
     # Step 3: Synthesize composite outcomes
     max_abs_disc: dict[str, float] = {}
@@ -2120,6 +2142,7 @@ def reconcile_multi_arm_multi_outcome_draws(
                     sample_sizes=default_sample_sizes if isinstance(default_sample_sizes, Mapping) else None,
                     min_arm_var_share=min_arm_var_share,
                     bipartite_ridge=bipartite_ridge,
+                    bipartite_policy=bipartite_policy,
                     horizon=horizon,
                     sampler=sampler,
                     n_proposals=int(n_proposals),
@@ -2147,7 +2170,7 @@ def reconcile_multi_arm_multi_outcome_draws(
                     comp_members,
                     structural_outcomes,
                     arms_tuple,
-                    topology,
+                    topology_eff,
                     tree_edges,
                     raw_by_outcome,
                     arm_corrs,
@@ -2163,6 +2186,7 @@ def reconcile_multi_arm_multi_outcome_draws(
                     num_warmup=num_warmup,
                     thin=thin,
                     seed=int(seed) + 20011 + 997 * comp_idx,
+                    cover_edges=cover_edges_eff,
                 )
 
             comp_mu_full_raw = np.column_stack([np.zeros(n_draws, dtype=np.float64), comp_mu_raw])
@@ -2320,6 +2344,9 @@ def reconcile_multi_arm_multi_outcome_draws(
             prior_contrast_mode1_draws=comp_pri_mode1,
             prior_contrast_trajectory_draws=comp_pri_traj,
             legacy_3arm_result=None,
+            bipartite_policy=first_rec.bipartite_policy,
+            null_shift_interval=first_rec.null_shift_interval,
+            null_shift=first_rec.null_shift,
         )
 
         # Evaluate draw-wise composite additivity across ALL fitted/ordered pairs and periods

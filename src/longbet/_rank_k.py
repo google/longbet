@@ -4327,6 +4327,7 @@ from longbet._rank_k_multi import (  # noqa: E402
 from longbet._rank_k_multi_arm import (  # noqa: E402
     ContrastReconciliationResult,
     MultiArmReconciliationResult,
+    RankKDesignWarning,
     SamplerDiagnostics,
     reconcile_multi_arm_draws,
 )

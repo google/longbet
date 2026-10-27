@@ -428,6 +428,12 @@ In the paired $R = 64$ baseline-module factorial of the accompanying paper (`rep
 
 ---
 
+## Changes in 0.10.0 (in progress on `feat/v0.10-methodology`)
+
+Methodology v2 for multi-arm, multi-outcome reconciliation ([docs/rank-k-multi-arm-multi-outcome.md](docs/rank-k-multi-arm-multi-outcome.md), section 5). Every changed default has an explicit opt-out that reproduces 0.9.0 bit for bit (`tests/test_rank_k_v010_parity.py` checks it against draws stored from 0.9.0). Changes relative to 0.9.0:
+
+- **`composite_mode` defaults to `"coherent_total"`** in `reconcile_multi_arm_multi_outcome_draws` and `reconcile_nested_3arm_multi_draws` (`composite_mode=None` resolves to `"coherent_total"` when the composites have disjoint components and the prior truncates at zero, else to `"bottom_up"`). `composite_mode="bottom_up"` restores 0.9.0 and now emits a `RankKConfigWarning` with the expected null-floor inflation $\sum_m \sigma_m / \sqrt{\boldsymbol{\sigma}^\top\mathbf{R}\boldsymbol{\sigma}}$ whenever the unconstrained composite posterior on the key contrast has $\Pr(\tau \le 0) > 0.10$; both results gain `composite_floor_diagnostics`.
+
 ## Changes in 0.9.0
 
 General $A$-arm ($A \ge 2$) and $M$-outcome coherent reconciliation for Rank-$K$ BCF ([docs/rank-k-multi-arm-multi-outcome.md](docs/rank-k-multi-arm-multi-outcome.md)) and completion of the `extrapolate_rank_k_decay` `rho_sd=None` default flip announced in 0.8.0. Changes relative to 0.8.0:

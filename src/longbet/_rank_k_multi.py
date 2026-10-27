@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from typing import Any
 
@@ -68,6 +68,99 @@ __all__ = [
 
 _COMPOSITE_MODES = ("bottom_up", "coherent_total")
 _CORRELATION_TYPES = ("spearman", "pearson", "score")
+# ``bottom_up`` warns when the unconstrained composite posterior puts more than this mass on
+# ``tau <= 0`` for the key contrast (the regime where per-component truncation inflates the floor).
+_BOTTOM_UP_NULL_WARN_PROB = 0.10
+_POSITIVE_PRIOR_MODES = (*_BUNDLE_PRIOR_MODES, "independent_halfnormal")
+
+
+def _composite_null_floor_diagnostic(
+    means: Sequence[float], sds: Sequence[float], corr: np.ndarray
+) -> dict[str, float]:
+    """Unconstrained composite posterior mass at ``tau <= 0`` and the bottom-up floor inflation.
+
+    Under a global null each component's positivity-truncated posterior mean is
+    ``sigma_m * sqrt(2 / pi)``, so summing ``M`` truncated components inflates the composite
+    floor relative to a single truncation of the composite by
+    ``sum_m sigma_m / sqrt(sigma' R sigma)`` (Eq. null_floor_inflation, weights ``w_m = 1``).
+
+    Args:
+      means: Unconstrained posterior means of the composite's components on the key contrast.
+      sds: Unconstrained posterior standard deviations of the same components.
+      corr: ``(M_c, M_c)`` correlation of the components' sampling errors on the key contrast.
+
+    Returns:
+      ``{"p_nonpositive", "expected_floor_inflation", "mean", "sd"}`` for the composite.
+    """
+    m_vec = np.asarray(means, dtype=np.float64)
+    s_vec = np.maximum(np.asarray(sds, dtype=np.float64), 1e-12)
+    corr_mat = np.asarray(corr, dtype=np.float64)
+    comp_mean = float(np.sum(m_vec))
+    comp_sd = math.sqrt(max(float(s_vec @ corr_mat @ s_vec), 1e-24))
+    p_nonpos = float(special.ndtr(-comp_mean / comp_sd))
+    inflation = float(np.sum(s_vec)) / comp_sd
+    return {
+        "p_nonpositive": p_nonpos,
+        "expected_floor_inflation": inflation,
+        "mean": comp_mean,
+        "sd": comp_sd,
+    }
+
+
+def _resolve_composite_mode(
+    composite_mode: str | None,
+    composite_outcomes: Mapping[str, Sequence[str]] | None,
+    *,
+    truncated: bool,
+) -> str:
+    """Resolves ``composite_mode=None`` to ``"coherent_total"`` where it is well defined.
+
+    ``coherent_total`` is the default since 0.10.0. It needs disjoint component sets across
+    composites and a positivity-truncated prior; when either fails the default falls back
+    to ``"bottom_up"`` (with a :class:`RankKConfigWarning` for overlapping components).
+
+    Args:
+      composite_mode: User value (``None``, ``"bottom_up"`` or ``"coherent_total"``).
+      composite_outcomes: ``{composite_name: components}`` or ``None``.
+      truncated: Whether the reconciliation prior truncates Mode-1 effects at zero.
+
+    Returns:
+      The resolved mode.
+    """
+    if composite_mode is not None:
+        if composite_mode not in _COMPOSITE_MODES:
+            raise ValueError(f"composite_mode must be one of {_COMPOSITE_MODES}; got {composite_mode!r}")
+        return composite_mode
+    if not truncated:
+        return "bottom_up"
+    seen: set[str] = set()
+    for comp_name, members in (composite_outcomes or {}).items():
+        member_set = {str(m) for m in members}
+        if seen & member_set:
+            _warn_rank_k(
+                f"composite_mode defaults to 'coherent_total', which needs disjoint component sets; "
+                f"composite {str(comp_name)!r} shares component(s) {sorted(seen & member_set)} with an "
+                "earlier composite, so every composite falls back to 'bottom_up'. Pass composite_mode "
+                "explicitly to silence this warning."
+            )
+            return "bottom_up"
+        seen |= member_set
+    return "coherent_total"
+
+
+def _warn_bottom_up_null_floor(
+    comp_name: str, contrast_label: str, diag: Mapping[str, float]
+) -> None:
+    """Emits the ``bottom_up`` null-floor :class:`RankKConfigWarning` for one composite."""
+    _warn_rank_k(
+        f"composite_mode='bottom_up' sums separately truncated components of composite "
+        f"{comp_name!r}, but the unconstrained composite posterior on {contrast_label} puts "
+        f"Pr(tau <= 0) = {diag['p_nonpositive']:.3f} > {_BOTTOM_UP_NULL_WARN_PROB:.2f} on the null. "
+        f"Near the null the summed floors inflate the composite by about "
+        f"sum_m sigma_m / sqrt(sigma' R sigma) = {diag['expected_floor_inflation']:.3f}x relative to "
+        "a single truncation of the composite. Use composite_mode='coherent_total' (the default "
+        "since 0.10.0) to truncate the composite once."
+    )
 
 
 @dataclass(frozen=True)
@@ -158,6 +251,8 @@ class Nested3ArmMultiReconciliationResult:
         between the composite and the sum of its components across all contrasts and periods.
       additivity_violation_rate: ``{composite_name: float}`` fraction of draws where
         ``|composite - sum(components)| > 1e-12``.
+      composite_floor_diagnostics: ``{composite_name: {"p_nonpositive", "expected_floor_inflation",
+        "mean", "sd"}}`` for the unconstrained composite posterior on the ``A - C`` contrast.
     """
 
     outcomes: tuple[str, ...]
@@ -179,6 +274,7 @@ class Nested3ArmMultiReconciliationResult:
     realized_spearman: np.ndarray
     max_abs_composite_discrepancy: dict[str, float]
     additivity_violation_rate: dict[str, float]
+    composite_floor_diagnostics: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def __getitem__(self, outcome: str) -> Nested3ArmReconciliationResult:
         return self.by_outcome[outcome]
@@ -213,6 +309,8 @@ class MultiArmMultiOutcomeReconciliationResult:
         between the composite and the sum of its components across all contrasts and periods.
       additivity_violation_rate: ``{composite_name: float}`` fraction of draws where
         ``|composite - sum(components)| > 1e-12`` on any contrast or period.
+      composite_floor_diagnostics: ``{composite_name: {"p_nonpositive", "expected_floor_inflation",
+        "mean", "sd"}}`` for the unconstrained composite posterior on ``key_contrast``.
     """
 
     arms: tuple[str, ...]
@@ -237,6 +335,7 @@ class MultiArmMultiOutcomeReconciliationResult:
     realized_spearman: np.ndarray
     max_abs_composite_discrepancy: dict[str, float]
     additivity_violation_rate: dict[str, float]
+    composite_floor_diagnostics: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def __getitem__(self, outcome: str) -> MultiArmReconciliationResult:
         return self.by_outcome[outcome]
@@ -877,7 +976,7 @@ def reconcile_nested_3arm_multi_draws(
     share_sd_logit: float = 1.5,
     cross_outcome_corr: np.ndarray | CrossOutcomeCorrelationResult | None = None,
     composite_outcomes: Mapping[str, Sequence[str]] | None = None,
-    composite_mode: str = "bottom_up",
+    composite_mode: str | None = None,
     composite_results: Mapping[str, Mapping[str, RankKLongBetResult]] | None = None,
     composite_prior_scales: Mapping[str, float | str] | None = None,
     cohorts_bc: np.ndarray | Mapping[str, np.ndarray] | None = None,
@@ -902,16 +1001,18 @@ def reconcile_nested_3arm_multi_draws(
        cross-outcome sampling-error correlation ``cross_outcome_corr``.
     3. Any requested ``composite_outcomes`` (e.g. ``{"total": ("outcome_a", "outcome_b")}``) are
        synthesized under ``composite_mode``:
-       - ``"bottom_up"``: composite draws and trajectories are the exact draw-wise sums
-         of the coupled component outcomes (``AVR == 0``, ``max |gap| < 1e-12``,
-         component marginals 100% unchanged).
-       - ``"coherent_total"``: reconciles the single-truncation composite total draw once
-         (from ``composite_results`` if provided, or from the composite GLS moments and
-         combined prior scale), couples it comonotonically with the sum of the coupled
-         components, and rescales the non-negative component draws on each draw ``s``
+       - ``"coherent_total"`` (default since 0.10.0): reconciles the single-truncation composite
+         total draw once (from ``composite_results`` if provided, or from the composite GLS
+         moments and combined prior scale), couples it comonotonically with the sum of the
+         coupled components, and rescales the non-negative component draws on each draw ``s``
          (``scale_s = total_ac_s / sum_m comp_ac_m_s``) so that both exact draw-wise
          additivity (``AVR == 0``, ``max |gap| < 1e-12``) and single-truncation composite
          null-floor preservation hold simultaneously.
+       - ``"bottom_up"``: composite draws and trajectories are the exact draw-wise sums
+         of the coupled component outcomes (``AVR == 0``, ``max |gap| < 1e-12``,
+         component marginals 100% unchanged). Near the null this inflates the composite
+         floor; a :class:`RankKConfigWarning` reports the expected inflation whenever the
+         unconstrained composite posterior has ``Pr(tau_AC <= 0) > 0.10``.
 
     Args:
       results_bc: ``{outcome: RankKLongBetResult}`` for the ``B - C`` fits.
@@ -925,7 +1026,9 @@ def reconcile_nested_3arm_multi_draws(
       cross_outcome_corr: ``None`` (identity), an ``(M, M)`` correlation matrix, or a
         :class:`CrossOutcomeCorrelationResult`.
       composite_outcomes: Optional ``{composite_name: (component_1, component_2, ...)}``.
-      composite_mode: ``"bottom_up"`` (default) or ``"coherent_total"``.
+      composite_mode: ``None`` (default: ``"coherent_total"`` when the composites have
+        disjoint components, else ``"bottom_up"``), ``"coherent_total"``, or ``"bottom_up"``
+        (bit-identical to 0.9.0 when passed explicitly).
       composite_results: Optional ``{composite_name: {"BC": fit_bc, "AB": fit_ab, "AC": fit_ac}}``
         used when ``composite_mode="coherent_total"``.
       composite_prior_scales: Optional ``{composite_name: scale}`` for ``"coherent_total"``.
@@ -951,10 +1054,13 @@ def reconcile_nested_3arm_multi_draws(
             "results_bc, results_ab, and results_ac must share the exact same outcome keys; "
             f"got {list(results_bc)}, {list(results_ab)}, {list(results_ac)}"
         )
-    if composite_mode not in _COMPOSITE_MODES:
-        raise ValueError(f"composite_mode must be one of {_COMPOSITE_MODES}; got {composite_mode!r}")
-
     resolved_tau_clip = (-float("inf"), float("inf")) if tau_clip is None else (float(tau_clip[0]), float(tau_clip[1]))
+    truncated_prior = prior_mode in _POSITIVE_PRIOR_MODES or resolved_tau_clip[0] >= 0.0
+    composite_mode = _resolve_composite_mode(
+        composite_mode,
+        composite_outcomes,
+        truncated=truncated_prior,
+    )
 
     # Validate composite_outcomes specification up front
     comp_spec: dict[str, tuple[str, ...]] = {}
@@ -1050,8 +1156,31 @@ def reconcile_nested_3arm_multi_draws(
     # Step 3: Synthesize composite outcomes
     max_abs_disc: dict[str, float] = {}
     avr_by_comp: dict[str, float] = {}
+    floor_diags: dict[str, dict[str, float]] = {}
 
     for comp_idx, (comp_name, comp_members) in enumerate(comp_spec.items()):
+        floor_means: list[float] = []
+        floor_sds: list[float] = []
+        for m in comp_members:
+            rec_raw = raw_by_outcome[m]
+            if rec_raw.lik_mean is not None and rec_raw.lik_cov is not None:
+                floor_means.append(float(np.sum(rec_raw.lik_mean)))
+                floor_sds.append(math.sqrt(max(float(np.sum(rec_raw.lik_cov)), 1e-24)))
+            else:
+                ac_draws = np.asarray(results_ac[m].att_draws, dtype=np.float64)
+                floor_means.append(float(np.mean(ac_draws)))
+                floor_sds.append(float(np.std(ac_draws, ddof=1)))
+        comp_idx_list = [structural_outcomes.index(m) for m in comp_members]
+        floor_diags[comp_name] = _composite_null_floor_diagnostic(
+            floor_means, floor_sds, target_corr[np.ix_(comp_idx_list, comp_idx_list)]
+        )
+        if (
+            composite_mode == "bottom_up"
+            and truncated_prior
+            and floor_diags[comp_name]["p_nonpositive"] > _BOTTOM_UP_NULL_WARN_PROB
+        ):
+            _warn_bottom_up_null_floor(comp_name, "A - C", floor_diags[comp_name])
+
         if composite_mode == "coherent_total":
             comp_scale_arg = (
                 None
@@ -1282,6 +1411,7 @@ def reconcile_nested_3arm_multi_draws(
         realized_spearman=ic_res.realized_spearman,
         max_abs_composite_discrepancy=max_abs_disc,
         additivity_violation_rate=avr_by_comp,
+        composite_floor_diagnostics=floor_diags,
     )
 
 
@@ -1708,7 +1838,7 @@ def reconcile_multi_arm_multi_outcome_draws(
     key_contrast: tuple[str, str] | None = None,
     cross_outcome_corr: np.ndarray | CrossOutcomeCorrelationResult | None = None,
     composite_outcomes: Mapping[str, Sequence[str]] | None = None,
-    composite_mode: str = "bottom_up",
+    composite_mode: str | None = None,
     composite_results: Mapping[str, Mapping[tuple[str, str], RankKLongBetResult]] | None = None,
     composite_prior_scales: Mapping[str, float | str] | float | str | None = None,
     sample_sizes: Mapping[str, Any] | Sequence[float] | None = None,
@@ -1734,8 +1864,13 @@ def reconcile_multi_arm_multi_outcome_draws(
        :func:`iman_conover_couple` on ``key_contrast`` (default ``(arms[-1], arms[0])``),
        preserving each outcome's marginal distribution and every within-outcome cycle identity.
     3. Any requested ``composite_outcomes`` are synthesized under ``composite_mode``
-       (``"bottom_up"`` or ``"coherent_total"``) with exact draw-wise additivity
-       (``AVR == 0``, ``max |gap| < 1e-12``) across all ``P`` contrasts and all periods.
+       (``"coherent_total"``, the default since 0.10.0, or ``"bottom_up"``) with exact
+       draw-wise additivity (``AVR == 0``, ``max |gap| < 1e-12``) across all ``P`` contrasts
+       and all periods. ``bottom_up`` emits a :class:`RankKConfigWarning` with the expected
+       null-floor inflation whenever the unconstrained composite posterior on
+       ``key_contrast`` has ``Pr(tau <= 0) > 0.10``. Without ``composite_results``,
+       ``coherent_total`` samples the composite from the components' GLS moments (the
+       synthetic-composite route; no extra composite fit is needed).
 
     Args:
       results_by_outcome: ``{outcome: {(treated, ref): RankKLongBetResult}}`` or
@@ -1758,7 +1893,9 @@ def reconcile_multi_arm_multi_outcome_draws(
       cross_outcome_corr: ``None`` (identity), an ``(M, M)`` correlation matrix, or a
         :class:`CrossOutcomeCorrelationResult`.
       composite_outcomes: Optional ``{composite_name: (component_1, component_2, ...)}``.
-      composite_mode: ``"bottom_up"`` (default) or ``"coherent_total"``.
+      composite_mode: ``None`` (default: ``"coherent_total"`` when the composites have
+        disjoint components and the prior truncates at zero, else ``"bottom_up"``),
+        ``"coherent_total"``, or ``"bottom_up"`` (bit-identical to 0.9.0 when passed explicitly).
       composite_results: Optional ``{composite_name: {(treated, ref): RankKLongBetResult}}``
         for ``composite_mode="coherent_total"``.
       composite_prior_scales: Optional ``{composite_name: scale}`` or scalar for ``"coherent_total"``.
@@ -1782,18 +1919,20 @@ def reconcile_multi_arm_multi_outcome_draws(
     arms_tuple = tuple(str(a) for a in arms)
     if len(arms_tuple) < 2 or len(set(arms_tuple)) != len(arms_tuple):
         raise ValueError(f"arms must contain at least 2 distinct arm names; got {arms!r}")
-    if composite_mode not in _COMPOSITE_MODES:
-        raise ValueError(f"composite_mode must be one of {_COMPOSITE_MODES}; got {composite_mode!r}")
-
-    structural_outcomes, norm_results = _normalize_multi_arm_outcome_inputs(
-        results_by_outcome, results, results_by_contrast, arms_tuple
-    )
-    scales_arg = prior_scale if prior_scale is not None else prior_scales
     resolved_tau_clip = (
         (-float("inf"), float("inf"))
         if tau_clip is None
         else (float(tau_clip[0]), float(tau_clip[1]))
     )
+    truncated_prior = prior_mode in _POSITIVE_PRIOR_MODES or resolved_tau_clip[0] >= 0.0
+    composite_mode = _resolve_composite_mode(
+        composite_mode, composite_outcomes, truncated=truncated_prior
+    )
+
+    structural_outcomes, norm_results = _normalize_multi_arm_outcome_inputs(
+        results_by_outcome, results, results_by_contrast, arms_tuple
+    )
+    scales_arg = prior_scale if prior_scale is not None else prior_scales
 
     if key_contrast is None:
         key_pair = (arms_tuple[-1], arms_tuple[0])
@@ -1928,8 +2067,32 @@ def reconcile_multi_arm_multi_outcome_draws(
     # Step 3: Synthesize composite outcomes
     max_abs_disc: dict[str, float] = {}
     avr_by_comp: dict[str, float] = {}
+    floor_diags: dict[str, dict[str, float]] = {}
+    key_vec = np.zeros(dim, dtype=np.float64)
+    if arm_to_idx[key_pair[0]] > 0:
+        key_vec[arm_to_idx[key_pair[0]] - 1] += 1.0
+    if arm_to_idx[key_pair[1]] > 0:
+        key_vec[arm_to_idx[key_pair[1]] - 1] -= 1.0
 
     for comp_idx, (comp_name, comp_members) in enumerate(comp_spec.items()):
+        comp_idx_list = [structural_outcomes.index(m) for m in comp_members]
+        floor_diags[comp_name] = _composite_null_floor_diagnostic(
+            [float(key_vec @ raw_by_outcome[m].mu_hat) for m in comp_members],
+            [
+                math.sqrt(max(float(key_vec @ raw_by_outcome[m].sigma_lik @ key_vec), 1e-24))
+                for m in comp_members
+            ],
+            target_corr[np.ix_(comp_idx_list, comp_idx_list)],
+        )
+        if (
+            composite_mode == "bottom_up"
+            and truncated_prior
+            and floor_diags[comp_name]["p_nonpositive"] > _BOTTOM_UP_NULL_WARN_PROB
+        ):
+            _warn_bottom_up_null_floor(
+                comp_name, f"{key_pair[0]} - {key_pair[1]}", floor_diags[comp_name]
+            )
+
         if composite_mode == "coherent_total":
             if isinstance(composite_prior_scales, Mapping):
                 comp_scale_arg = composite_prior_scales.get(comp_name)
@@ -2194,6 +2357,7 @@ def reconcile_multi_arm_multi_outcome_draws(
         realized_spearman=ic_res.realized_spearman,
         max_abs_composite_discrepancy=max_abs_disc,
         additivity_violation_rate=avr_by_comp,
+        composite_floor_diagnostics=floor_diags,
     )
 
 

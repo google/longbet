@@ -78,6 +78,8 @@ from longbet._rank_k import (
     _project_cohort_damped_trajectory,
     reconcile_nested_3arm_draws,
 )
+from longbet._rank_k_multi import MultiArmMultiOutcomeReconciliationResult
+from longbet._rank_k_multi_arm import MultiArmReconciliationResult
 
 #: Mode-1 ATT prior families accepted by :func:`sample_rank_k_prior_draws`.
 PRIOR_FAMILIES = ("normal", "halfnormal", "halfstudentt", "gamma_spike")
@@ -94,11 +96,6 @@ DEFAULT_PERSISTENCE_CHECKPOINTS = (12, 24, 48)
 
 # Label of the hierarchical ``rho ~ Beta`` band of :func:`extrapolate_rank_k_decay` in tables and legends.
 _RHO_BAND_LABEL = "assumed Beta(rho, sd) scenario band — not identified by the data"
-_RHO_SD_FUTURE_WARNING = (
-    "extrapolate_rank_k_decay(): rho_sd was not passed, so the 0.07 default adds an assumed Beta(rho, sd) "
-    "scenario band, which is not identified by the data. The default becomes None (no band) in longbet 0.9.0; "
-    "pass rho_sd explicitly (a float to keep the band, None to drop it) to silence this warning."
-)
 # Caveat carried by the labels of Bound U and Bound L in :func:`compute_required_persistence`.
 _SCENARIO_CAVEAT = "pre-registered scenario, not a statistical bound; faster decay is not excluded"
 # Regimes of the value layer: Bound U, Bound L and the rho = 0 floor (plateau retention per period).
@@ -138,18 +135,6 @@ _GAMMA_SCALE_FACTOR = 1.60
 _ARM_COLORS = ("#3b6ea5", "#d1495b", "#2e8b57", "#8e6c8a", "#c98b2a")
 # (color, line style) of the value-layer regimes in the figures.
 _REGIME_STYLES = {"U": ("#188038", "-"), "L": ("#d93025", "--"), "rho0": ("#5f6368", ":")}
-
-
-class _ImplicitRhoSd(float):
-    """The implicit ``rho_sd`` default (0.07) of :func:`extrapolate_rank_k_decay`.
-
-    The default is this distinct float instance, so an explicit ``rho_sd=0.07`` is
-    not mistaken for it and only the implicit use emits the ``FutureWarning`` of the
-    deprecation path (the default becomes ``None`` in 0.9.0).
-    """
-
-
-_IMPLICIT_RHO_SD = _ImplicitRhoSd(0.07)
 
 
 # ---- Shared validation and summary helpers -------------------------------------------------------
@@ -852,6 +837,25 @@ def _decay_arms(traj_draws: Any, roles: tuple[str, str, str], name: str) -> dict
             arm: _as_draw_matrix(arr, f"{name}.trt_catt_{key}")
             for arm, arr, key in zip(roles, contrasts, ("bc", "ab", "ac"), strict=True)
         }
+    if isinstance(traj_draws, MultiArmReconciliationResult):
+        if (
+            len(traj_draws.arms) == 3
+            and traj_draws.topology == "chain"
+            and traj_draws.trt_catt_bc is not None
+            and traj_draws.trt_catt_ab is not None
+            and traj_draws.trt_catt_ac is not None
+        ):
+            if len(set(roles)) != 3:
+                raise ValueError(f"plateau_arm, pulse_arm and total_arm must be three distinct labels; got {roles}")
+            contrasts = (traj_draws.trt_catt_bc, traj_draws.trt_catt_ab, traj_draws.trt_catt_ac)
+            return {
+                arm: _as_draw_matrix(arr, f"{name}.trt_catt_{key}")
+                for arm, arr, key in zip(roles, contrasts, ("bc", "ab", "ac"), strict=True)
+            }
+        return {
+            f"{p[0]}-{p[1]}": _as_draw_matrix(traj_draws.contrast_trajectory_draws[p], f"{name}[{p!r}]")
+            for p in traj_draws.fitted_pairs
+        }
     return _as_traj_dict(traj_draws, name)
 
 
@@ -1112,7 +1116,7 @@ def extrapolate_rank_k_decay(
     *,
     horizon: int = 60,
     rho: float = 0.85,
-    rho_sd: float | None = _IMPLICIT_RHO_SD,
+    rho_sd: float | None = None,
     rho_grid: Sequence[float] = (0.75, 0.80, 0.85, 0.90, 0.95),
     num_mc_per_draw: int = 25,
     seed: int = 2026,
@@ -1143,9 +1147,9 @@ def extrapolate_rank_k_decay(
     The hierarchical variant draws ``rho ~ Beta(a, b)`` with mean ``rho`` and SD ``rho_sd``
     (method of moments), ``num_mc_per_draw`` decays per posterior draw, shared across arms
     so ``AC = BC + AB`` survives the extrapolation. It is an assumed scenario band, not
-    identified by the data, and is labelled as such in the tables and figures. Calling
-    without ``rho_sd`` keeps the 0.07 default but emits a ``FutureWarning``: the default
-    becomes ``None`` (no band) in longbet 0.9.0.
+    identified by the data, and is labelled as such in the tables and figures. By default
+    ``rho_sd`` is ``None`` (no band); pass a positive float (for example ``0.07``) to compute
+    the assumed scenario band.
 
     Invariants asserted after the computation: the horizon-``L`` cumulative equals the
     observed one to ``1e-10``, the cumulative effect is non-decreasing wherever the monthly
@@ -1158,8 +1162,8 @@ def extrapolate_rank_k_decay(
         AC draws become the arms ``plateau_arm`` / ``pulse_arm`` / ``total_arm``).
       horizon: Extrapolation horizon ``H >= L`` in periods.
       rho: Fixed decay in ``[0, 1]`` (strictly inside ``(0, 1)`` when ``rho_sd`` is set).
-      rho_sd: SD of the assumed ``Beta`` decay scenario, or ``None`` / ``0`` to skip the band.
-        Defaults to 0.07 with a ``FutureWarning`` when not passed (``None`` from 0.9.0).
+      rho_sd: SD of the assumed ``Beta`` decay scenario, or ``None`` / ``0`` to skip the band
+        (default ``None``).
       rho_grid: Decays of the sensitivity grid (each in ``[0, 1]``).
       num_mc_per_draw: Decay draws per posterior draw in the hierarchical variant.
       seed: Seed of the decay draws.
@@ -1199,8 +1203,6 @@ def extrapolate_rank_k_decay(
     tau_p = None if pulse_decay_tau is None else _positive_scalar(pulse_decay_tau, "pulse_decay_tau")
     roles = _split_roles(draws, tau_p, roles_requested)
     survival_tail = _survival_tail(survival, horizon, n_obs)
-    if rho_sd is _IMPLICIT_RHO_SD:
-        warnings.warn(_RHO_SD_FUTURE_WARNING, FutureWarning, stacklevel=2)
     sd = None if rho_sd is None or float(rho_sd) == 0.0 else float(rho_sd)
     if sd is not None and sd < 0.0:
         raise ValueError(f"rho_sd must be >= 0 or None; got {rho_sd!r}")
@@ -1385,14 +1387,64 @@ def _solve_draw_wise_break_even(
     return float(sp_optimize.brentq(_gap, float(grid[idx - 1]), float(grid[idx]), xtol=1e-12))
 
 
+def _filter_contrast_dict(
+    draws_map: Mapping[Any, Any],
+    contrast: str | tuple[str, str] | Sequence[str | tuple[str, str]] | None,
+) -> dict[Any, Any]:
+    """Filter a contrast-keyed mapping according to ``contrast``."""
+    if contrast is None:
+        return dict(draws_map)
+    if isinstance(contrast, str):
+        requested: list[Any] = [contrast]
+    elif isinstance(contrast, tuple) and len(contrast) == 2 and all(isinstance(x, str) for x in contrast):
+        requested = [(str(contrast[0]), str(contrast[1]))]
+    elif isinstance(contrast, Sequence):
+        requested = [
+            (str(c[0]), str(c[1]))
+            if (isinstance(c, tuple) and len(c) == 2 and all(isinstance(x, str) for x in c))
+            else str(c)
+            for c in contrast
+        ]
+    else:
+        raise ValueError(f"Unsupported contrast selector {contrast!r}")
+
+    filtered: dict[Any, Any] = {}
+    for req in requested:
+        if req in draws_map:
+            filtered[req] = draws_map[req]
+        elif isinstance(req, tuple) and f"{req[0]}-{req[1]}" in draws_map:
+            filtered[req] = draws_map[f"{req[0]}-{req[1]}"]
+        elif isinstance(req, str) and "-" in req:
+            parts = tuple(p.strip() for p in req.split("-", 1))
+            if parts in draws_map:
+                filtered[req] = draws_map[parts]
+            else:
+                raise ValueError(f"Requested contrast {req!r} not found in available contrasts {list(draws_map)}")
+        else:
+            raise ValueError(f"Requested contrast {req!r} not found in available contrasts {list(draws_map)}")
+    return filtered
+
+
 def roi_break_even_table(
-    cumulative_draws: Mapping[str, np.ndarray] | None = None,
+    cumulative_draws: (
+        Mapping[Any, np.ndarray]
+        | MultiArmReconciliationResult
+        | MultiArmMultiOutcomeReconciliationResult
+        | Nested3ArmReconciliationResult
+        | None
+    ) = None,
     *,
     cost_grid: Sequence[float] = (1.10, 2.85),
     alpha_grid: Sequence[float] = (0.50, 1.00),
     horizon_periods: int = 12,
     tier: str = "",
-    component_cum_draws: Mapping[str, np.ndarray] | Mapping[str, Mapping[str, np.ndarray]] | None = None,
+    contrast: str | tuple[str, str] | Sequence[str | tuple[str, str]] | None = None,
+    component_cum_draws: (
+        Mapping[Any, np.ndarray]
+        | Mapping[Any, Mapping[Any, np.ndarray]]
+        | MultiArmMultiOutcomeReconciliationResult
+        | None
+    ) = None,
     component_weights: Mapping[str, float] | Sequence[Mapping[str, float]] | None = None,
 ) -> pd.DataFrame:
     """Commercial break-even of a cumulative effect: ``ROI > 0`` iff ``alpha * effect > cost``.
@@ -1401,16 +1453,22 @@ def roi_break_even_table(
     coupled multi-outcome vector-``alpha`` evaluation via ``component_cum_draws`` and
     ``component_weights`` (evaluating ``sum_m alpha_m * Cum_m^(s) > cost`` draw by draw and
     solving the median break-even ``alpha`` of the focal first component holding the other
-    components' weights fixed).
+    components' weights fixed). Also accepts :class:`MultiArmReconciliationResult` or
+    :class:`MultiArmMultiOutcomeReconciliationResult` directly with optional ``contrast``
+    filtering.
 
     Args:
-      cumulative_draws: ``{contrast: (S,)}`` cumulative-effect draws at the decision horizon.
+      cumulative_draws: ``{contrast: (S,)}`` cumulative-effect draws at the decision horizon,
+        or a :class:`MultiArmReconciliationResult` / :class:`Nested3ArmReconciliationResult` /
+        :class:`MultiArmMultiOutcomeReconciliationResult`.
       cost_grid: Per-unit costs (outcome units, ``> 0``).
       alpha_grid: Incrementality shares in ``[0, 1]`` (the fraction of the effect that is causal revenue).
       horizon_periods: Horizon of the cumulative effect, written into the table.
       tier: Tier name written into the ``tier`` column.
+      contrast: Optional contrast or sequence of contrasts to include (for example
+        ``("arm_2", "arm_0")`` or ``[("arm_1", "arm_0"), ("arm_2", "arm_1")]``).
       component_cum_draws: Optional coupled per-outcome cumulative draws ``{outcome: (S,)}``
-        (or ``{contrast: {outcome: (S,)}}``).
+        (or ``{contrast: {outcome: (S,)}}``, or a :class:`MultiArmMultiOutcomeReconciliationResult`).
       component_weights: Optional ``{outcome: weight}`` mapping or sequence of mappings for
         multi-outcome vector-``alpha`` evaluation. When ``None``, the first component varies
         over ``alpha_grid`` and remaining components have weight ``1.0``.
@@ -1428,21 +1486,53 @@ def roi_break_even_table(
     if any(not 0.0 <= a <= 1.0 for a in alphas):
         raise ValueError(f"alpha_grid entries must lie in [0, 1]; got {alphas}")
 
+    if isinstance(cumulative_draws, MultiArmMultiOutcomeReconciliationResult) and component_cum_draws is None:
+        component_cum_draws = cumulative_draws
+        cumulative_draws = None
+
+    if isinstance(component_cum_draws, MultiArmMultiOutcomeReconciliationResult):
+        mamo = component_cum_draws
+        pairs_to_use = mamo.fitted_pairs if contrast is None else tuple(
+            _filter_contrast_dict({p: p for p in mamo.by_outcome[mamo.outcomes[0]].all_pairs}, contrast).keys()
+        )
+        component_cum_draws = {
+            p: {m: mamo.by_outcome[m].contrast_cumulative_draws[p] for m in mamo.structural_outcomes}
+            for p in pairs_to_use
+        }
+
     if component_cum_draws is None:
-        if cumulative_draws is None or not cumulative_draws:
+        if isinstance(cumulative_draws, MultiArmReconciliationResult):
+            base_map: Mapping[Any, np.ndarray] = (
+                cumulative_draws.contrast_cumulative_draws
+                if contrast is not None
+                else {p: cumulative_draws.contrast_cumulative_draws[p] for p in cumulative_draws.fitted_pairs}
+            )
+        elif isinstance(cumulative_draws, Nested3ArmReconciliationResult):
+            base_map = {
+                "BC": cumulative_draws.trt_catt_bc.sum(axis=1),
+                "AB": cumulative_draws.trt_catt_ab.sum(axis=1),
+                "AC": cumulative_draws.trt_catt_ac.sum(axis=1),
+            }
+        elif isinstance(cumulative_draws, Mapping):
+            base_map = cumulative_draws
+        else:
+            base_map = {}
+
+        if not base_map:
             raise ValueError("pass cumulative_draws or component_cum_draws")
+        filtered_draws = _filter_contrast_dict(base_map, contrast)
         rows = []
-        for contrast, draws in cumulative_draws.items():
+        for c_key, draws in filtered_draws.items():
             arr = np.asarray(draws, dtype=np.float64)
             if arr.ndim != 1 or arr.size < 2 or not np.all(np.isfinite(arr)):
-                raise ValueError(f"cumulative_draws[{contrast!r}] must be a finite 1-D array of draws")
+                raise ValueError(f"cumulative_draws[{c_key!r}] must be a finite 1-D array of draws")
             median = float(np.median(arr))
             for cost in costs:
                 alpha_50 = cost / median if median > 0.0 else float("inf")
                 for alpha in alphas:
                     rows.append(
                         {
-                            "tier": tier, "contrast": contrast, "horizon_periods": int(horizon_periods), "cost": cost,
+                            "tier": tier, "contrast": c_key, "horizon_periods": int(horizon_periods), "cost": cost,
                             "alpha": alpha, "pr_roi_positive": float(np.mean(alpha * arr > cost)),
                             "break_even_alpha_50": alpha_50,
                         }
@@ -1452,26 +1542,34 @@ def roi_break_even_table(
     if not isinstance(component_cum_draws, Mapping) or not component_cum_draws:
         raise ValueError("component_cum_draws must be a non-empty mapping")
     first_val = next(iter(component_cum_draws.values()))
-    by_contrast: dict[str, dict[str, np.ndarray]] = {}
+    by_contrast: dict[Any, dict[str, np.ndarray]] = {}
     if isinstance(first_val, Mapping):
-        outer_keys = tuple(str(k) for k in component_cum_draws.keys())
-        if set(outer_keys) <= set(NESTED_CONTRASTS):
+        outer_keys = list(component_cum_draws.keys())
+        is_contrast_outer = (
+            set(str(k) for k in outer_keys) <= set(NESTED_CONTRASTS)
+            or all(isinstance(k, tuple) and len(k) == 2 for k in outer_keys)
+        )
+        if is_contrast_outer:
             for c_key, inner in component_cum_draws.items():
-                by_contrast[str(c_key)] = {str(m): np.asarray(v, dtype=np.float64) for m, v in inner.items()}
+                by_contrast[c_key] = {str(m): np.asarray(v, dtype=np.float64) for m, v in inner.items()}
         else:
-            inner_keys = tuple(str(k) for k in first_val.keys())
+            inner_keys = list(first_val.keys())
             for c_key in inner_keys:
                 by_contrast[c_key] = {
                     str(m): np.asarray(component_cum_draws[m][c_key], dtype=np.float64)
                     for m in component_cum_draws
                 }
     else:
-        by_contrast["AC"] = {str(m): np.asarray(v, dtype=np.float64) for m, v in component_cum_draws.items()}
+        default_c = contrast if isinstance(contrast, (str, tuple)) else "AC"
+        by_contrast[default_c] = {str(m): np.asarray(v, dtype=np.float64) for m, v in component_cum_draws.items()}
+
+    if contrast is not None:
+        by_contrast = _filter_contrast_dict(by_contrast, contrast)
 
     rows = []
-    for contrast, comp_map in by_contrast.items():
+    for c_key, comp_map in by_contrast.items():
         if not comp_map:
-            raise ValueError(f"component_cum_draws for contrast {contrast!r} must not be empty")
+            raise ValueError(f"component_cum_draws for contrast {c_key!r} must not be empty")
         comp_names = tuple(comp_map.keys())
         draw_sizes: set[int] = set()
         for m_name, arr in comp_map.items():
@@ -1517,7 +1615,7 @@ def roi_break_even_table(
                 rows.append(
                     {
                         "tier": tier,
-                        "contrast": contrast,
+                        "contrast": c_key,
                         "horizon_periods": int(horizon_periods),
                         "cost": cost,
                         "alpha": float(w_spec[focal]),
@@ -1525,6 +1623,285 @@ def roi_break_even_table(
                         "break_even_alpha_50": alpha_50,
                     }
                 )
+    return pd.DataFrame(rows)
+
+
+def multi_arm_decision_table(
+    reconciled: MultiArmReconciliationResult | MultiArmMultiOutcomeReconciliationResult,
+    *,
+    costs: Mapping[str, float] | Sequence[float] | float | None = None,
+    step_costs: Mapping[Any, float] | Sequence[float] | float | None = None,
+    arm_costs: Mapping[str, float] | Sequence[float] | float | None = None,
+    incremental_costs: Mapping[Any, float] | Sequence[float] | float | None = None,
+    alpha: float | Mapping[str, float] = 1.0,
+    outcome_weights: Mapping[str, float] | None = None,
+    outcome: str | None = None,
+    horizon: int | None = None,
+    discount_rate: float = 0.0,
+    periods_per_year: int = 12,
+    quantiles: Sequence[float] = DEFAULT_QUANTILES,
+) -> pd.DataFrame:
+    """Decision summary across all ``A`` arms of a reconciled multi-arm study.
+
+    Reports for every arm ``a`` in ``reconciled.arms``:
+    - Posterior cumulative value ``alpha * Cum_{(a, control)}`` summary (Mean, SD, quantiles),
+    - Expected net value ``E[alpha * Cum_{(a, control)} - C_a]`` and net-value quantiles,
+    - ``pr_positive_net_value`` (and ``p_beats_control``): ``Pr(alpha * Cum_{(a, control)} - C_a > 0)``,
+    - ``pr_best_arm`` (and ``p_best_net`` / ``p_best_gross``):
+      ``Pr(a = argmax_{j in arms} (alpha * Cum_{(j, control)} - C_j))``,
+    - ``pr_best_treated_arm``: ``Pr(a = argmax_{j in arms[1:]} (alpha * Cum_{(j, control)} - C_j))``,
+    - ``pr_incremental_step_worthwhile`` (and aliases ``pr_step_worthwhile``, ``p_step_roi_positive``,
+      ``p_positive_step``): ``Pr(alpha * theta_a > c_a)`` along the spanning-tree edge ``(a, parent(a))``.
+
+    Args:
+      reconciled: :class:`MultiArmReconciliationResult` or :class:`MultiArmMultiOutcomeReconciliationResult`.
+      costs: Optional total per-arm costs ``C_a`` vs control (mapping ``{arm: C_a}``, sequence of
+        length ``A`` or ``A - 1``, or scalar cost per step). When omitted and ``step_costs`` is
+        given, ``C_a`` is accumulated along the spanning tree from ``step_costs``.
+      step_costs: Optional incremental edge costs ``c_a`` along ``reconciled.tree_edges``
+        (mapping keyed by child arm ``a`` or edge ``(a, parent(a))``, sequence of length ``A - 1``,
+        or scalar). When omitted and ``costs`` is given, ``c_a = C_a - C_{parent(a)}``.
+      arm_costs: Optional alias for ``costs``.
+      incremental_costs: Optional alias for ``step_costs``.
+      alpha: Scalar incrementality multiplier ``> 0`` or ``{outcome: alpha_m}`` mapping for
+        multi-outcome results (default ``1.0``).
+      outcome_weights: Optional ``{outcome: alpha_m}`` alias for multi-outcome ``alpha``.
+      outcome: Optional outcome name when ``reconciled`` is a
+        :class:`MultiArmMultiOutcomeReconciliationResult` and ``alpha`` is a scalar.
+      horizon: Optional number of post-adoption periods to sum (default: ``reconciled.horizon``).
+      discount_rate: Annual discount rate ``r > -1`` (default ``0.0``).
+      periods_per_year: Periods per year for discounting (default ``12``).
+      quantiles: Quantiles reported in the table (odd length, default P30/P50/P70).
+
+    Returns:
+      :class:`pandas.DataFrame` with one row per arm in ``reconciled.arms``.
+    """
+    if costs is None and arm_costs is not None:
+        costs = arm_costs
+    if step_costs is None and incremental_costs is not None:
+        step_costs = incremental_costs
+    if outcome_weights is not None and not isinstance(alpha, Mapping):
+        if isinstance(outcome_weights, Mapping):
+            alpha = {str(k): float(alpha) * float(v) for k, v in outcome_weights.items()}
+        else:
+            alpha = float(alpha) * float(outcome_weights)
+    qs = _check_quantiles(quantiles)
+    rate = float(discount_rate)
+    if not (math.isfinite(rate) and rate > -1.0):
+        raise ValueError(f"discount_rate must be a finite number > -1; got {discount_rate!r}")
+    per_year = _positive_int(periods_per_year, "periods_per_year")
+
+    if isinstance(reconciled, MultiArmReconciliationResult):
+        if isinstance(alpha, Mapping):
+            raise ValueError("alpha must be a scalar float for single-outcome MultiArmReconciliationResult")
+        alpha_scalar = float(alpha)
+        if not math.isfinite(alpha_scalar):
+            raise ValueError(f"alpha must be finite; got {alpha!r}")
+        arms = reconciled.arms
+        tree_edges = reconciled.tree_edges
+        all_pairs = reconciled.all_pairs
+        t_avail = next(iter(reconciled.contrast_trajectory_draws.values())).shape[1]
+        h_eff = reconciled.horizon if horizon is None else int(horizon)
+        if not (1 <= h_eff <= t_avail):
+            raise ValueError(f"horizon must lie in [1, {t_avail}]; got {horizon!r}")
+        disc = (
+            np.ones(h_eff, dtype=np.float64)
+            if rate == 0.0
+            else discount_weights(h_eff, annual_rate=rate, periods_per_year=per_year)
+        )
+        pair_value_draws: dict[tuple[str, str], np.ndarray] = {
+            pair: alpha_scalar * (reconciled.contrast_trajectory_draws[pair][:, :h_eff] @ disc)
+            for pair in all_pairs
+        }
+    elif isinstance(reconciled, MultiArmMultiOutcomeReconciliationResult):
+        arms = reconciled.arms
+        tree_edges = reconciled.tree_edges
+        first_rec = reconciled.by_outcome[reconciled.outcomes[0]]
+        all_pairs = first_rec.all_pairs
+        t_avail = next(iter(first_rec.contrast_trajectory_draws.values())).shape[1]
+        h_eff = first_rec.horizon if horizon is None else int(horizon)
+        if not (1 <= h_eff <= t_avail):
+            raise ValueError(f"horizon must lie in [1, {t_avail}]; got {horizon!r}")
+        disc = (
+            np.ones(h_eff, dtype=np.float64)
+            if rate == 0.0
+            else discount_weights(h_eff, annual_rate=rate, periods_per_year=per_year)
+        )
+        if isinstance(alpha, Mapping):
+            if not alpha:
+                raise ValueError("alpha mapping must not be empty")
+            weights_map = {str(k): float(v) for k, v in alpha.items()}
+            for m_key in weights_map:
+                if m_key not in reconciled.by_outcome:
+                    raise ValueError(f"Outcome {m_key!r} in alpha not found in {reconciled.outcomes}")
+        else:
+            alpha_scalar = float(alpha)
+            if not math.isfinite(alpha_scalar):
+                raise ValueError(f"alpha must be finite; got {alpha!r}")
+            if outcome is not None:
+                out_str = str(outcome)
+                if out_str not in reconciled.by_outcome:
+                    raise ValueError(f"outcome {out_str!r} not found in {reconciled.outcomes}")
+                weights_map = {out_str: alpha_scalar}
+            elif reconciled.composite_outcomes:
+                first_comp = next(iter(reconciled.composite_outcomes.keys()))
+                weights_map = {first_comp: alpha_scalar}
+            else:
+                weights_map = {m: alpha_scalar for m in reconciled.structural_outcomes}
+
+        pair_value_draws = {}
+        for pair in all_pairs:
+            pair_value_draws[pair] = sum(
+                w_m * (reconciled.by_outcome[m_key].contrast_trajectory_draws[pair][:, :h_eff] @ disc)
+                for m_key, w_m in weights_map.items()
+            )
+    else:
+        raise ValueError(
+            "reconciled must be a MultiArmReconciliationResult or MultiArmMultiOutcomeReconciliationResult"
+        )
+
+    n_arms = len(arms)
+    n_draws = next(iter(pair_value_draws.values())).shape[0]
+    parent_of: dict[str, str] = {child: parent for child, parent in tree_edges}
+
+    # Resolve total arm costs C_a and incremental step costs c_a
+    resolved_arm_costs: dict[str, float] = {arms[0]: 0.0}
+    edge_costs: dict[str, float] = {}
+
+    if step_costs is not None:
+        if isinstance(step_costs, Mapping):
+            for child, parent in tree_edges:
+                if child in step_costs:
+                    edge_costs[child] = float(step_costs[child])
+                elif (child, parent) in step_costs:
+                    edge_costs[child] = float(step_costs[(child, parent)])
+                else:
+                    edge_costs[child] = 0.0
+        elif isinstance(step_costs, Sequence) and not isinstance(step_costs, (str, bytes)):
+            if len(step_costs) != n_arms - 1:
+                raise ValueError(f"step_costs sequence must have length {n_arms - 1}; got {len(step_costs)}")
+            for (child, _), c_val in zip(tree_edges, step_costs, strict=True):
+                edge_costs[child] = float(c_val)
+        else:
+            c_scalar = float(step_costs)
+            for child, _ in tree_edges:
+                edge_costs[child] = c_scalar
+
+    if costs is not None:
+        if isinstance(costs, Mapping):
+            for a in arms:
+                resolved_arm_costs[a] = float(costs.get(a, 0.0))
+        elif isinstance(costs, Sequence) and not isinstance(costs, (str, bytes)):
+            if len(costs) == n_arms:
+                for a, c_val in zip(arms, costs, strict=True):
+                    resolved_arm_costs[a] = float(c_val)
+            elif len(costs) == n_arms - 1:
+                resolved_arm_costs[arms[0]] = 0.0
+                for a, c_val in zip(arms[1:], costs, strict=True):
+                    resolved_arm_costs[a] = float(c_val)
+            else:
+                raise ValueError(
+                    f"costs sequence must have length A={n_arms} or A-1={n_arms - 1}; got {len(costs)}"
+                )
+        else:
+            c_scalar = float(costs)
+            resolved_arm_costs[arms[0]] = 0.0
+            for idx, a in enumerate(arms[1:], start=1):
+                resolved_arm_costs[a] = float(idx) * c_scalar if reconciled.topology == "chain" else c_scalar
+
+        if step_costs is None:
+            for child, parent in tree_edges:
+                edge_costs[child] = resolved_arm_costs[child] - resolved_arm_costs[parent]
+    elif step_costs is not None:
+        # Accumulate resolved_arm_costs along tree paths from control arms[0]
+        resolved_arm_costs = {arms[0]: 0.0}
+        while len(resolved_arm_costs) < n_arms:
+            progressed = False
+            for child, parent in tree_edges:
+                if child not in resolved_arm_costs and parent in resolved_arm_costs:
+                    resolved_arm_costs[child] = resolved_arm_costs[parent] + edge_costs[child]
+                    progressed = True
+            if not progressed:
+                break
+    else:
+        for a in arms:
+            resolved_arm_costs[a] = 0.0
+        for child, _ in tree_edges:
+            edge_costs[child] = 0.0
+
+    # Build (S, A) matrix of net values NV_{s, k} = V_{(arm_k, arm_0)}^{(s)} - C_{arm_k}
+    effect_mat = np.zeros((n_draws, n_arms), dtype=np.float64)
+    net_val_mat = np.zeros((n_draws, n_arms), dtype=np.float64)
+    net_val_mat[:, 0] = -resolved_arm_costs[arms[0]]
+    for k_idx, arm in enumerate(arms[1:], start=1):
+        eff_k = pair_value_draws[(arm, arms[0])]
+        effect_mat[:, k_idx] = eff_k
+        net_val_mat[:, k_idx] = eff_k - resolved_arm_costs[arm]
+
+    max_gross = np.max(effect_mat, axis=1, keepdims=True)
+    is_max_gross = np.isclose(effect_mat, max_gross, rtol=0.0, atol=1e-12)
+    tie_weights_gross = is_max_gross / np.sum(is_max_gross, axis=1, keepdims=True)
+    pr_best_gross = np.mean(tie_weights_gross, axis=0)
+
+    max_all = np.max(net_val_mat, axis=1, keepdims=True)
+    is_max_all = np.isclose(net_val_mat, max_all, rtol=0.0, atol=1e-12)
+    tie_weights_all = is_max_all / np.sum(is_max_all, axis=1, keepdims=True)
+    pr_best_arm = np.mean(tie_weights_all, axis=0)
+
+    treated_nv = net_val_mat[:, 1:]
+    max_trt = np.max(treated_nv, axis=1, keepdims=True)
+    is_max_trt = np.isclose(treated_nv, max_trt, rtol=0.0, atol=1e-12)
+    tie_weights_trt = is_max_trt / np.sum(is_max_trt, axis=1, keepdims=True)
+    pr_best_trt = np.mean(tie_weights_trt, axis=0)
+
+    rows = []
+    for k_idx, arm in enumerate(arms):
+        eff_draws = effect_mat[:, k_idx]
+        nv_draws = net_val_mat[:, k_idx]
+        eff_sum = _summarize(eff_draws, qs, "effect_")
+        nv_sum = _summarize(nv_draws, qs, "net_value_")
+        is_ctrl = k_idx == 0
+        if is_ctrl:
+            parent_label = ""
+            c_step = 0.0
+            inc_eff_mean = 0.0
+            inc_nv_mean = 0.0
+            pr_step_ok = float("nan")
+            pr_pos_step = float("nan")
+        else:
+            parent_label = parent_of[arm]
+            c_step = edge_costs[arm]
+            step_draws = pair_value_draws[(arm, parent_label)]
+            inc_eff_mean = float(np.mean(step_draws))
+            inc_nv_mean = float(np.mean(step_draws - c_step))
+            pr_step_ok = float(np.mean(step_draws > c_step))
+            pr_pos_step = float(np.mean(step_draws > 0.0))
+
+        pr_pos_nv = float(np.mean(nv_draws > 0.0)) if not is_ctrl else 0.0
+        row: dict[str, Any] = {
+            "arm": arm,
+            "is_control": is_ctrl,
+            "tree_parent": parent_label,
+            "cost": resolved_arm_costs[arm],
+            "step_cost": c_step,
+            **eff_sum,
+            "expected_net_value": nv_sum["net_value_Mean"],
+            **nv_sum,
+            "pr_positive_net_value": pr_pos_nv,
+            "pr_best_arm": float(pr_best_arm[k_idx]),
+            "pr_best_treated_arm": 0.0 if is_ctrl else float(pr_best_trt[k_idx - 1]),
+            "incremental_effect_Mean": inc_eff_mean,
+            "incremental_net_value_Mean": inc_nv_mean,
+            "pr_incremental_step_worthwhile": pr_step_ok,
+            "pr_step_worthwhile": pr_step_ok,
+            "p_best_gross": float(pr_best_gross[k_idx]),
+            "p_best_net": float(pr_best_arm[k_idx]),
+            "p_beats_control": pr_pos_nv,
+            "p_positive_step": pr_pos_step,
+            "p_step_roi_positive": pr_step_ok,
+        }
+        rows.append(row)
+
     return pd.DataFrame(rows)
 
 
@@ -3419,6 +3796,7 @@ __all__ = [
     "discount_weights",
     "evaluate_prior_sensitivity",
     "extrapolate_rank_k_decay",
+    "multi_arm_decision_table",
     "nested_3arm_trajectories",
     "plot_rank_k_decay_extrapolation",
     "plot_rank_k_prior_calibration",

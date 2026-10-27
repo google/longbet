@@ -120,6 +120,12 @@ EXPECTED_FIELDS = (
     "treated_extra_variance",
     "basis_spec",
     "keep_unprojected_draws",
+    "att_weighting",
+    "projection",
+    "min_support_modes",
+    "common_basis",
+    "mode_coupling",
+    "support_covariate",
 )
 
 
@@ -318,7 +324,7 @@ def test_config_fields_are_the_documented_options():
 
 
 def test_public_api_and_packaging():
-    assert longbet.__version__ == "0.8.0"
+    assert longbet.__version__ == "0.9.0"
     assert "RankKConfigWarning" in longbet.__all__
     assert issubclass(RankKConfigWarning, UserWarning)
     tomllib = pytest.importorskip("tomllib")
@@ -495,7 +501,7 @@ def test_boundary_config_values_are_accepted(kwargs):
 _P = _panel()
 _INVALID_INPUTS = [
     pytest.param({"y": _P.y[:, 0]}, "y must be a 2-D (N, T) outcome panel with T >= 2", id="y-1d"),
-    pytest.param({"y": _poke(_P.y, (0, 0), np.nan)}, "y contains 1 non-finite value(s)", id="y-nan"),
+    pytest.param({"y": _poke(_P.y, (0, 0), np.inf)}, "y contains 1 infinite value(s)", id="y-inf"),
     pytest.param({"z": _P.z[:, :-1]}, "z shape (20, 7) must match y shape (20, 8)", id="z-shape"),
     pytest.param({"z": 2 * _P.z}, "z must contain only 0/1 treatment indicators", id="z-not-binary"),
     pytest.param({"z": _poke(_P.z, (0, 6), 0.0)}, "z must be absorbing", id="z-not-absorbing"),

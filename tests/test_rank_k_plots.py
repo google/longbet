@@ -416,13 +416,13 @@ def test_extrapolate_rank_k_decay_shapes_identities_and_certificate(synthetic_ar
 
 def test_extrapolate_rank_k_decay_single_arm_and_options(synthetic_arms) -> None:
     arr = synthetic_arms["AC"]
-    d = P.extrapolate_rank_k_decay(arr, horizon=5, rho_sd=None, rho_grid=(0.5,), milestones=(1, 3, 60))
-    assert d.arms == ("effect",) and d.random_rho_cumulative_draws is None and d.beta_params is None
+    d = P.extrapolate_rank_k_decay(arr, horizon=5, rho_grid=(0.5,), milestones=(1, 3, 60))
+    assert d.arms == ("effect",) and d.rho_sd is None and d.random_rho_cumulative_draws is None and d.beta_params is None
     np.testing.assert_array_equal(d.monthly_draws["effect"], arr)
     assert list(d.milestone_table_df["month"]) == [1, 3, 5]
     assert d.cumulative_summary_df["rho_band_P50"].isna().all()
-    same = P.extrapolate_rank_k_decay(arr, horizon=12, num_mc_per_draw=3, seed=5)
-    again = P.extrapolate_rank_k_decay(arr, horizon=12, num_mc_per_draw=3, seed=5)
+    same = P.extrapolate_rank_k_decay(arr, horizon=12, rho_sd=0.07, num_mc_per_draw=3, seed=5)
+    again = P.extrapolate_rank_k_decay(arr, horizon=12, rho_sd=0.07, num_mc_per_draw=3, seed=5)
     np.testing.assert_array_equal(
         same.random_rho_cumulative_draws["effect"], again.random_rho_cumulative_draws["effect"]
     )

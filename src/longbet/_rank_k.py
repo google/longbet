@@ -4313,6 +4313,7 @@ def fit_rank_k_hybrid(
 from longbet._rank_k_multi import (  # noqa: E402
     CrossOutcomeCorrelationResult,
     ImanConoverResult,
+    MultiArmMultiOutcomeReconciliationResult,
     Nested3ArmMultiReconciliationResult,
     RankKConvergenceCheck,
     check_rank_k_convergence,
@@ -4320,5 +4321,12 @@ from longbet._rank_k_multi import (  # noqa: E402
     ge_revenue_draws,
     iman_conover_couple,
     paid_winsor_cap,
+    reconcile_multi_arm_multi_outcome_draws,
     reconcile_nested_3arm_multi_draws,
+)
+from longbet._rank_k_multi_arm import (  # noqa: E402
+    ContrastReconciliationResult,
+    MultiArmReconciliationResult,
+    SamplerDiagnostics,
+    reconcile_multi_arm_draws,
 )

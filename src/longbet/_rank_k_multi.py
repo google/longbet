@@ -37,10 +37,24 @@ from longbet._rank_k import (
     RankKLongBetResult,
     reconcile_nested_3arm_draws,
 )
+from longbet._rank_k_multi_arm import (
+    _ArmVarianceArray,
+    _build_support_inequalities,
+    _draw_prior_mu,
+    _enumerate_linear_extensions,
+    _hit_and_run_slice_sampler,
+    _prior_logpdf_mu,
+    _sir_posterior_nd,
+    ContrastReconciliationResult,
+    MultiArmReconciliationResult,
+    SamplerDiagnostics,
+    reconcile_multi_arm_draws,
+)
 
 __all__ = [
     "CrossOutcomeCorrelationResult",
     "ImanConoverResult",
+    "MultiArmMultiOutcomeReconciliationResult",
     "Nested3ArmMultiReconciliationResult",
     "RankKConvergenceCheck",
     "check_rank_k_convergence",
@@ -48,6 +62,7 @@ __all__ = [
     "ge_revenue_draws",
     "iman_conover_couple",
     "paid_winsor_cap",
+    "reconcile_multi_arm_multi_outcome_draws",
     "reconcile_nested_3arm_multi_draws",
 ]
 
@@ -167,6 +182,88 @@ class Nested3ArmMultiReconciliationResult:
 
     def __getitem__(self, outcome: str) -> Nested3ArmReconciliationResult:
         return self.by_outcome[outcome]
+
+
+@dataclass(frozen=True)
+class MultiArmMultiOutcomeReconciliationResult:
+    """Output of :func:`reconcile_multi_arm_multi_outcome_draws`.
+
+    Attributes:
+      arms: Tuple of ``A >= 2`` arm labels with ``arms[0]`` as the control arm.
+      topology: ``"chain"`` or ``"poset"``.
+      tree_edges: Tuple of ``A - 1`` spanning-tree edges ``(child, parent)``.
+      fitted_pairs: Tuple of ``P >= A - 1`` fitted contrast pairs ``(treated, ref)``.
+      redundant_pairs: Tuple of ``P - (A - 1)`` non-tree fitted contrast pairs.
+      outcomes: Tuple of all outcome labels (structural outcomes followed by composite outcomes).
+      structural_outcomes: Tuple of ``M`` structural outcome labels.
+      composite_outcomes: ``{composite_name: tuple_of_component_names}``.
+      composite_mode: ``"bottom_up"`` or ``"coherent_total"``.
+      key_contrast: ``(treated, ref)`` contrast pair used as the Iman-Conover coupling key.
+      by_outcome: ``{outcome: MultiArmReconciliationResult}`` with coupled draw order.
+      tau_mu_draws: ``{outcome: (S, A - 1)}`` reconciled Mode-1 effects vs ``arms[0]``.
+      tau_increment_draws: ``{outcome: (S, A - 1)}`` reconciled Mode-1 increments along ``tree_edges``.
+      contrast_mode1_draws: ``{outcome: {(treated, ref): (S,)}}`` Mode-1 ATT draws for every ordered pair.
+      contrast_trajectory_draws: ``{outcome: {(treated, ref): (S, T_post)}}`` trajectory draws for every ordered pair.
+      contrast_catt_draws: ``{outcome: {(treated, ref): (S, T_post)}}`` alias for ``contrast_trajectory_draws``.
+      contrast_cumulative_draws: ``{outcome: {(treated, ref): (S,)}}`` cumulative effect draws over ``horizon``.
+      permutations: ``{outcome: (S,)}`` Iman-Conover permutation indices for structural outcomes.
+      target_correlation: ``(M, M)`` target correlation matrix across structural outcomes on ``key_contrast``.
+      realized_spearman: ``(M, M)`` realized Spearman correlation across structural outcomes on ``key_contrast``.
+      max_abs_composite_discrepancy: ``{composite_name: float}`` max draw-wise absolute discrepancy
+        between the composite and the sum of its components across all contrasts and periods.
+      additivity_violation_rate: ``{composite_name: float}`` fraction of draws where
+        ``|composite - sum(components)| > 1e-12`` on any contrast or period.
+    """
+
+    arms: tuple[str, ...]
+    topology: str
+    tree_edges: tuple[tuple[str, str], ...]
+    fitted_pairs: tuple[tuple[str, str], ...]
+    redundant_pairs: tuple[tuple[str, str], ...]
+    outcomes: tuple[str, ...]
+    structural_outcomes: tuple[str, ...]
+    composite_outcomes: dict[str, tuple[str, ...]]
+    composite_mode: str
+    key_contrast: tuple[str, str]
+    by_outcome: dict[str, MultiArmReconciliationResult]
+    tau_mu_draws: dict[str, np.ndarray]
+    tau_increment_draws: dict[str, np.ndarray]
+    contrast_mode1_draws: dict[str, dict[tuple[str, str], np.ndarray]]
+    contrast_trajectory_draws: dict[str, dict[tuple[str, str], np.ndarray]]
+    contrast_catt_draws: dict[str, dict[tuple[str, str], np.ndarray]]
+    contrast_cumulative_draws: dict[str, dict[tuple[str, str], np.ndarray]]
+    permutations: dict[str, np.ndarray]
+    target_correlation: np.ndarray
+    realized_spearman: np.ndarray
+    max_abs_composite_discrepancy: dict[str, float]
+    additivity_violation_rate: dict[str, float]
+
+    def __getitem__(self, outcome: str) -> MultiArmReconciliationResult:
+        return self.by_outcome[outcome]
+
+    def get_contrast_result(self, outcome: str, treated: str, ref: str) -> ContrastReconciliationResult:
+        """Return the :class:`ContrastReconciliationResult` for ``outcome`` and ``(treated, ref)``."""
+        return self.by_outcome[str(outcome)].get_contrast_result(str(treated), str(ref))
+
+    def get_contrast_cumulative_draws(
+        self,
+        contrast: tuple[str, str],
+        outcomes: Sequence[str] | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Return ``{outcome: (S,)}`` cumulative draws for a contrast ``(treated, ref)``."""
+        pair = (str(contrast[0]), str(contrast[1]))
+        names = self.outcomes if outcomes is None else tuple(str(m) for m in outcomes)
+        return {m: self.by_outcome[m].get_contrast_result(pair[0], pair[1]).cum_att for m in names}
+
+    def get_contrast_trajectory_draws(
+        self,
+        contrast: tuple[str, str],
+        outcomes: Sequence[str] | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Return ``{outcome: (S, T_post)}`` trajectory draws for a contrast ``(treated, ref)``."""
+        pair = (str(contrast[0]), str(contrast[1]))
+        names = self.outcomes if outcomes is None else tuple(str(m) for m in outcomes)
+        return {m: self.by_outcome[m].get_contrast_result(pair[0], pair[1]).trt_catt for m in names}
 
 
 @dataclass(frozen=True)
@@ -1188,11 +1285,927 @@ def reconcile_nested_3arm_multi_draws(
     )
 
 
+def _normalize_multi_arm_outcome_inputs(
+    results_by_outcome: Mapping[Any, Mapping[Any, RankKLongBetResult]] | None,
+    results: Mapping[Any, Mapping[Any, RankKLongBetResult]] | None,
+    results_by_contrast: Mapping[Any, Mapping[Any, RankKLongBetResult]] | None,
+    arms: Sequence[str],
+) -> tuple[tuple[str, ...], dict[str, dict[tuple[str, str], RankKLongBetResult]]]:
+    """Normalize ``{outcome: {(j, l): fit}}`` or ``{(j, l): {outcome: fit}}`` into ``(outcomes, {outcome: {(j, l): fit}})``."""
+    provided = [
+        x for x in (results_by_outcome, results, results_by_contrast) if x is not None
+    ]
+    if len(provided) != 1:
+        raise ValueError(
+            "Provide exactly one of results_by_outcome, results, or results_by_contrast"
+        )
+    raw_map = provided[0]
+    if not isinstance(raw_map, Mapping) or not raw_map:
+        raise ValueError("results mapping must be a non-empty mapping")
+
+    arm_set = {str(a) for a in arms}
+
+    def _is_contrast_key(k: Any) -> bool:
+        return (
+            isinstance(k, tuple)
+            and len(k) == 2
+            and str(k[0]) in arm_set
+            and str(k[1]) in arm_set
+        )
+
+    outer_keys = list(raw_map.keys())
+    if results_by_contrast is not None or all(_is_contrast_key(k) for k in outer_keys):
+        # Outer keys are contrast pairs (treated, ref); inner keys are outcome names
+        outcome_order: list[str] = []
+        by_outcome: dict[str, dict[tuple[str, str], RankKLongBetResult]] = {}
+        for pair_key, inner_map in raw_map.items():
+            if not (isinstance(pair_key, tuple) and len(pair_key) == 2):
+                raise ValueError(f"Expected 2-tuple contrast key (treated, ref); got {pair_key!r}")
+            pair = (str(pair_key[0]), str(pair_key[1]))
+            if not isinstance(inner_map, Mapping) or not inner_map:
+                raise ValueError(f"Inner mapping for contrast {pair!r} must be non-empty")
+            for out_key, fit in inner_map.items():
+                out_name = str(out_key)
+                if out_name not in by_outcome:
+                    outcome_order.append(out_name)
+                    by_outcome[out_name] = {}
+                by_outcome[out_name][pair] = fit
+        if not outcome_order:
+            raise ValueError("No outcomes found in results mapping")
+        pair_sets = [set(by_outcome[m].keys()) for m in outcome_order]
+        if any(ps != pair_sets[0] for ps in pair_sets[1:]):
+            raise ValueError("All structural outcomes must have the same fitted contrast pairs")
+        return tuple(outcome_order), by_outcome
+
+    # Outer keys are outcome names; inner keys are contrast pairs (treated, ref)
+    outcome_order = [str(k) for k in outer_keys]
+    by_outcome = {}
+    for raw_out, inner_map in raw_map.items():
+        out_name = str(raw_out)
+        if not isinstance(inner_map, Mapping) or not inner_map:
+            raise ValueError(f"results[{out_name!r}] must be a non-empty mapping of {(treated, ref): fit}")
+        pairs_for_m: dict[tuple[str, str], RankKLongBetResult] = {}
+        for pair_key, fit in inner_map.items():
+            if not (isinstance(pair_key, tuple) and len(pair_key) == 2):
+                raise ValueError(
+                    f"Contrast keys in results[{out_name!r}] must be 2-tuples (treated, ref); got {pair_key!r}"
+                )
+            pairs_for_m[(str(pair_key[0]), str(pair_key[1]))] = fit
+        by_outcome[out_name] = pairs_for_m
+
+    pair_sets = [set(by_outcome[m].keys()) for m in outcome_order]
+    if any(ps != pair_sets[0] for ps in pair_sets[1:]):
+        raise ValueError("All structural outcomes must share the exact same fitted contrast pairs")
+    return tuple(outcome_order), by_outcome
+
+
+def _permute_multi_arm_reconciliation_result(
+    rec: MultiArmReconciliationResult, perm: np.ndarray
+) -> MultiArmReconciliationResult:
+    """Reorder all draw arrays inside a :class:`MultiArmReconciliationResult` by ``perm``."""
+    return MultiArmReconciliationResult(
+        arms=rec.arms,
+        topology=rec.topology,
+        tree_edges=rec.tree_edges,
+        fitted_pairs=rec.fitted_pairs,
+        redundant_pairs=rec.redundant_pairs,
+        tau_mu_draws=rec.tau_mu_draws[perm],
+        tau_increment_draws=rec.tau_increment_draws[perm],
+        contrast_mode1_draws={p: arr[perm] for p, arr in rec.contrast_mode1_draws.items()},
+        contrast_trajectory_draws={p: arr[perm] for p, arr in rec.contrast_trajectory_draws.items()},
+        contrast_catt_draws={p: arr[perm] for p, arr in rec.contrast_catt_draws.items()},
+        contrast_cumulative_draws={p: arr[perm] for p, arr in rec.contrast_cumulative_draws.items()},
+        mu_hat=rec.mu_hat.copy(),
+        sigma_lik=rec.sigma_lik.copy(),
+        arm_variances=_ArmVarianceArray(np.asarray(rec.arm_variances, dtype=np.float64).copy(), rec.arms),
+        nnls_residual=rec.nnls_residual,
+        is_bipartite=rec.is_bipartite,
+        cycle_discrepancy_ratio=rec.cycle_discrepancy_ratio,
+        trajectory_additivity_max_gap=rec.trajectory_additivity_max_gap,
+        sampler_diagnostics=rec.sampler_diagnostics,
+        trajectory_additivity_gaps=dict(rec.trajectory_additivity_gaps),
+        prior_mode=rec.prior_mode,
+        prior_scale=rec.prior_scale,
+        horizon=rec.horizon,
+        own_vs_implied_trajectory_max_gap=rec.own_vs_implied_trajectory_max_gap,
+        prior_mu_draws=None if rec.prior_mu_draws is None else rec.prior_mu_draws[perm],
+        prior_increment_draws=(
+            None if rec.prior_increment_draws is None else rec.prior_increment_draws[perm]
+        ),
+        prior_contrast_mode1_draws=(
+            None
+            if rec.prior_contrast_mode1_draws is None
+            else {p: arr[perm] for p, arr in rec.prior_contrast_mode1_draws.items()}
+        ),
+        prior_contrast_trajectory_draws=(
+            None
+            if rec.prior_contrast_trajectory_draws is None
+            else {p: arr[perm] for p, arr in rec.prior_contrast_trajectory_draws.items()}
+        ),
+        legacy_3arm_result=None,
+    )
+
+
+def _resolve_multi_arm_target_correlation(
+    cross_outcome_corr: np.ndarray | CrossOutcomeCorrelationResult | None,
+    structural_outcomes: tuple[str, ...],
+    arms: tuple[str, ...],
+    key_contrast: tuple[str, str],
+    raw_by_outcome: Mapping[str, MultiArmReconciliationResult],
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Resolve the ``(M, M)`` target correlation on ``key_contrast`` and ``{arm: (M, M)}`` arm correlations."""
+    m_count = len(structural_outcomes)
+    if cross_outcome_corr is None:
+        eye = np.eye(m_count, dtype=np.float64)
+        return eye, {arm: eye.copy() for arm in arms}
+
+    if isinstance(cross_outcome_corr, CrossOutcomeCorrelationResult):
+        if set(cross_outcome_corr.outcomes) != set(structural_outcomes):
+            raise ValueError(
+                f"cross_outcome_corr outcomes {cross_outcome_corr.outcomes} do not match "
+                f"structural_outcomes {structural_outcomes}"
+            )
+        order = [cross_outcome_corr.outcomes.index(name) for name in structural_outcomes]
+        arm_corrs: dict[str, np.ndarray] = {}
+        for arm in arms:
+            if arm in cross_outcome_corr.per_arm_correlation:
+                arm_corrs[arm] = cross_outcome_corr.per_arm_correlation[arm][np.ix_(order, order)]
+            else:
+                arm_corrs[arm] = cross_outcome_corr.correlation[np.ix_(order, order)]
+        j_key, l_key = key_contrast
+        sd_j = np.array(
+            [math.sqrt(max(float(raw_by_outcome[m].arm_variances[j_key]), 1e-12)) for m in structural_outcomes],
+            dtype=np.float64,
+        )
+        sd_l = np.array(
+            [math.sqrt(max(float(raw_by_outcome[m].arm_variances[l_key]), 1e-12)) for m in structural_outcomes],
+            dtype=np.float64,
+        )
+        cov_key = np.outer(sd_j, sd_j) * arm_corrs[j_key] + np.outer(sd_l, sd_l) * arm_corrs[l_key]
+        scale_key = np.sqrt(np.maximum(np.diag(cov_key), 1e-12))
+        corr_key = cov_key / np.outer(scale_key, scale_key)
+        target_spd, _, _ = _floor_correlation_eigenvalues(corr_key, 1e-6)
+        return target_spd, arm_corrs
+
+    mat = np.asarray(cross_outcome_corr, dtype=np.float64)
+    if mat.shape != (m_count, m_count) or not np.all(np.isfinite(mat)):
+        raise ValueError(f"cross_outcome_corr must have shape ({m_count}, {m_count}); got {mat.shape}")
+    if not np.allclose(mat, mat.T, atol=1e-8) or not np.allclose(np.diag(mat), 1.0, atol=1e-6):
+        raise ValueError("cross_outcome_corr must be symmetric with unit diagonal")
+    target_spd, _, _ = _floor_correlation_eigenvalues(np.clip(mat, -1.0, 1.0), 1e-6)
+    return target_spd, {arm: target_spd.copy() for arm in arms}
+
+
+def _sample_synthetic_composite_multi_arm(
+    comp_members: Sequence[str],
+    structural_outcomes: tuple[str, ...],
+    arms: tuple[str, ...],
+    topology: str,
+    tree_edges: tuple[tuple[str, str], ...],
+    raw_by_outcome: Mapping[str, MultiArmReconciliationResult],
+    arm_corrs: Mapping[str, np.ndarray],
+    target_corr: np.ndarray,
+    *,
+    comp_prior_scale: float | str | None,
+    prior_mode: str,
+    split_alpha: Sequence[float] | float | None,
+    monotone: bool,
+    tau_clip: tuple[float, float],
+    n_draws: int,
+    n_proposals: int,
+    num_chains: int,
+    num_warmup: int,
+    thin: int,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, SamplerDiagnostics]:
+    """Sample single-truncation ``mu_comp`` of shape ``(S, A - 1)`` from component GLS moments."""
+    idx_list = [structural_outcomes.index(m) for m in comp_members]
+    n_arms = len(arms)
+    dim = n_arms - 1
+    arm_to_idx = {arm: i for i, arm in enumerate(arms)}
+
+    mu_hat_comp = sum(raw_by_outcome[m].mu_hat for m in comp_members)
+    v_comp = np.zeros(n_arms, dtype=np.float64)
+    for a_idx, arm in enumerate(arms):
+        sub_corr = arm_corrs[arm][np.ix_(idx_list, idx_list)]
+        sd_vec = np.array(
+            [math.sqrt(max(float(raw_by_outcome[m].arm_variances[arm]), 1e-12)) for m in comp_members],
+            dtype=np.float64,
+        )
+        v_comp[a_idx] = max(float(sd_vec @ sub_corr @ sd_vec), 1e-12)
+    sigma_lik_comp = np.diag(v_comp[1:]) + v_comp[0] * np.ones((dim, dim), dtype=np.float64)
+
+    if comp_prior_scale is None:
+        comp_scales = []
+        for m in comp_members:
+            sc = raw_by_outcome[m].prior_scale
+            if isinstance(sc, tuple):
+                comp_scales.append(float(math.sqrt(sum(float(x) ** 2 for x in sc))))
+            elif sc is not None and math.isfinite(float(sc)):
+                comp_scales.append(float(sc))
+            else:
+                comp_scales.append(math.sqrt(float(raw_by_outcome[m].arm_variances[-1] + raw_by_outcome[m].arm_variances[0])))
+        sc_vec = np.asarray(comp_scales, dtype=np.float64)
+        sub_target = target_corr[np.ix_(idx_list, idx_list)]
+        scale_val = math.sqrt(max(float(sc_vec @ sub_target @ sc_vec), 1e-12))
+    elif isinstance(comp_prior_scale, str):
+        if comp_prior_scale != "in_sample":
+            raise ValueError(f"composite prior scale must be > 0 or 'in_sample'; got {comp_prior_scale!r}")
+        scale_val = math.sqrt(max(float(v_comp[-1] + v_comp[0]), 1e-12))
+    else:
+        scale_val = float(comp_prior_scale)
+        if not scale_val > 0.0:
+            raise ValueError(f"composite prior scale must be > 0; got {comp_prior_scale!r}")
+
+    if split_alpha is None:
+        alpha_vec = np.ones(dim, dtype=np.float64)
+    elif np.ndim(split_alpha) == 0:
+        alpha_vec = np.full(dim, float(split_alpha), dtype=np.float64)
+    else:
+        alpha_vec = np.asarray(split_alpha, dtype=np.float64)
+
+    poset_edges_idx = [(arm_to_idx[c], arm_to_idx[p]) for c, p in tree_edges]
+    cover_pairs = [(arm_to_idx[p], arm_to_idx[c]) for c, p in tree_edges]
+    t_tree = np.zeros((dim, dim), dtype=np.float64)
+    for e_idx, (child, parent) in enumerate(tree_edges):
+        t_tree[e_idx, arm_to_idx[child] - 1] = 1.0
+        if arm_to_idx[parent] > 0:
+            t_tree[e_idx, arm_to_idx[parent] - 1] = -1.0
+    a_ineq, b_ineq = _build_support_inequalities(
+        n_arms=n_arms,
+        topology=topology,
+        prior_mode=prior_mode,
+        monotone=bool(monotone),
+        tau_clip=tau_clip,
+        t_tree=t_tree,
+        cover_pairs=cover_pairs,
+        top_idx=n_arms - 1,
+    )
+    non_top_arms = list(range(1, n_arms - 1))
+    lin_exts: np.ndarray | None = None
+    if topology == "poset" and prior_mode in _BUNDLE_PRIOR_MODES and monotone:
+        lin_exts = _enumerate_linear_extensions(non_top_arms, poset_edges_idx)
+
+    rng = np.random.default_rng(int(seed))
+
+    def _p_draw(n: int) -> np.ndarray:
+        return _draw_prior_mu(
+            rng,
+            n=n,
+            dim=dim,
+            topology=topology,
+            prior_mode=prior_mode,
+            scale_val=scale_val,
+            alpha_vec=alpha_vec,
+            monotone=monotone,
+            tau_clip=tau_clip,
+            poset_edges_idx=poset_edges_idx,
+            non_top_arms=non_top_arms,
+            linear_extensions=lin_exts,
+        )
+
+    def _p_logpdf(mu_pts: np.ndarray) -> np.ndarray:
+        return _prior_logpdf_mu(
+            mu_pts,
+            dim=dim,
+            topology=topology,
+            prior_mode=prior_mode,
+            scale_val=scale_val,
+            alpha_vec=alpha_vec,
+            monotone=monotone,
+            tau_clip=tau_clip,
+            poset_edges_idx=poset_edges_idx,
+            non_top_arms=non_top_arms,
+            linear_extensions=lin_exts,
+        )
+
+    ess_gate = max(100.0, 0.02 * float(n_proposals))
+    if dim <= 3:
+        post_mu, _, sir_ess = _sir_posterior_nd(
+            rng,
+            prior_draw=_p_draw,
+            prior_logpdf=_p_logpdf,
+            is_flat_prior=(prior_mode == "flat"),
+            mu_hat=mu_hat_comp,
+            sigma_lik=sigma_lik_comp,
+            a_ineq=a_ineq,
+            b_ineq=b_ineq,
+            n_draws=n_draws,
+            n_prop=max(int(n_proposals), 10_000),
+        )
+        if sir_ess >= ess_gate:
+            return (
+                post_mu,
+                mu_hat_comp,
+                sigma_lik_comp,
+                v_comp,
+                scale_val,
+                SamplerDiagnostics(method="sir", ess=sir_ess, r_hat=1.0),
+            )
+
+    post_mu, slice_ess, slice_rhat = _hit_and_run_slice_sampler(
+        rng,
+        prior_draw=_p_draw,
+        prior_logpdf=_p_logpdf,
+        mu_hat=mu_hat_comp,
+        sigma_lik=sigma_lik_comp,
+        n_draws=n_draws,
+        num_chains=num_chains,
+        num_warmup=num_warmup,
+        thin=thin,
+        a_ineq=a_ineq,
+        b_ineq=b_ineq,
+    )
+    return (
+        post_mu,
+        mu_hat_comp,
+        sigma_lik_comp,
+        v_comp,
+        scale_val,
+        SamplerDiagnostics(method="slice", ess=slice_ess, r_hat=slice_rhat),
+    )
+
+
+def _rescale_multi_arm_outcome(
+    rec: MultiArmReconciliationResult,
+    scale_s: np.ndarray,
+    positive_mask: np.ndarray,
+    fallback_mu: np.ndarray,
+    m_tree_inv: np.ndarray,
+) -> MultiArmReconciliationResult:
+    """Rescale all posterior draws of ``rec`` by ``scale_s`` on draw ``s`` (with fallback on zero-sum draws)."""
+    arm_to_idx = {arm: i for i, arm in enumerate(rec.arms)}
+    new_mu = np.where(positive_mask[:, None], rec.tau_mu_draws * scale_s[:, None], fallback_mu)
+    new_theta = new_mu @ m_tree_inv.T
+
+    mu_full = np.column_stack([np.zeros(new_mu.shape[0], dtype=np.float64), new_mu])
+    new_mode1: dict[tuple[str, str], np.ndarray] = {}
+    new_traj: dict[tuple[str, str], np.ndarray] = {}
+    new_cum: dict[tuple[str, str], np.ndarray] = {}
+    h_eff = rec.horizon
+    for pair in rec.all_pairs:
+        j_idx = arm_to_idx[pair[0]]
+        l_idx = arm_to_idx[pair[1]]
+        m1_pair = mu_full[:, j_idx] - mu_full[:, l_idx]
+        new_mode1[pair] = m1_pair
+        old_traj = rec.contrast_trajectory_draws[pair]
+        t_pair = np.where(
+            positive_mask[:, None],
+            old_traj * scale_s[:, None],
+            m1_pair[:, None],
+        )
+        new_traj[pair] = t_pair
+        new_cum[pair] = t_pair[:, :h_eff].sum(axis=1)
+
+    return MultiArmReconciliationResult(
+        arms=rec.arms,
+        topology=rec.topology,
+        tree_edges=rec.tree_edges,
+        fitted_pairs=rec.fitted_pairs,
+        redundant_pairs=rec.redundant_pairs,
+        tau_mu_draws=new_mu,
+        tau_increment_draws=new_theta,
+        contrast_mode1_draws=new_mode1,
+        contrast_trajectory_draws=new_traj,
+        contrast_catt_draws=dict(new_traj),
+        contrast_cumulative_draws=new_cum,
+        mu_hat=rec.mu_hat.copy(),
+        sigma_lik=rec.sigma_lik.copy(),
+        arm_variances=_ArmVarianceArray(np.asarray(rec.arm_variances, dtype=np.float64).copy(), rec.arms),
+        nnls_residual=rec.nnls_residual,
+        is_bipartite=rec.is_bipartite,
+        cycle_discrepancy_ratio=rec.cycle_discrepancy_ratio,
+        trajectory_additivity_max_gap=rec.trajectory_additivity_max_gap,
+        sampler_diagnostics=rec.sampler_diagnostics,
+        trajectory_additivity_gaps=dict(rec.trajectory_additivity_gaps),
+        prior_mode=rec.prior_mode,
+        prior_scale=rec.prior_scale,
+        horizon=rec.horizon,
+        own_vs_implied_trajectory_max_gap=rec.own_vs_implied_trajectory_max_gap,
+        prior_mu_draws=rec.prior_mu_draws,
+        prior_increment_draws=rec.prior_increment_draws,
+        prior_contrast_mode1_draws=rec.prior_contrast_mode1_draws,
+        prior_contrast_trajectory_draws=rec.prior_contrast_trajectory_draws,
+        legacy_3arm_result=None,
+    )
+
+
+def reconcile_multi_arm_multi_outcome_draws(
+    results_by_outcome: Mapping[Any, Mapping[Any, RankKLongBetResult]] | None = None,
+    arms: Sequence[str] = (),
+    *,
+    results: Mapping[Any, Mapping[Any, RankKLongBetResult]] | None = None,
+    results_by_contrast: Mapping[Any, Mapping[Any, RankKLongBetResult]] | None = None,
+    topology: str = "chain",
+    edges: Sequence[tuple[str, str]] | None = None,
+    prior_scales: Mapping[str, float | str] | float | str = "in_sample",
+    prior_scale: Mapping[str, float | str] | float | str | None = None,
+    prior_mode: str = "bundle_halfnormal",
+    split_alpha: Sequence[float] | float | None = None,
+    monotone: bool = True,
+    tau_clip: tuple[float, float] | None = (0.0, np.inf),
+    catt_floor: float | None = 0.0,
+    key_contrast: tuple[str, str] | None = None,
+    cross_outcome_corr: np.ndarray | CrossOutcomeCorrelationResult | None = None,
+    composite_outcomes: Mapping[str, Sequence[str]] | None = None,
+    composite_mode: str = "bottom_up",
+    composite_results: Mapping[str, Mapping[tuple[str, str], RankKLongBetResult]] | None = None,
+    composite_prior_scales: Mapping[str, float | str] | float | str | None = None,
+    sample_sizes: Mapping[str, Any] | Sequence[float] | None = None,
+    cohorts: Mapping[Any, Any] | None = None,
+    ever: Mapping[Any, Any] | None = None,
+    min_arm_var_share: float = 0.15,
+    bipartite_ridge: float = 1e-2,
+    horizon: int | None = None,
+    sampler: str = "auto",
+    n_proposals: int = 250_000,
+    num_chains: int = 4,
+    num_warmup: int = 500,
+    thin: int = 2,
+    seed: int = 0,
+    return_prior_draws: bool = False,
+) -> MultiArmMultiOutcomeReconciliationResult:
+    """Reconcile multi-arm Rank-K BCF posteriors across ``M`` outcomes with copula coupling and composites.
+
+    Generalizes :func:`reconcile_nested_3arm_multi_draws` to arbitrary ``A >= 2`` arms and
+    ``P >= A - 1`` fitted contrasts:
+    1. Each structural outcome ``m`` is reconciled across ``arms`` via :func:`reconcile_multi_arm_draws`.
+    2. Draw indices ``s = 0..S - 1`` are coupled across the ``M`` structural outcomes via
+       :func:`iman_conover_couple` on ``key_contrast`` (default ``(arms[-1], arms[0])``),
+       preserving each outcome's marginal distribution and every within-outcome cycle identity.
+    3. Any requested ``composite_outcomes`` are synthesized under ``composite_mode``
+       (``"bottom_up"`` or ``"coherent_total"``) with exact draw-wise additivity
+       (``AVR == 0``, ``max |gap| < 1e-12``) across all ``P`` contrasts and all periods.
+
+    Args:
+      results_by_outcome: ``{outcome: {(treated, ref): RankKLongBetResult}}`` or
+        ``{(treated, ref): {outcome: RankKLongBetResult}}``.
+      arms: Ordered sequence of ``A >= 2`` arm names with ``arms[0]`` as the control arm.
+      results: Alias for ``results_by_outcome``.
+      results_by_contrast: Optional ``{(treated, ref): {outcome: RankKLongBetResult}}`` mapping.
+      topology: ``"chain"`` or ``"poset"``.
+      edges: Spanning-tree cover edges ``[(child, parent), ...]`` when ``topology="poset"``.
+      prior_scales: Positive float, ``"in_sample"``, or ``{outcome: scale}`` mapping.
+      prior_scale: Optional alias for ``prior_scales``.
+      prior_mode: Prior family (``"bundle_halfnormal"``, ``"bundle_halfstudentt"``,
+        ``"bundle_gamma_spike"``, ``"independent"``, ``"independent_halfnormal"``, or ``"flat"``).
+      split_alpha: Optional Dirichlet concentration parameter(s) for chain increments.
+      monotone: Enforce non-negative edge increments ``theta_a >= 0`` (default ``True``).
+      tau_clip: ``(low, high)`` bounds on ``mu_j`` (default ``(0.0, inf)``; ``None`` for ``(-inf, inf)``).
+      catt_floor: Optional per-period trajectory floor for zero-sum dynamic damping (default ``0.0``).
+      key_contrast: ``(treated, ref)`` contrast pair used for Iman-Conover coupling
+        (default ``(arms[-1], arms[0])``).
+      cross_outcome_corr: ``None`` (identity), an ``(M, M)`` correlation matrix, or a
+        :class:`CrossOutcomeCorrelationResult`.
+      composite_outcomes: Optional ``{composite_name: (component_1, component_2, ...)}``.
+      composite_mode: ``"bottom_up"`` (default) or ``"coherent_total"``.
+      composite_results: Optional ``{composite_name: {(treated, ref): RankKLongBetResult}}``
+        for ``composite_mode="coherent_total"``.
+      composite_prior_scales: Optional ``{composite_name: scale}`` or scalar for ``"coherent_total"``.
+      sample_sizes: Optional ``{arm: n_a}`` or sequence of length ``A`` (or ``{outcome: ...}``).
+      cohorts: Optional ``{(treated, ref): cohorts}`` or ``{outcome: {(treated, ref): cohorts}}``.
+      ever: Optional ``{(treated, ref): ever}`` or ``{outcome: {(treated, ref): ever}}``.
+      min_arm_var_share: Floor fraction ``eta`` for non-bipartite NNLS variance recovery.
+      bipartite_ridge: Ridge weight ``lambda_bip`` for bipartite variance recovery.
+      horizon: Optional number of post-adoption periods summed into cumulative draws.
+      sampler: ``"auto"``, ``"sir"``, or ``"slice"``.
+      n_proposals: Importance-sampling proposal count per outcome (default ``250_000``).
+      num_chains: Number of parallel hit-and-run slice chains (default ``4``).
+      num_warmup: Warmup sweeps per slice chain (default ``500``).
+      thin: Thinning interval per slice chain (default ``2``).
+      seed: Random seed.
+      return_prior_draws: Attach prior Mode-1 and trajectory draws when ``True``.
+
+    Returns:
+      :class:`MultiArmMultiOutcomeReconciliationResult`.
+    """
+    arms_tuple = tuple(str(a) for a in arms)
+    if len(arms_tuple) < 2 or len(set(arms_tuple)) != len(arms_tuple):
+        raise ValueError(f"arms must contain at least 2 distinct arm names; got {arms!r}")
+    if composite_mode not in _COMPOSITE_MODES:
+        raise ValueError(f"composite_mode must be one of {_COMPOSITE_MODES}; got {composite_mode!r}")
+
+    structural_outcomes, norm_results = _normalize_multi_arm_outcome_inputs(
+        results_by_outcome, results, results_by_contrast, arms_tuple
+    )
+    scales_arg = prior_scale if prior_scale is not None else prior_scales
+    resolved_tau_clip = (
+        (-float("inf"), float("inf"))
+        if tau_clip is None
+        else (float(tau_clip[0]), float(tau_clip[1]))
+    )
+
+    if key_contrast is None:
+        key_pair = (arms_tuple[-1], arms_tuple[0])
+    else:
+        if not (isinstance(key_contrast, tuple) and len(key_contrast) == 2):
+            raise ValueError(f"key_contrast must be a 2-tuple (treated, ref); got {key_contrast!r}")
+        key_pair = (str(key_contrast[0]), str(key_contrast[1]))
+        if key_pair[0] not in arms_tuple or key_pair[1] not in arms_tuple or key_pair[0] == key_pair[1]:
+            raise ValueError(f"key_contrast {key_pair!r} must reference two distinct arms in {arms_tuple}")
+
+    # Validate composite_outcomes specification up front
+    comp_spec: dict[str, tuple[str, ...]] = {}
+    seen_coherent_components: set[str] = set()
+    if composite_outcomes is not None:
+        for comp_name, members in composite_outcomes.items():
+            c_str = str(comp_name)
+            if c_str in structural_outcomes:
+                raise ValueError(f"composite outcome {c_str!r} collides with a structural outcome name")
+            member_tuple = tuple(str(m) for m in members)
+            if len(member_tuple) < 2 or len(set(member_tuple)) != len(member_tuple):
+                raise ValueError(
+                    f"composite outcome {c_str!r} must sum at least 2 distinct components; got {member_tuple}"
+                )
+            missing = [m for m in member_tuple if m not in structural_outcomes]
+            if missing:
+                raise ValueError(
+                    f"composite outcome {c_str!r} references unknown component(s) {missing}; "
+                    f"structural outcomes are {structural_outcomes}"
+                )
+            if composite_mode == "coherent_total":
+                overlap = seen_coherent_components & set(member_tuple)
+                if overlap:
+                    raise ValueError(
+                        f"composite_mode='coherent_total' requires disjoint composite component sets, "
+                        f"but composite {c_str!r} shares component(s) {sorted(overlap)} with an earlier composite"
+                    )
+                seen_coherent_components.update(member_tuple)
+            comp_spec[c_str] = member_tuple
+
+    # Resolve default sample_sizes from CrossOutcomeCorrelationResult if available
+    default_sample_sizes = sample_sizes
+    if (
+        default_sample_sizes is None
+        and isinstance(cross_outcome_corr, CrossOutcomeCorrelationResult)
+        and all(a in cross_outcome_corr.effective_sample_sizes for a in arms_tuple)
+    ):
+        default_sample_sizes = {a: float(cross_outcome_corr.effective_sample_sizes[a]) for a in arms_tuple}
+
+    def _extract_outcome_nested_arg(arg: Any, outcome: str) -> Any:
+        if isinstance(arg, Mapping) and outcome in arg:
+            return arg[outcome]
+        return arg
+
+    # Step 1: Per-outcome multi-arm reconciliation
+    raw_by_outcome: dict[str, MultiArmReconciliationResult] = {}
+    for idx, m in enumerate(structural_outcomes):
+        scale_m = _per_outcome_arg(scales_arg, m, "prior_scales")
+        ss_m = _extract_outcome_nested_arg(default_sample_sizes, m)
+        coh_m = _extract_outcome_nested_arg(cohorts, m)
+        ev_m = _extract_outcome_nested_arg(ever, m)
+        raw_by_outcome[m] = reconcile_multi_arm_draws(
+            norm_results[m],
+            arms=arms_tuple,
+            topology=topology,
+            edges=edges,
+            prior_scale=scale_m,
+            prior_mode=prior_mode,
+            split_alpha=split_alpha,
+            monotone=monotone,
+            tau_clip=tau_clip,
+            catt_floor=catt_floor,
+            sample_sizes=ss_m,
+            cohorts=coh_m,
+            ever=ev_m,
+            min_arm_var_share=min_arm_var_share,
+            bipartite_ridge=bipartite_ridge,
+            horizon=horizon,
+            sampler=sampler,
+            n_proposals=int(n_proposals),
+            num_chains=num_chains,
+            num_warmup=num_warmup,
+            thin=thin,
+            seed=int(seed) + 1009 * idx,
+            return_prior_draws=return_prior_draws,
+        )
+
+    first_rec = raw_by_outcome[structural_outcomes[0]]
+    tree_edges = first_rec.tree_edges
+    fitted_pairs = first_rec.fitted_pairs
+    redundant_pairs = first_rec.redundant_pairs
+    all_pairs = first_rec.all_pairs
+    h_eff = first_rec.horizon
+    n_draws = int(first_rec.tau_mu_draws.shape[0])
+
+    for m in structural_outcomes[1:]:
+        if int(raw_by_outcome[m].tau_mu_draws.shape[0]) != n_draws:
+            raise ValueError("Structural outcomes produced different draw counts S")
+        if raw_by_outcome[m].horizon != h_eff:
+            raise ValueError("Structural outcomes produced different horizon lengths")
+
+    # Step 2: Cross-outcome Iman-Conover coupling on key_contrast
+    target_corr, arm_corrs = _resolve_multi_arm_target_correlation(
+        cross_outcome_corr, structural_outcomes, arms_tuple, key_pair, raw_by_outcome
+    )
+    key_draws_by_outcome = {
+        m: raw_by_outcome[m].get_contrast_result(key_pair[0], key_pair[1]).mode1_draws
+        for m in structural_outcomes
+    }
+    ic_res = iman_conover_couple(
+        key_draws_by_outcome,
+        target_corr,
+        key="sum",
+        seed=int(seed) + 7919,
+    )
+
+    by_outcome: dict[str, MultiArmReconciliationResult] = {
+        m: _permute_multi_arm_reconciliation_result(raw_by_outcome[m], ic_res.permutations[m])
+        for m in structural_outcomes
+    }
+
+    # Build M_tree_inv for converting between mu and theta = M_tree^{-1} mu
+    n_arms = len(arms_tuple)
+    dim = n_arms - 1
+    arm_to_idx = {arm: i for i, arm in enumerate(arms_tuple)}
+    m_tree = np.zeros((dim, dim), dtype=np.float64)
+    for e_idx, (child, parent) in enumerate(tree_edges):
+        m_tree[e_idx, arm_to_idx[child] - 1] = 1.0
+        if arm_to_idx[parent] > 0:
+            m_tree[e_idx, arm_to_idx[parent] - 1] = -1.0
+    m_tree_inv = m_tree.copy()
+
+    # Step 3: Synthesize composite outcomes
+    max_abs_disc: dict[str, float] = {}
+    avr_by_comp: dict[str, float] = {}
+
+    for comp_idx, (comp_name, comp_members) in enumerate(comp_spec.items()):
+        if composite_mode == "coherent_total":
+            if isinstance(composite_prior_scales, Mapping):
+                comp_scale_arg = composite_prior_scales.get(comp_name)
+            else:
+                comp_scale_arg = composite_prior_scales
+
+            if composite_results is not None and comp_name in composite_results:
+                if comp_scale_arg is None:
+                    comp_scale_arg = (
+                        scales_arg
+                        if isinstance(scales_arg, (int, float, str))
+                        else "in_sample"
+                    )
+                rec_comp_direct = reconcile_multi_arm_draws(
+                    composite_results[comp_name],
+                    arms=arms_tuple,
+                    topology=topology,
+                    edges=edges,
+                    prior_scale=comp_scale_arg,
+                    prior_mode=prior_mode,
+                    split_alpha=split_alpha,
+                    monotone=monotone,
+                    tau_clip=tau_clip,
+                    catt_floor=catt_floor,
+                    sample_sizes=default_sample_sizes if isinstance(default_sample_sizes, Mapping) else None,
+                    min_arm_var_share=min_arm_var_share,
+                    bipartite_ridge=bipartite_ridge,
+                    horizon=horizon,
+                    sampler=sampler,
+                    n_proposals=int(n_proposals),
+                    num_chains=num_chains,
+                    num_warmup=num_warmup,
+                    thin=thin,
+                    seed=int(seed) + 20011 + 997 * comp_idx,
+                    return_prior_draws=return_prior_draws,
+                )
+                comp_mu_raw = rec_comp_direct.tau_mu_draws
+                comp_mu_hat = rec_comp_direct.mu_hat
+                comp_sigma_lik = rec_comp_direct.sigma_lik
+                comp_v = np.asarray(rec_comp_direct.arm_variances, dtype=np.float64)
+                comp_scale_used = rec_comp_direct.prior_scale
+                comp_diag = rec_comp_direct.sampler_diagnostics
+            else:
+                (
+                    comp_mu_raw,
+                    comp_mu_hat,
+                    comp_sigma_lik,
+                    comp_v,
+                    comp_scale_used,
+                    comp_diag,
+                ) = _sample_synthetic_composite_multi_arm(
+                    comp_members,
+                    structural_outcomes,
+                    arms_tuple,
+                    topology,
+                    tree_edges,
+                    raw_by_outcome,
+                    arm_corrs,
+                    target_corr,
+                    comp_prior_scale=comp_scale_arg,
+                    prior_mode=prior_mode,
+                    split_alpha=split_alpha,
+                    monotone=monotone,
+                    tau_clip=resolved_tau_clip,
+                    n_draws=n_draws,
+                    n_proposals=int(n_proposals),
+                    num_chains=num_chains,
+                    num_warmup=num_warmup,
+                    thin=thin,
+                    seed=int(seed) + 20011 + 997 * comp_idx,
+                )
+
+            comp_mu_full_raw = np.column_stack([np.zeros(n_draws, dtype=np.float64), comp_mu_raw])
+            j_key_idx = arm_to_idx[key_pair[0]]
+            l_key_idx = arm_to_idx[key_pair[1]]
+            comp_key_raw = comp_mu_full_raw[:, j_key_idx] - comp_mu_full_raw[:, l_key_idx]
+            sum_comp_key = sum(
+                by_outcome[m].get_contrast_result(key_pair[0], key_pair[1]).mode1_draws
+                for m in comp_members
+            )
+
+            comp_order = np.argsort(comp_key_raw, kind="stable")
+            sum_ranks = _ranks(sum_comp_key)
+            perm_comp = comp_order[sum_ranks]
+            comp_mu_coupled = comp_mu_raw[perm_comp]
+            total_key_coupled = comp_key_raw[perm_comp]
+
+            positive_sum = np.abs(sum_comp_key) > 1e-12
+            scale_s = np.where(
+                positive_sum,
+                total_key_coupled / np.where(positive_sum, sum_comp_key, 1.0),
+                0.0,
+            )
+            k_members = float(len(comp_members))
+            fallback_mu = comp_mu_coupled / k_members
+            for m in comp_members:
+                by_outcome[m] = _rescale_multi_arm_outcome(
+                    by_outcome[m], scale_s, positive_sum, fallback_mu, m_tree_inv
+                )
+        else:
+            idx_list = [structural_outcomes.index(m) for m in comp_members]
+            comp_mu_hat = sum(by_outcome[m].mu_hat for m in comp_members)
+            comp_v = np.zeros(n_arms, dtype=np.float64)
+            for a_idx, arm in enumerate(arms_tuple):
+                sub_corr = arm_corrs[arm][np.ix_(idx_list, idx_list)]
+                sd_vec = np.array(
+                    [math.sqrt(max(float(by_outcome[m].arm_variances[arm]), 1e-12)) for m in comp_members],
+                    dtype=np.float64,
+                )
+                comp_v[a_idx] = max(float(sd_vec @ sub_corr @ sd_vec), 1e-12)
+            comp_sigma_lik = np.diag(comp_v[1:]) + comp_v[0] * np.ones((dim, dim), dtype=np.float64)
+            if prior_mode == "flat":
+                comp_scale_used = None
+            elif all(isinstance(by_outcome[m].prior_scale, tuple) for m in comp_members):
+                sub_target = target_corr[np.ix_(idx_list, idx_list)]
+                coord_scales: list[float] = []
+                for j_coord in range(dim):
+                    sc_j = np.array(
+                        [float(by_outcome[m].prior_scale[j_coord]) for m in comp_members],
+                        dtype=np.float64,
+                    )
+                    coord_scales.append(math.sqrt(max(float(sc_j @ sub_target @ sc_j), 1e-12)))
+                comp_scale_used = tuple(coord_scales)
+            else:
+                comp_scales = []
+                for m in comp_members:
+                    sc = by_outcome[m].prior_scale
+                    if isinstance(sc, tuple):
+                        comp_scales.append(float(math.sqrt(sum(float(x) ** 2 for x in sc))))
+                    elif sc is not None and math.isfinite(float(sc)):
+                        comp_scales.append(float(sc))
+                    else:
+                        comp_scales.append(
+                            math.sqrt(
+                                max(
+                                    float(by_outcome[m].arm_variances[-1] + by_outcome[m].arm_variances[0]),
+                                    1e-12,
+                                )
+                            )
+                        )
+                sc_vec = np.asarray(comp_scales, dtype=np.float64)
+                sub_target = target_corr[np.ix_(idx_list, idx_list)]
+                comp_scale_used = math.sqrt(max(float(sc_vec @ sub_target @ sc_vec), 1e-12))
+            min_ess = float(min(by_outcome[m].sampler_diagnostics.ess for m in comp_members))
+            max_rhat = float(max(by_outcome[m].sampler_diagnostics.r_hat for m in comp_members))
+            methods = {by_outcome[m].sampler_diagnostics.method for m in comp_members}
+            comp_diag = SamplerDiagnostics(
+                method="slice" if "slice" in methods else "sir",
+                ess=min_ess,
+                r_hat=max_rhat,
+            )
+
+        comp_tau_mu = sum(by_outcome[m].tau_mu_draws for m in comp_members)
+        comp_tau_inc = sum(by_outcome[m].tau_increment_draws for m in comp_members)
+        comp_mode1 = {
+            pair: sum(by_outcome[m].contrast_mode1_draws[pair] for m in comp_members)
+            for pair in all_pairs
+        }
+        comp_traj = {
+            pair: sum(by_outcome[m].contrast_trajectory_draws[pair] for m in comp_members)
+            for pair in all_pairs
+        }
+        comp_cum = {
+            pair: comp_traj[pair][:, :h_eff].sum(axis=1) for pair in all_pairs
+        }
+
+        comp_pri_mu = (
+            sum(by_outcome[m].prior_tau_mu_draws for m in comp_members)
+            if all(by_outcome[m].prior_tau_mu_draws is not None for m in comp_members)
+            else None
+        )
+        comp_pri_inc = (
+            sum(by_outcome[m].prior_tau_increment_draws for m in comp_members)
+            if all(by_outcome[m].prior_tau_increment_draws is not None for m in comp_members)
+            else None
+        )
+        comp_pri_mode1 = (
+            {
+                pair: sum(by_outcome[m].prior_contrast_mode1_draws[pair] for m in comp_members)
+                for pair in all_pairs
+            }
+            if all(by_outcome[m].prior_contrast_mode1_draws is not None for m in comp_members)
+            else None
+        )
+        comp_pri_traj = (
+            {
+                pair: sum(by_outcome[m].prior_contrast_trajectory_draws[pair] for m in comp_members)
+                for pair in all_pairs
+            }
+            if all(by_outcome[m].prior_contrast_trajectory_draws is not None for m in comp_members)
+            else None
+        )
+
+        by_outcome[comp_name] = MultiArmReconciliationResult(
+            arms=arms_tuple,
+            topology=topology,
+            tree_edges=tree_edges,
+            fitted_pairs=fitted_pairs,
+            redundant_pairs=redundant_pairs,
+            tau_mu_draws=comp_tau_mu,
+            tau_increment_draws=comp_tau_inc,
+            contrast_mode1_draws=comp_mode1,
+            contrast_trajectory_draws=comp_traj,
+            contrast_catt_draws=dict(comp_traj),
+            contrast_cumulative_draws=comp_cum,
+            mu_hat=comp_mu_hat,
+            sigma_lik=comp_sigma_lik,
+            arm_variances=_ArmVarianceArray(comp_v, arms_tuple),
+            nnls_residual=float(max(by_outcome[m].nnls_residual for m in comp_members)),
+            is_bipartite=first_rec.is_bipartite,
+            cycle_discrepancy_ratio=float(max(by_outcome[m].cycle_discrepancy_ratio for m in comp_members)),
+            trajectory_additivity_max_gap=float(
+                max(by_outcome[m].trajectory_additivity_max_gap for m in comp_members)
+            ),
+            sampler_diagnostics=comp_diag,
+            trajectory_additivity_gaps={},
+            prior_mode=prior_mode,
+            prior_scale=comp_scale_used,
+            horizon=h_eff,
+            own_vs_implied_trajectory_max_gap=float(
+                max(by_outcome[m].own_vs_implied_trajectory_max_gap for m in comp_members)
+            ),
+            prior_mu_draws=comp_pri_mu,
+            prior_increment_draws=comp_pri_inc,
+            prior_contrast_mode1_draws=comp_pri_mode1,
+            prior_contrast_trajectory_draws=comp_pri_traj,
+            legacy_3arm_result=None,
+        )
+
+        # Evaluate draw-wise composite additivity across ALL fitted/ordered pairs and periods
+        per_draw_max_gap = np.zeros(n_draws, dtype=np.float64)
+        for pair in all_pairs:
+            sum_member_traj = sum(by_outcome[m].contrast_trajectory_draws[pair] for m in comp_members)
+            sum_member_mode1 = sum(by_outcome[m].contrast_mode1_draws[pair] for m in comp_members)
+            gap_traj = np.max(np.abs(comp_traj[pair] - sum_member_traj), axis=1)
+            gap_m1 = np.abs(comp_mode1[pair] - sum_member_mode1)
+            per_draw_max_gap = np.maximum(per_draw_max_gap, np.maximum(gap_traj, gap_m1))
+        max_abs_disc[comp_name] = float(np.max(per_draw_max_gap))
+        avr_by_comp[comp_name] = float(np.mean(per_draw_max_gap > 1e-12))
+
+    all_outcomes = (*structural_outcomes, *comp_spec.keys())
+    return MultiArmMultiOutcomeReconciliationResult(
+        arms=arms_tuple,
+        topology=topology,
+        tree_edges=tree_edges,
+        fitted_pairs=fitted_pairs,
+        redundant_pairs=redundant_pairs,
+        outcomes=all_outcomes,
+        structural_outcomes=structural_outcomes,
+        composite_outcomes=comp_spec,
+        composite_mode=composite_mode,
+        key_contrast=key_pair,
+        by_outcome=by_outcome,
+        tau_mu_draws={name: by_outcome[name].tau_mu_draws for name in all_outcomes},
+        tau_increment_draws={name: by_outcome[name].tau_increment_draws for name in all_outcomes},
+        contrast_mode1_draws={name: by_outcome[name].contrast_mode1_draws for name in all_outcomes},
+        contrast_trajectory_draws={name: by_outcome[name].contrast_trajectory_draws for name in all_outcomes},
+        contrast_catt_draws={name: by_outcome[name].contrast_catt_draws for name in all_outcomes},
+        contrast_cumulative_draws={name: by_outcome[name].contrast_cumulative_draws for name in all_outcomes},
+        permutations=ic_res.permutations,
+        target_correlation=ic_res.target_correlation,
+        realized_spearman=ic_res.realized_spearman,
+        max_abs_composite_discrepancy=max_abs_disc,
+        additivity_violation_rate=avr_by_comp,
+    )
+
+
 def ge_revenue_draws(
-    reconciled_or_draws: Nested3ArmMultiReconciliationResult | Mapping[str, np.ndarray],
+    reconciled_or_draws: (
+        Nested3ArmMultiReconciliationResult
+        | MultiArmMultiOutcomeReconciliationResult
+        | Mapping[str, np.ndarray]
+    ),
     *,
     weights: Mapping[str, float],
-    contrast: str = "AC",
+    contrast: str | tuple[str, str] = "AC",
     horizon: int | None = None,
     discount_rate: float = 0.0,
     periods_per_year: int = 12,
@@ -1200,12 +2213,13 @@ def ge_revenue_draws(
     """Compute coupled general-equilibrium (GE) revenue draws ``sum_m alpha_m * Cum_m^(s)``.
 
     Args:
-      reconciled_or_draws: A :class:`Nested3ArmMultiReconciliationResult` or a mapping
+      reconciled_or_draws: A :class:`Nested3ArmMultiReconciliationResult`,
+        :class:`MultiArmMultiOutcomeReconciliationResult`, or a mapping
         ``{outcome: (S,) cumulative draws or (S, T) monthly trajectory draws}``.
       weights: ``{outcome: alpha_m}`` incrementality weights (for example
         ``{"outcome_a": alpha_a, "outcome_b": 1.0}``).
-      contrast: Contrast used when ``reconciled_or_draws`` is a
-        :class:`Nested3ArmMultiReconciliationResult` (``"BC"``, ``"AB"``, or ``"AC"``).
+      contrast: Contrast used when ``reconciled_or_draws`` is a reconciliation result
+        (``"BC"``, ``"AB"``, ``"AC"``, or a 2-tuple ``(treated, ref)``).
       horizon: Optional number of periods to sum when inputs are 2-D trajectories.
       discount_rate: Annual discount rate ``r > -1`` applied to 2-D trajectories (default ``0.0``).
       periods_per_year: Periods per year for discounting (default ``12``).
@@ -1222,7 +2236,7 @@ def ge_revenue_draws(
         raise ValueError(f"periods_per_year must be >= 1; got {periods_per_year!r}")
 
     if isinstance(reconciled_or_draws, Nested3ArmMultiReconciliationResult):
-        c_upper = contrast.upper()
+        c_upper = str(contrast).upper()
         if c_upper == "AC":
             source: Mapping[str, np.ndarray] = reconciled_or_draws.trt_catt_ac
         elif c_upper == "BC":
@@ -1231,11 +2245,29 @@ def ge_revenue_draws(
             source = reconciled_or_draws.trt_catt_ab
         else:
             raise ValueError(f"contrast must be 'BC', 'AB', or 'AC'; got {contrast!r}")
+    elif isinstance(reconciled_or_draws, MultiArmMultiOutcomeReconciliationResult):
+        if isinstance(contrast, tuple) and len(contrast) == 2:
+            pair = (str(contrast[0]), str(contrast[1]))
+        elif isinstance(contrast, str):
+            c_upper = contrast.upper()
+            if len(reconciled_or_draws.arms) == 3 and c_upper in ("BC", "AB", "AC"):
+                a0, a1, a2 = reconciled_or_draws.arms
+                pair = {"BC": (a1, a0), "AB": (a2, a1), "AC": (a2, a0)}[c_upper]
+            elif c_upper == "KEY" or c_upper == "AC":
+                pair = reconciled_or_draws.key_contrast
+            else:
+                raise ValueError(
+                    f"For MultiArmMultiOutcomeReconciliationResult, pass contrast=(treated, ref); got {contrast!r}"
+                )
+        else:
+            raise ValueError(f"Invalid contrast {contrast!r}")
+        source = reconciled_or_draws.get_contrast_trajectory_draws(pair)
     elif isinstance(reconciled_or_draws, Mapping):
         source = reconciled_or_draws
     else:
         raise ValueError(
-            "reconciled_or_draws must be a Nested3ArmMultiReconciliationResult or Mapping[str, np.ndarray]"
+            "reconciled_or_draws must be a Nested3ArmMultiReconciliationResult, "
+            "MultiArmMultiOutcomeReconciliationResult, or Mapping[str, np.ndarray]"
         )
 
     total: np.ndarray | None = None

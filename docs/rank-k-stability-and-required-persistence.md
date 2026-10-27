@@ -175,5 +175,5 @@ Morris formulas.
 * Report `X` with Bounds U and L, the `rho = 0` floor and the placebo benchmark, and state the survival curve, the
   discount rate and `alpha_share`.
 * Do not present the hierarchical `rho ~ Beta` band of `extrapolate_rank_k_decay` as a credible interval: it is an
-  assumed scenario band. Calling `extrapolate_rank_k_decay` without `rho_sd` emits a `FutureWarning` in 0.8.0; the
-  default becomes `None` (no band) in 0.9.0. Pass `rho_sd=None` now, or pass a value explicitly.
+  assumed scenario band. Since 0.9.0, `rho_sd` defaults to `None` (no band); pass a positive value explicitly to
+  compute the assumed scenario band.

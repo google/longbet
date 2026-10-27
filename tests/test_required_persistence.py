@@ -225,22 +225,23 @@ def test_split_tail_is_additive_and_keeps_the_observed_window(short_arms) -> Non
         np.testing.assert_array_equal(legacy.monthly_draws[arm][:, 6:], observed[:, -1:] * np.power(0.9, steps))
 
 
-def test_implicit_rho_sd_warns_and_the_band_is_labelled_as_assumed(short_arms) -> None:
+def test_implicit_rho_sd_is_none_without_warning_and_band_is_labelled_as_assumed(short_arms) -> None:
     effect = short_arms["AC"]
-    with pytest.warns(FutureWarning, match="0.9.0") as caught:
-        implicit = P.extrapolate_rank_k_decay(effect, horizon=12, num_mc_per_draw=2)
-    assert caught[0].filename == __file__  # attributed to the caller
-    assert implicit.rho_sd == 0.07
     with warnings.catch_warnings():
         warnings.simplefilter("error", FutureWarning)
+        implicit = P.extrapolate_rank_k_decay(effect, horizon=12, num_mc_per_draw=2)
         explicit = P.extrapolate_rank_k_decay(effect, horizon=12, rho_sd=0.07, num_mc_per_draw=2)
         no_band = P.extrapolate_rank_k_decay(effect, horizon=12, rho_sd=None)
+    assert implicit.rho_sd is None
+    assert implicit.random_rho_cumulative_draws is None
     np.testing.assert_array_equal(
-        implicit.random_rho_cumulative_draws["effect"], explicit.random_rho_cumulative_draws["effect"]
+        implicit.cumulative_draws["effect"], no_band.cumulative_draws["effect"]
     )
     assert set(explicit.cumulative_summary_df["rho_band_label"]) == {BAND_LABEL}
     assert set(no_band.cumulative_summary_df["rho_band_label"]) == {""}
+    assert set(implicit.cumulative_summary_df["rho_band_label"]) == {""}
     assert BAND_LABEL in explicit.scenario_note and "Beta" not in no_band.scenario_note
+    assert "Beta" not in implicit.scenario_note
     axes = P.plot_rank_k_decay_extrapolation(explicit)
     legend = [text.get_text() for text in axes[1].get_legend().get_texts()]
     assert any(BAND_LABEL in text for text in legend)

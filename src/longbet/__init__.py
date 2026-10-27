@@ -104,6 +104,7 @@ from longbet._rank_k import (
 from longbet._rank_k_multi import (
     CrossOutcomeCorrelationResult,
     ImanConoverResult,
+    MultiArmMultiOutcomeReconciliationResult,
     Nested3ArmMultiReconciliationResult,
     RankKConvergenceCheck,
     check_rank_k_convergence,
@@ -111,7 +112,14 @@ from longbet._rank_k_multi import (
     ge_revenue_draws,
     iman_conover_couple,
     paid_winsor_cap,
+    reconcile_multi_arm_multi_outcome_draws,
     reconcile_nested_3arm_multi_draws,
+)
+from longbet._rank_k_multi_arm import (
+    ContrastReconciliationResult,
+    MultiArmReconciliationResult,
+    SamplerDiagnostics,
+    reconcile_multi_arm_draws,
 )
 from longbet._rank_k_plots import (
     DecayExtrapolationResult,
@@ -124,6 +132,7 @@ from longbet._rank_k_plots import (
     discount_weights,
     evaluate_prior_sensitivity,
     extrapolate_rank_k_decay,
+    multi_arm_decision_table,
     nested_3arm_trajectories,
     plot_rank_k_decay_extrapolation,
     plot_rank_k_prior_calibration,
@@ -168,7 +177,7 @@ from longbet._stability import (
     wearout_ancova,
 )
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 
 def build_causal_timesfm_features(*args, **kwargs):  # pragma: no cover - thin deprecated alias
@@ -191,6 +200,7 @@ __all__ = [
     "ROLLOUT_COLORS",
     "BlockAccumulator",
     "CausalFeatures",
+    "ContrastReconciliationResult",
     "CrossOutcomeCorrelationResult",
     "LateContextSpec",
     "ConditionalEffect",
@@ -213,6 +223,8 @@ __all__ = [
     "LongBetMulti",
     "LongBetMultiPrediction",
     "LongBetPrediction",
+    "MultiArmMultiOutcomeReconciliationResult",
+    "MultiArmReconciliationResult",
     "Nested3ArmMultiReconciliationResult",
     "Nested3ArmReconciliationResult",
     "PooledRetentionResult",
@@ -229,6 +241,7 @@ __all__ = [
     "RequiredPersistenceResult",
     "RetentionRuleEvaluation",
     "RetentionRuleSpec",
+    "SamplerDiagnostics",
     "SlopeCorrelationResult",
     "StabilityResult",
     "StabilityWarning",
@@ -275,6 +288,7 @@ __all__ = [
     "late_context_evidence",
     "load_multi_npz",
     "load_npz",
+    "multi_arm_decision_table",
     "nested_3arm_trajectories",
     "offer_effect_on_outcome",
     "orthonormal_exposure_basis",
@@ -295,6 +309,8 @@ __all__ = [
     "pseudo_horizon_separation",
     "rank_k_placebo_audit",
     "rank_k_transport_audit",
+    "reconcile_multi_arm_draws",
+    "reconcile_multi_arm_multi_outcome_draws",
     "reconcile_nested_3arm_draws",
     "reconcile_nested_3arm_monthly_draws",
     "reconcile_nested_3arm_multi_draws",

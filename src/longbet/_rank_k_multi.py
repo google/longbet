@@ -43,6 +43,7 @@ from longbet._rank_k_multi_arm import (
     _ArmVarianceArray,
     _build_support_inequalities,
     _chain_order_as_poset,
+    _empirical_bayes_scale,
     _draw_prior_mu,
     _enumerate_linear_extensions,
     _hit_and_run_slice_sampler,
@@ -1663,9 +1664,20 @@ def _sample_synthetic_composite_multi_arm(
         sc_vec = np.asarray(comp_scales, dtype=np.float64)
         sub_target = target_corr[np.ix_(idx_list, idx_list)]
         scale_val = math.sqrt(max(float(sc_vec @ sub_target @ sc_vec), 1e-12))
+    elif comp_prior_scale == "empirical_bayes" and prior_mode in _BUNDLE_PRIOR_MODES:
+        scale_val = _empirical_bayes_scale(
+            t_hat=float(mu_hat_comp[-1]),
+            s_lik=math.sqrt(max(float(sigma_lik_comp[-1, -1]), 1e-24)),
+            family=prior_mode,
+            floor=math.sqrt(max(float(v_comp[-1] + v_comp[0]), 1e-12)),
+            spike_prob=float(spike_prob) if spike_mode else None,
+        )
     elif isinstance(comp_prior_scale, str):
         if comp_prior_scale != "in_sample":
-            raise ValueError(f"composite prior scale must be > 0 or 'in_sample'; got {comp_prior_scale!r}")
+            raise ValueError(
+                "composite prior scale must be > 0, 'in_sample' or 'empirical_bayes' (bundle priors); "
+                f"got {comp_prior_scale!r}"
+            )
         scale_val = math.sqrt(max(float(v_comp[-1] + v_comp[0]), 1e-12))
     else:
         scale_val = float(comp_prior_scale)
@@ -2223,6 +2235,8 @@ def reconcile_multi_arm_multi_outcome_draws(
                 comp_diag = rec_comp_direct.sampler_diagnostics
                 comp_spike_weight = rec_comp_direct.spike_posterior_prob
             else:
+                if comp_scale_arg is None and isinstance(scales_arg, str) and scales_arg == "empirical_bayes":
+                    comp_scale_arg = "empirical_bayes"
                 (
                     comp_mu_raw,
                     comp_mu_hat,

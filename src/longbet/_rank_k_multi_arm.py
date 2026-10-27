@@ -169,6 +169,114 @@ def _spike_slab_mix(
     return post_mu, weight
 
 
+def _log_marginal_1d(
+    sigma: float,
+    t_hat: float,
+    s_lik: float,
+    family: str,
+    *,
+    low: float = 0.0,
+    high: float = math.inf,
+    mean: float = 0.0,
+    spike_prob: float | None = None,
+) -> float:
+    """Log marginal likelihood ``log int p(tau; sigma) N(t_hat; tau, s_lik^2) dtau`` of one coordinate.
+
+    Closed form for the half-normal (skew-normal convolution) and the untruncated normal;
+    a fine-grid quadrature otherwise (half-Student-t / gamma bundle families, truncated or
+    shifted normals). A spike at zero with probability ``spike_prob`` is mixed in exactly.
+
+    Args:
+      sigma: Prior scale.
+      t_hat: Likelihood mean of the coordinate.
+      s_lik: Likelihood standard deviation of the coordinate.
+      family: ``"bundle_halfnormal"``, ``"bundle_halfstudentt"``, ``"bundle_gamma_spike"``,
+        ``"halfnormal"`` or ``"normal"`` (truncated to ``[low, high]`` with ``mean``).
+      low: Lower truncation of the normal families.
+      high: Upper truncation of the normal families.
+      mean: Prior mean of the normal families.
+      spike_prob: Optional prior probability of a point mass at zero.
+
+    Returns:
+      The log marginal likelihood.
+    """
+    sig = max(float(sigma), 1e-300)
+    s_l = max(float(s_lik), 1e-300)
+    t_v = float(t_hat)
+    halfnormal_like = family in ("bundle_halfnormal", "halfnormal") or (
+        family == "normal" and low == 0.0 and math.isinf(high) and mean == 0.0
+    )
+    if halfnormal_like and low == 0.0 and math.isinf(high) and mean == 0.0:
+        tot_sd = math.sqrt(sig**2 + s_l**2)
+        log_m = (
+            math.log(2.0)
+            + float(sp_stats.norm.logpdf(t_v, loc=0.0, scale=tot_sd))
+            + float(sp_special.log_ndtr(t_v * sig / (s_l * tot_sd)))
+        )
+    elif family == "normal" and math.isinf(low) and math.isinf(high):
+        log_m = float(sp_stats.norm.logpdf(t_v, loc=float(mean), scale=math.sqrt(sig**2 + s_l**2)))
+    else:
+        if family.startswith("bundle_"):
+            g_lo, g_hi = 0.0, max(t_v + 12.0 * s_l, 40.0 * sig, 1e-12)
+        else:
+            g_lo = max(low, min(t_v - 12.0 * s_l, mean - 12.0 * sig))
+            g_hi = min(high, max(t_v + 12.0 * s_l, mean + 12.0 * sig))
+        if not g_hi > g_lo:
+            return -math.inf
+        grid = np.linspace(g_lo, g_hi, 4001)[1:] if family.startswith("bundle_") else np.linspace(g_lo, g_hi, 4001)
+        if family.startswith("bundle_"):
+            log_p = _fast_bundle_prior_logpdf(family, sig, grid)
+        else:
+            a_std = (low - mean) / sig if math.isfinite(low) else -math.inf
+            b_std = (high - mean) / sig if math.isfinite(high) else math.inf
+            mass = max(float(sp_special.ndtr(b_std) - sp_special.ndtr(a_std)), 1e-300)
+            log_p = sp_stats.norm.logpdf(grid, loc=mean, scale=sig) - math.log(mass)
+        log_f = log_p + sp_stats.norm.logpdf(t_v, loc=grid, scale=s_l)
+        log_m = float(sp_special.logsumexp(log_f) + math.log(float(grid[1] - grid[0])))
+    if spike_prob is not None:
+        log_spike = math.log(float(spike_prob)) + float(sp_stats.norm.logpdf(t_v, loc=0.0, scale=s_l))
+        log_m = float(np.logaddexp(log_spike, math.log1p(-float(spike_prob)) + log_m))
+    return log_m
+
+
+def _empirical_bayes_scale(
+    t_hat: float,
+    s_lik: float,
+    family: str,
+    floor: float,
+    **marginal_kwargs: Any,
+) -> float:
+    """Type-II maximum likelihood prior scale ``argmax_{sigma >= floor} log m(t_hat | sigma)``.
+
+    Args:
+      t_hat: Likelihood mean of the scale-defining coordinate (the top contrast for bundle
+        priors).
+      s_lik: Its likelihood standard deviation.
+      family: Prior family passed to :func:`_log_marginal_1d`.
+      floor: Lower bound on the scale (the in-sample noise scale by default).
+      **marginal_kwargs: Extra arguments of :func:`_log_marginal_1d`.
+
+    Returns:
+      The empirical-Bayes scale (at least ``floor``).
+    """
+    flo = max(float(floor), 1e-12)
+    upper = max(50.0 * flo, 20.0 * abs(float(t_hat)) + 20.0 * float(s_lik))
+    grid = np.geomspace(flo, upper, 161)
+    vals = np.array([_log_marginal_1d(g, t_hat, s_lik, family, **marginal_kwargs) for g in grid])
+    k_best = int(np.argmax(vals))
+    if 0 < k_best < grid.size - 1:
+        res = sp_optimize.minimize_scalar(
+            lambda lg: -_log_marginal_1d(math.exp(lg), t_hat, s_lik, family, **marginal_kwargs),
+            bounds=(math.log(grid[k_best - 1]), math.log(grid[k_best + 1])),
+            method="bounded",
+            options={"xatol": 1e-6},
+        )
+        best = math.exp(float(res.x)) if res.success and -res.fun >= vals[k_best] else float(grid[k_best])
+    else:
+        best = float(grid[k_best])
+    return max(best, flo)
+
+
 class RankKDesignWarning(UserWarning):
     """The fitted contrast design leaves part of the reconciliation unidentified.
 
@@ -2302,6 +2410,7 @@ def reconcile_multi_arm_draws(
     seed: int = 2026,
     return_prior_draws: bool = False,
     spike_prob: float = 0.5,
+    prior_scale_floor: float | None = None,
     _force_general: bool = False,
 ) -> MultiArmReconciliationResult:
     """Reconcile ``P >= A - 1`` pairwise Rank-K BCF posteriors across ``A >= 2`` arms.
@@ -2340,8 +2449,12 @@ def reconcile_multi_arm_draws(
         ``"bundle_gamma_spike"``, ``"bundle_spike_halfnormal"`` (spike-and-slab: point mass at
         ``mu = 0`` with probability ``spike_prob``, else the half-normal bundle prior),
         ``"independent"``, ``"independent_halfnormal"``, ``"independent_normal"``, or ``"flat"``.
-      prior_scale: Positive float in outcome units, ``"in_sample"``, or per-arm sequence/mapping
-        for the ``independent`` prior family.
+      prior_scale: Positive float in outcome units, ``"in_sample"`` (the in-sample posterior SD
+        of the scale-defining contrast), ``"empirical_bayes"`` (Type-II maximum likelihood of the
+        scale under the Gaussian cut-space likelihood of the top contrast, or of each coordinate
+        for the ``independent`` family: closed form for half-normal / normal priors, quadrature
+        otherwise, maximized over ``sigma >= prior_scale_floor``), or per-arm sequence/mapping for
+        the ``independent`` prior family.
       prior_mean: Prior mean(s) for the ``independent`` prior family (default ``0.0``).
       split_alpha: Optional ``(A - 1,)`` concentration parameters for the chain Dirichlet split
         (default ``None``, which uses ``(1.0, ..., 1.0)``).
@@ -2382,6 +2495,8 @@ def reconcile_multi_arm_draws(
       max_iter_multiplier: Cap on slice sweeps relative to the default (default ``8``).
       seed: Random seed.
       return_prior_draws: Attach prior Mode-1 and trajectory draws to the result.
+      prior_scale_floor: Lower bound of the ``"empirical_bayes"`` scale (default: the in-sample
+        posterior SD of the scale-defining contrast, i.e. its noise scale).
       spike_prob: Prior spike probability ``pi`` of ``prior_mode="bundle_spike_halfnormal"``
         (``tau_top ~ pi delta_0 + (1 - pi) HalfNormal(prior_scale)``; default ``0.5``, which is
         also what a ``Beta(1, 1)`` prior on ``pi`` integrates to for one reconciliation). The
@@ -2559,6 +2674,7 @@ def reconcile_multi_arm_draws(
         and (arms_tuple[2], arms_tuple[1]) in results_map
         and (arms_tuple[2], arms_tuple[0]) in results_map
         and isinstance(prior_scale, (int, float, str, type(None)))
+        and prior_scale != "empirical_bayes"
         and isinstance(prior_mean, (int, float))
     )
     if can_delegate_3arm:
@@ -2730,13 +2846,24 @@ def reconcile_multi_arm_draws(
         top_idx=top_idx,
     )
 
-    def _resolve_scalar_scale(scale_arg: Any, fallback_sd: float, label: str) -> float:
+    def _resolve_scalar_scale(
+        scale_arg: Any, fallback_sd: float, label: str, eb: Mapping[str, Any] | None = None
+    ) -> float:
         if isinstance(scale_arg, str):
+            if scale_arg == "empirical_bayes":
+                if eb is None:
+                    raise ValueError(f"prior_scale='empirical_bayes' is not supported for {prior_mode!r}")
+                floor = float(prior_scale_floor) if prior_scale_floor is not None else float(fallback_sd)
+                return _empirical_bayes_scale(floor=floor, **eb)
             if scale_arg != "in_sample":
-                raise ValueError(f"prior_scale must be a positive float or 'in_sample'; got {scale_arg!r}")
+                raise ValueError(
+                    "prior_scale must be a positive float, 'in_sample' or 'empirical_bayes'; "
+                    f"got {scale_arg!r}"
+                )
             _warn_rank_k(
-                f"prior_scale='in_sample' sets the {label} to the in-sample posterior SD ({fallback_sd:.4g}). "
-                "Report it next to an out-of-sample calibrated scale."
+                f"prior_scale='in_sample' sets the {label} to the in-sample posterior SD ({fallback_sd:.4g}), "
+                "which shrinks effects that are several posterior SDs from zero toward zero. Report it "
+                "next to an out-of-sample calibrated scale, or use prior_scale='empirical_bayes'."
             )
             return float(fallback_sd)
         if scale_arg is None:
@@ -2763,7 +2890,17 @@ def reconcile_multi_arm_draws(
             in_sample_sd_top = float(
                 math.sqrt(max(float(sigma_lik[top_idx - 1, top_idx - 1]), 1e-12))
             )
-        sd_top = _resolve_scalar_scale(prior_scale, max(in_sample_sd_top, 1e-12), "bundle prior scale")
+        sd_top = _resolve_scalar_scale(
+            prior_scale,
+            max(in_sample_sd_top, 1e-12),
+            "bundle prior scale",
+            eb={
+                "t_hat": float(mu_hat[top_idx - 1]),
+                "s_lik": math.sqrt(max(float(sigma_lik[top_idx - 1, top_idx - 1]), 1e-24)),
+                "family": prior_mode,
+                "spike_prob": float(spike_prob) if spike_mode else None,
+            },
+        )
         scale_used = sd_top
 
         if topology == "chain" and monotone:
@@ -2875,9 +3012,33 @@ def reconcile_multi_arm_draws(
                 fallback_sds = [
                     max(math.sqrt(float(sigma_lik[j, j])), 1e-12) for j in range(d_dim)
                 ]
+            coord_mat = t_tree if use_increment_coords else np.eye(d_dim, dtype=np.float64)
+            if isinstance(prior_mean, Mapping):
+                mean_eb = [float(prior_mean.get(arms_tuple[a], 0.0)) for a in range(1, n_arms)]
+            elif isinstance(prior_mean, Sequence) and not isinstance(prior_mean, str):
+                mean_eb = [float(x) for x in prior_mean]
+            else:
+                mean_eb = [float(prior_mean)] * d_dim
+            low_eb = (
+                max(resolved_tau_clip[0], 0.0)
+                if prior_mode == "independent_halfnormal"
+                else resolved_tau_clip[0]
+            )
             s_pri = np.array(
                 [
-                    _resolve_scalar_scale(prior_scale, fb, f"prior SD of coord {j}")
+                    _resolve_scalar_scale(
+                        prior_scale,
+                        fb,
+                        f"prior SD of coord {j}",
+                        eb={
+                            "t_hat": float(coord_mat[j] @ mu_hat),
+                            "s_lik": math.sqrt(max(float(coord_mat[j] @ sigma_lik @ coord_mat[j]), 1e-24)),
+                            "family": "normal",
+                            "low": float(low_eb),
+                            "high": float(resolved_tau_clip[1]),
+                            "mean": mean_eb[j],
+                        },
+                    )
                     for j, fb in enumerate(fallback_sds)
                 ],
                 dtype=np.float64,

@@ -402,7 +402,7 @@ def _log_prior_tau_64(
 
     * ``0`` Normal(prior_mean, prior_sd^2);
     * ``1`` half-Student-t: ``x >= 0``, ``df = p1``, scale ``p2 * prior_sd``
-      (the YTLR tier: ``T^+_{2.5}(0, (0.5 sigma_0)^2)``);
+      (for example ``T^+_{2.5}(0, (0.5 sigma_0)^2)``);
     * ``2`` Gamma spike: ``x > 0``, shape ``p1``, scale ``p2 * prior_sd``
       (``Gamma(0.40, 1.60 sigma_0)``, unbounded density at 0).
     """

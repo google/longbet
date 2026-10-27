@@ -66,6 +66,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+from scipy import optimize as sp_optimize
 from scipy import special as sp_special
 from scipy import stats as sp_stats
 
@@ -362,7 +363,7 @@ class PriorTier:
 
 
 def ytlr_prior_tiers(sigma_hist: float) -> tuple[PriorTier, ...]:
-    """The four YTLR prior-sensitivity tiers for a historical benchmark scale ``sigma_hist``.
+    """The four standard bundle prior-sensitivity tiers for a historical benchmark scale ``sigma_hist``.
 
     Returns ``("Out-of-sample Half-Normal", "bundle_halfnormal", sigma_hist)``,
     ``("In-sample SE Half-Normal", "bundle_halfnormal", "in_sample")``,
@@ -1353,15 +1354,54 @@ class PriorSensitivityResult:
     extrapolated_cumulative_by_tier: dict[str, dict[str, np.ndarray]]
 
 
+def _solve_draw_wise_break_even(
+    focal_draws: np.ndarray,
+    fixed_offset: np.ndarray,
+    cost: float,
+    quantile: float = 0.50,
+    alpha_upper: float = 100.0,
+) -> float:
+    """Smallest ``alpha >= 0`` such that ``Q_q(alpha * focal_draws + fixed_offset) >= cost``."""
+
+    def _gap(alpha: float) -> float:
+        return float(np.quantile(alpha * focal_draws + fixed_offset, quantile)) - cost
+
+    if _gap(0.0) >= 0.0:
+        return 0.0
+    fine = np.linspace(0.0, min(2.0, alpha_upper), 201)
+    grid = (
+        fine
+        if alpha_upper <= 2.0
+        else np.concatenate([fine, np.geomspace(2.0, alpha_upper, 100)[1:]])
+    )
+    vals = (
+        np.quantile(grid[:, None] * focal_draws[None, :] + fixed_offset[None, :], quantile, axis=1)
+        - cost
+    )
+    hit = np.nonzero(vals >= 0.0)[0]
+    if hit.size == 0:
+        return float("inf")
+    idx = int(hit[0])
+    return float(sp_optimize.brentq(_gap, float(grid[idx - 1]), float(grid[idx]), xtol=1e-12))
+
+
 def roi_break_even_table(
-    cumulative_draws: Mapping[str, np.ndarray],
+    cumulative_draws: Mapping[str, np.ndarray] | None = None,
     *,
-    cost_grid: Sequence[float],
-    alpha_grid: Sequence[float],
-    horizon_periods: int,
+    cost_grid: Sequence[float] = (1.10, 2.85),
+    alpha_grid: Sequence[float] = (0.50, 1.00),
+    horizon_periods: int = 12,
     tier: str = "",
+    component_cum_draws: Mapping[str, np.ndarray] | Mapping[str, Mapping[str, np.ndarray]] | None = None,
+    component_weights: Mapping[str, float] | Sequence[Mapping[str, float]] | None = None,
 ) -> pd.DataFrame:
     """Commercial break-even of a cumulative effect: ``ROI > 0`` iff ``alpha * effect > cost``.
+
+    Supports both single-outcome / scalar-``alpha`` evaluation via ``cumulative_draws`` and
+    coupled multi-outcome vector-``alpha`` evaluation via ``component_cum_draws`` and
+    ``component_weights`` (evaluating ``sum_m alpha_m * Cum_m^(s) > cost`` draw by draw and
+    solving the median break-even ``alpha`` of the focal first component holding the other
+    components' weights fixed).
 
     Args:
       cumulative_draws: ``{contrast: (S,)}`` cumulative-effect draws at the decision horizon.
@@ -1369,12 +1409,17 @@ def roi_break_even_table(
       alpha_grid: Incrementality shares in ``[0, 1]`` (the fraction of the effect that is causal revenue).
       horizon_periods: Horizon of the cumulative effect, written into the table.
       tier: Tier name written into the ``tier`` column.
+      component_cum_draws: Optional coupled per-outcome cumulative draws ``{outcome: (S,)}``
+        (or ``{contrast: {outcome: (S,)}}``).
+      component_weights: Optional ``{outcome: weight}`` mapping or sequence of mappings for
+        multi-outcome vector-``alpha`` evaluation. When ``None``, the first component varies
+        over ``alpha_grid`` and remaining components have weight ``1.0``.
 
     Returns:
       pandas.DataFrame with the columns ``tier``, ``contrast``, ``horizon_periods``, ``cost``,
       ``alpha``, ``pr_roi_positive`` and ``break_even_alpha_50`` (see
-      :class:`PriorSensitivityResult`). ``break_even_alpha_50`` is ``inf`` when the median
-      cumulative effect is not positive.
+      :class:`PriorSensitivityResult`). ``break_even_alpha_50`` is ``inf`` when no non-negative
+      ``alpha`` reaches break-even at the median.
     """
     costs = tuple(_positive_scalar(c, "cost_grid entry") for c in cost_grid)
     alphas = tuple(float(a) for a in alpha_grid)
@@ -1382,19 +1427,101 @@ def roi_break_even_table(
         raise ValueError("cost_grid and alpha_grid must be non-empty")
     if any(not 0.0 <= a <= 1.0 for a in alphas):
         raise ValueError(f"alpha_grid entries must lie in [0, 1]; got {alphas}")
+
+    if component_cum_draws is None:
+        if cumulative_draws is None or not cumulative_draws:
+            raise ValueError("pass cumulative_draws or component_cum_draws")
+        rows = []
+        for contrast, draws in cumulative_draws.items():
+            arr = np.asarray(draws, dtype=np.float64)
+            if arr.ndim != 1 or arr.size < 2 or not np.all(np.isfinite(arr)):
+                raise ValueError(f"cumulative_draws[{contrast!r}] must be a finite 1-D array of draws")
+            median = float(np.median(arr))
+            for cost in costs:
+                alpha_50 = cost / median if median > 0.0 else float("inf")
+                for alpha in alphas:
+                    rows.append(
+                        {
+                            "tier": tier, "contrast": contrast, "horizon_periods": int(horizon_periods), "cost": cost,
+                            "alpha": alpha, "pr_roi_positive": float(np.mean(alpha * arr > cost)),
+                            "break_even_alpha_50": alpha_50,
+                        }
+                    )
+        return pd.DataFrame(rows)
+
+    if not isinstance(component_cum_draws, Mapping) or not component_cum_draws:
+        raise ValueError("component_cum_draws must be a non-empty mapping")
+    first_val = next(iter(component_cum_draws.values()))
+    by_contrast: dict[str, dict[str, np.ndarray]] = {}
+    if isinstance(first_val, Mapping):
+        outer_keys = tuple(str(k) for k in component_cum_draws.keys())
+        if set(outer_keys) <= set(NESTED_CONTRASTS):
+            for c_key, inner in component_cum_draws.items():
+                by_contrast[str(c_key)] = {str(m): np.asarray(v, dtype=np.float64) for m, v in inner.items()}
+        else:
+            inner_keys = tuple(str(k) for k in first_val.keys())
+            for c_key in inner_keys:
+                by_contrast[c_key] = {
+                    str(m): np.asarray(component_cum_draws[m][c_key], dtype=np.float64)
+                    for m in component_cum_draws
+                }
+    else:
+        by_contrast["AC"] = {str(m): np.asarray(v, dtype=np.float64) for m, v in component_cum_draws.items()}
+
     rows = []
-    for contrast, draws in cumulative_draws.items():
-        arr = np.asarray(draws, dtype=np.float64)
-        if arr.ndim != 1 or arr.size < 2 or not np.all(np.isfinite(arr)):
-            raise ValueError(f"cumulative_draws[{contrast!r}] must be a finite 1-D array of draws")
-        median = float(np.median(arr))
+    for contrast, comp_map in by_contrast.items():
+        if not comp_map:
+            raise ValueError(f"component_cum_draws for contrast {contrast!r} must not be empty")
+        comp_names = tuple(comp_map.keys())
+        draw_sizes: set[int] = set()
+        for m_name, arr in comp_map.items():
+            if arr.ndim != 1 or arr.size < 2 or not np.all(np.isfinite(arr)):
+                raise ValueError(f"component_cum_draws[{m_name!r}] must be a finite 1-D array with >= 2 draws")
+            draw_sizes.add(int(arr.size))
+        if len(draw_sizes) != 1:
+            raise ValueError(f"all outcomes in component_cum_draws must share the same draw count S; got {sorted(draw_sizes)}")
+
+        focal = comp_names[0]
+        if component_weights is None:
+            base_non_focal = {m: 1.0 for m in comp_names[1:]}
+            weight_specs = [{focal: a, **base_non_focal} for a in alphas]
+        elif isinstance(component_weights, Mapping):
+            base_non_focal = {m: float(component_weights.get(m, 1.0)) for m in comp_names[1:]}
+            if focal in component_weights and float(component_weights[focal]) not in alphas:
+                weight_specs = [{focal: float(component_weights[focal]), **base_non_focal}]
+            else:
+                weight_specs = [{focal: a, **base_non_focal} for a in alphas]
+        else:
+            weight_specs = [
+                {m: float(w_map.get(m, 1.0)) for m in comp_names}
+                for w_map in component_weights
+            ]
+            if not weight_specs:
+                raise ValueError("component_weights sequence must not be empty")
+
+        focal_arr = comp_map[focal]
+        alpha50_cache: dict[tuple[float, tuple[float, ...]], float] = {}
         for cost in costs:
-            alpha_50 = cost / median if median > 0.0 else float("inf")
-            for alpha in alphas:
+            for w_spec in weight_specs:
+                non_focal_key = (cost, tuple(float(w_spec[m]) for m in comp_names[1:]))
+                if non_focal_key not in alpha50_cache:
+                    fixed_offset = sum(
+                        (w_spec[m] * comp_map[m] for m in comp_names[1:]),
+                        start=np.zeros_like(focal_arr),
+                    )
+                    alpha50_cache[non_focal_key] = _solve_draw_wise_break_even(
+                        focal_arr, fixed_offset, cost, quantile=0.50
+                    )
+                alpha_50 = alpha50_cache[non_focal_key]
+                ge_rev = sum(w_spec[m] * comp_map[m] for m in comp_names)
                 rows.append(
                     {
-                        "tier": tier, "contrast": contrast, "horizon_periods": int(horizon_periods), "cost": cost,
-                        "alpha": alpha, "pr_roi_positive": float(np.mean(alpha * arr > cost)),
+                        "tier": tier,
+                        "contrast": contrast,
+                        "horizon_periods": int(horizon_periods),
+                        "cost": cost,
+                        "alpha": float(w_spec[focal]),
+                        "pr_roi_positive": float(np.mean(ge_rev > cost)),
                         "break_even_alpha_50": alpha_50,
                     }
                 )

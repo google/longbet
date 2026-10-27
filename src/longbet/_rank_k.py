@@ -3879,7 +3879,7 @@ _BUNDLE_PRIOR_MODES = ("bundle_halfnormal", "bundle_halfstudentt", "bundle_gamma
 
 
 def _draw_bundle_prior(rng: np.random.Generator, prior_mode: str, sd_ac: float, n: int) -> np.ndarray:
-    """Draw the total-bundle Mode-1 prior ``tau_{AC,1}`` for the three bundle families (YTLR tiers)."""
+    """Draw the total-bundle Mode-1 prior ``tau_{AC,1}`` for the three bundle prior families."""
     if prior_mode == "bundle_halfstudentt":
         return np.abs(rng.standard_t(2.5, size=n)) * (0.50 * sd_ac)
     if prior_mode == "bundle_gamma_spike":
@@ -4308,3 +4308,17 @@ def fit_rank_k_hybrid(
         compute_rhat=compute_rhat,
         compute_ess=compute_ess,
     )
+
+
+from longbet._rank_k_multi import (  # noqa: E402
+    CrossOutcomeCorrelationResult,
+    ImanConoverResult,
+    Nested3ArmMultiReconciliationResult,
+    RankKConvergenceCheck,
+    check_rank_k_convergence,
+    estimate_cross_outcome_correlation,
+    ge_revenue_draws,
+    iman_conover_couple,
+    paid_winsor_cap,
+    reconcile_nested_3arm_multi_draws,
+)

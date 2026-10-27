@@ -1,6 +1,6 @@
 {
   "jax": "0.11.2",
-  "platform": "Linux-7.1.6-1rodete1-amd64-x86_64-with-glibc2.43",
+  "platform": "Linux-x86_64-with-glibc2.43",
   "machine": "x86_64",
   "repo": "pkg"
 }

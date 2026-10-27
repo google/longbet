@@ -6,7 +6,7 @@
 (b) validation errors of masked panels;
 (c) unit tests of the event-time projection (known coordinates recovered under partial
     support, correction exactly 0 under full support, weights equal to the paper's);
-(d) recovery of the population 12-period effect on a geometric-decay DGP with YTLR-like
+(d) recovery of the population 12-period effect on a geometric-decay DGP with administrative
     censoring (fast smoke here, 100 replications under ``-m slow``);
 (e) masked 3-arm reconciliation additivity;
 (f) size and power of the transport audit.
@@ -65,7 +65,7 @@ def _quiet_fit(y, z, x, cfg, **kw):
 
 
 def censored_dgp(seed, *, N=160, t0=5, H=15, rho=0.85, beta0=1.0, beta1=0.5, sigma=1.0, short_amp=1.0, p_short=0.4):
-    """Event-time panel with geometric decay, unit / period effects and YTLR-like censoring.
+    """Event-time panel with geometric decay, unit / period effects and administrative censoring.
 
     ``L_i`` is 5..7 for a share ``p_short`` of the units and 8..15 otherwise; the short
     units' effect amplitude is multiplied by ``short_amp`` (1: no cohort-by-event-time

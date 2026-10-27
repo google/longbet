@@ -181,6 +181,10 @@ class SamplerDiagnostics:
       r_hat_per_param: Per-coordinate split R-hat tuple of length ``A - 1``.
       n_proposals: Number of importance proposals or total MCMC evaluations.
       fallback_triggered: ``True`` if ``sampler="auto"`` fell back from SIR to slice.
+      n_iterations: Slice sampler sweeps per chain actually run (burn-in included; ``0`` for
+        SIR). Larger than the default when ``auto_continue`` appended blocks.
+      converged: Whether the slice sampler met the ``auto_continue`` targets (split R-hat and
+        bulk ESS); ``None`` when ``auto_continue`` was off or SIR was used.
     """
 
     method: str
@@ -190,6 +194,8 @@ class SamplerDiagnostics:
     r_hat_per_param: tuple[float, ...] = ()
     n_proposals: int = 0
     fallback_triggered: bool = False
+    n_iterations: int = 0
+    converged: bool | None = None
 
     @property
     def rhat(self) -> float:
@@ -206,6 +212,8 @@ class SamplerDiagnostics:
             "r_hat_per_param": self.r_hat_per_param,
             "n_proposals": self.n_proposals,
             "fallback_triggered": self.fallback_triggered,
+            "n_iterations": self.n_iterations,
+            "converged": self.converged,
         }
 
     def __getitem__(self, key: str) -> Any:
@@ -231,6 +239,8 @@ class SamplerDiagnostics:
             "r_hat_per_param",
             "n_proposals",
             "fallback_triggered",
+            "n_iterations",
+            "converged",
         )
 
     def items(self) -> tuple[tuple[str, Any], ...]:
@@ -1709,11 +1719,48 @@ def _slice_posterior_nd(
     num_burnin: int = 200,
     thin: int = 2,
     lik_logpdf: Any = None,
-) -> tuple[np.ndarray, np.ndarray, tuple[float, ...], tuple[float, ...], int]:
+    auto_continue: bool = False,
+    target_rhat: float = 1.01,
+    target_ess: float = 400.0,
+    max_iter_multiplier: float = 8.0,
+    return_info: bool = False,
+) -> Any:
     """Vectorized multi-chain analytical-polyhedron hit-and-run slice sampler in ``R^d``.
 
-    ``lik_logpdf`` optionally replaces the Gaussian ``N(mu_lik, sigma_lik)`` log likelihood in
-    the target; the Gaussian is still used to initialize and precondition the chains.
+    With ``auto_continue=False`` (the 0.9.0 behavior) the chains run ``num_burnin`` sweeps
+    plus ``ceil(n_draws / num_chains) * thin`` recorded sweeps. With ``auto_continue=True``
+    the same first block is run (so a run that is already converged is bit-identical to
+    0.9.0) and further blocks of the same length are appended until the returned draws
+    reach split R-hat ``<= target_rhat`` and bulk ESS ``>= min(target_ess, 0.75 * n_draws)``
+    on every coordinate, or the total number of sweeps reaches ``max_iter_multiplier`` times
+    the default, in which case a :class:`RankKConfigWarning` is emitted. After ``k >= 2``
+    blocks the first ``floor(k / 2)`` blocks are discarded as extra warm-up and the
+    remaining draws are thinned evenly back to ``ceil(n_draws / num_chains)`` per chain.
+
+    Args:
+      rng: Random generator.
+      prior_draw: Callable ``n -> (n, d)`` prior draws.
+      prior_logpdf: Callable ``(N, d) -> (N,)`` prior log density.
+      mu_lik: ``(d,)`` Gaussian likelihood mean.
+      sigma_lik: ``(d, d)`` Gaussian likelihood covariance.
+      a_ineq: ``(R, d)`` support inequalities ``a_ineq @ mu >= b_ineq``.
+      b_ineq: ``(R,)`` inequality offsets.
+      n_draws: Number of pooled posterior draws to return.
+      num_chains: Number of parallel chains.
+      num_burnin: Burn-in sweeps per chain.
+      thin: Thinning interval of the first block.
+      lik_logpdf: Optional replacement of the Gaussian ``N(mu_lik, sigma_lik)`` log likelihood
+        in the target; the Gaussian is still used to initialize and precondition the chains.
+      auto_continue: Continue in blocks until the convergence targets are met.
+      target_rhat: Maximum split R-hat target for ``auto_continue``.
+      target_ess: Minimum bulk ESS target for ``auto_continue``.
+      max_iter_multiplier: Cap on total sweeps as a multiple of the default sweeps.
+      return_info: Also return a dict with ``n_iterations`` (sweeps per chain),
+        ``n_blocks`` and ``converged``.
+
+    Returns:
+      ``(pooled, prior_inside, ess_per_param, rhat_per_param, n_evals)`` and, when
+      ``return_info`` is set, the info dict as a sixth element.
     """
     d_dim = int(mu_lik.shape[0])
     n_chains = max(int(num_chains), 2)
@@ -1901,7 +1948,47 @@ def _slice_posterior_nd(
     chain_traces = np.zeros((n_chains, draws_per_chain, d_dim), dtype=np.float64)
     kept_idx = 0
 
-    for sweep in range(total_sweeps):
+    # Auto-continuation state: extra blocks of ``draws_per_chain * thin`` sweeps are appended
+    # lazily by ``_sweep_schedule`` until the selected draws meet the convergence targets.
+    n_thin = max(int(thin), 1)
+    block_sweeps = draws_per_chain * n_thin
+    max_sweeps = max(int(math.floor(float(max_iter_multiplier) * total_sweeps)), total_sweeps)
+    ess_goal = min(float(target_ess), 0.75 * float(n_draws))
+    extra_traces: list[np.ndarray] = []
+    auto_state: dict[str, Any] = {"converged": None, "n_sweeps": total_sweeps}
+    compute_rhat, compute_ess = _get_rhat_ess()
+
+    def _select_traces() -> np.ndarray:
+        blocks = [chain_traces, *extra_traces]
+        if len(blocks) == 1:
+            return chain_traces
+        pool = np.concatenate(blocks[len(blocks) // 2 :], axis=1)
+        sel = np.round(np.linspace(0.0, pool.shape[1] - 1.0, draws_per_chain)).astype(np.int64)
+        return pool[:, sel, :]
+
+    def _targets_met() -> bool:
+        sel_traces = _select_traces()
+        rh = [float(compute_rhat(sel_traces[:, :, j])) for j in range(d_dim)]
+        es = [float(compute_ess(sel_traces[:, :, j])) for j in range(d_dim)]
+        ok = all(math.isfinite(r) and r <= float(target_rhat) for r in rh) and all(
+            math.isfinite(e) and e >= ess_goal for e in es
+        )
+        auto_state["converged"] = bool(ok)
+        return bool(ok)
+
+    def _sweep_schedule() -> Iterator[int]:
+        yield from range(total_sweeps)
+        if not auto_continue:
+            return
+        s_idx = total_sweeps
+        while not _targets_met() and s_idx + block_sweeps <= max_sweeps:
+            extra_traces.append(np.zeros((n_chains, draws_per_chain, d_dim), dtype=np.float64))
+            for _ in range(block_sweeps):
+                yield s_idx
+                s_idx += 1
+            auto_state["n_sweeps"] = s_idx
+
+    for sweep in _sweep_schedule():
         for dir_step in range(d_dim + 1):
             if dir_step < d_dim:
                 raw_z = rng.standard_normal((n_chains, d_dim))
@@ -1998,12 +2085,30 @@ def _slice_posterior_nd(
                     if np.any(collapsed):
                         active[rej_chains[collapsed]] = False
 
-        if sweep >= int(num_burnin) and (sweep - int(num_burnin)) % max(int(thin), 1) == 0:
+        if sweep >= total_sweeps:
+            off_blk, off_pos = divmod(sweep - total_sweeps, block_sweeps)
+            if off_pos % n_thin == 0:
+                extra_traces[off_blk][:, off_pos // n_thin, :] = _z_to_mu(x_cur)
+        elif sweep >= int(num_burnin) and (sweep - int(num_burnin)) % max(int(thin), 1) == 0:
             if kept_idx < draws_per_chain:
                 chain_traces[:, kept_idx, :] = _z_to_mu(x_cur)
                 kept_idx += 1
 
-    compute_rhat, compute_ess = _get_rhat_ess()
+    info = {
+        "n_iterations": int(auto_state["n_sweeps"]),
+        "n_blocks": 1 + len(extra_traces),
+        "converged": auto_state["converged"],
+    }
+    if auto_continue:
+        chain_traces = _select_traces()
+        if not auto_state["converged"]:
+            _warn_rank_k(
+                f"hit-and-run slice sampler did not reach split R-hat <= {float(target_rhat):g} and "
+                f"bulk ESS >= {ess_goal:.0f} on every coordinate within {info['n_iterations']} sweeps "
+                f"per chain ({float(max_iter_multiplier):g}x the default); increase num_burnin, thin "
+                "or max_iter_multiplier and check sampler_diagnostics."
+            )
+
     rhats: list[float] = []
     esses: list[float] = []
     for j_idx in range(d_dim):
@@ -2014,6 +2119,8 @@ def _slice_posterior_nd(
     pooled = chain_traces.reshape(-1, d_dim)[:n_draws]
     pri_samples = prior_draw(max(n_draws, 1000))
     pri_inside = pri_samples[_inside_polyhedron(pri_samples, a_ineq, b_ineq)]
+    if return_info:
+        return pooled, pri_inside, tuple(esses), tuple(rhats), n_evals, info
     return pooled, pri_inside, tuple(esses), tuple(rhats), n_evals
 
 
@@ -2030,13 +2137,24 @@ def _hit_and_run_slice_sampler(
     thin: int = 2,
     a_ineq: np.ndarray | None = None,
     b_ineq: np.ndarray | None = None,
-) -> tuple[np.ndarray, float, float]:
-    """Convenience wrapper around :func:`_slice_posterior_nd` returning ``(draws, min_ess, max_rhat)``."""
+    auto_continue: bool = False,
+    target_rhat: float = 1.01,
+    target_ess: float = 400.0,
+    max_iter_multiplier: float = 8.0,
+    return_info: bool = False,
+) -> Any:
+    """Convenience wrapper around :func:`_slice_posterior_nd` returning ``(draws, min_ess, max_rhat)``.
+
+    With ``auto_continue=True`` the chains run in blocks until split R-hat ``<= target_rhat``
+    and bulk ESS ``>= target_ess`` (capped at ``0.75 * n_draws``), up to
+    ``max_iter_multiplier`` times the default sweeps; ``return_info=True`` appends the
+    ``{"n_iterations", "n_blocks", "converged"}`` dict to the returned tuple.
+    """
     d_dim = int(mu_hat.shape[0])
     if a_ineq is None or b_ineq is None:
         a_ineq = np.zeros((0, d_dim), dtype=np.float64)
         b_ineq = np.zeros(0, dtype=np.float64)
-    pooled, _, esses, rhats, _ = _slice_posterior_nd(
+    pooled, _, esses, rhats, _, info = _slice_posterior_nd(
         rng,
         prior_draw=prior_draw,
         prior_logpdf=prior_logpdf,
@@ -2048,7 +2166,14 @@ def _hit_and_run_slice_sampler(
         num_chains=num_chains,
         num_burnin=num_warmup,
         thin=thin,
+        auto_continue=auto_continue,
+        target_rhat=target_rhat,
+        target_ess=target_ess,
+        max_iter_multiplier=max_iter_multiplier,
+        return_info=True,
     )
+    if return_info:
+        return pooled, float(min(esses)), float(max(rhats)), info
     return pooled, float(min(esses)), float(max(rhats))
 
 
@@ -2083,6 +2208,10 @@ def reconcile_multi_arm_draws(
     num_burnin: int = 200,
     num_warmup: int | None = None,
     thin: int = 2,
+    auto_continue: bool = True,
+    target_rhat: float = 1.01,
+    target_ess: float = 400.0,
+    max_iter_multiplier: float = 8.0,
     seed: int = 2026,
     return_prior_draws: bool = False,
     _force_general: bool = False,
@@ -2154,6 +2283,14 @@ def reconcile_multi_arm_draws(
         ``"sir"``, or ``"slice"``.
       num_chains: Number of parallel chains for the slice sampler (default ``4``).
       num_burnin: Burn-in sweeps per chain for the slice sampler (default ``200``).
+      auto_continue: Slice sampler only (``d >= 4`` or SIR fallback): continue the chains in
+        blocks until split R-hat ``<= target_rhat`` and bulk ESS ``>= target_ess`` (capped at
+        ``0.75 * S``) on every coordinate, up to ``max_iter_multiplier`` times the default
+        sweeps, then warn (default ``True`` since 0.10.0; ``False`` is bit-identical to 0.9.0).
+        Sweeps used are reported in ``sampler_diagnostics.n_iterations``.
+      target_rhat: Split R-hat target for ``auto_continue`` (default ``1.01``).
+      target_ess: Bulk ESS target for ``auto_continue`` (default ``400``).
+      max_iter_multiplier: Cap on slice sweeps relative to the default (default ``8``).
       seed: Random seed.
       return_prior_draws: Attach prior Mode-1 and trajectory draws to the result.
       _force_general: Bypass the ``A = 3`` legacy delegation path (for testing equivalence).
@@ -2805,7 +2942,7 @@ def reconcile_multi_arm_draws(
             )
 
     if not use_sir:
-        post_mu, pri_mu_pool, ess_per_param, rhat_per_param, n_evals = _slice_posterior_nd(
+        post_mu, pri_mu_pool, ess_per_param, rhat_per_param, n_evals, slice_info = _slice_posterior_nd(
             rng,
             prior_draw=_prior_draw,
             prior_logpdf=_prior_logpdf,
@@ -2818,6 +2955,11 @@ def reconcile_multi_arm_draws(
             num_burnin=num_burnin,
             thin=thin,
             lik_logpdf=lik_logpdf_override,
+            auto_continue=bool(auto_continue),
+            target_rhat=target_rhat,
+            target_ess=target_ess,
+            max_iter_multiplier=max_iter_multiplier,
+            return_info=True,
         )
         diag = SamplerDiagnostics(
             method="slice",
@@ -2827,6 +2969,8 @@ def reconcile_multi_arm_draws(
             r_hat_per_param=rhat_per_param,
             n_proposals=n_evals,
             fallback_triggered=fallback_triggered,
+            n_iterations=int(slice_info["n_iterations"]),
+            converged=slice_info["converged"],
         )
 
     tau_increment_draws = post_mu @ t_tree.T

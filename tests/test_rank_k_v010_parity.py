@@ -240,13 +240,17 @@ SCENARIOS: dict[str, Callable[[dict[str, Any]], dict[str, np.ndarray]]] = {
 }
 
 # Keyword arguments that restore the 0.9.0 behavior in 0.10 (ignored by 0.9.0 itself).
+_A5_OFF = {"auto_continue": False}
 V090_OPT_OUTS: dict[str, dict[str, Any]] = {
-    "mamo_bottom_up": {},
-    "mamo_coherent_total": {},
+    # A1: composite_mode is passed explicitly by the scenarios themselves.
+    "mamo_bottom_up": dict(_A5_OFF),
+    "mamo_coherent_total": dict(_A5_OFF),
     "nested3_bottom_up": {},
-    "slice_a5": {},
-    "bipartite_star": {},
-    "single_a4": {},
+    # A5: block auto-continuation of the slice sampler off.
+    "slice_a5": dict(_A5_OFF),
+    # A4: bipartite_policy="allocation" (the default) with the explicit bundle prior.
+    "bipartite_star": {**_A5_OFF, "bipartite_policy": "allocation"},
+    "single_a4": dict(_A5_OFF),
 }
 
 

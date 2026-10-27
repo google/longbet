@@ -1612,6 +1612,10 @@ def _sample_synthetic_composite_multi_arm(
     thin: int,
     seed: int,
     cover_edges: Sequence[tuple[str, str]] | None = None,
+    auto_continue: bool = False,
+    target_rhat: float = 1.01,
+    target_ess: float = 400.0,
+    max_iter_multiplier: float = 8.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, SamplerDiagnostics]:
     """Sample single-truncation ``mu_comp`` of shape ``(S, A - 1)`` from component GLS moments.
 
@@ -1743,7 +1747,7 @@ def _sample_synthetic_composite_multi_arm(
                 SamplerDiagnostics(method="sir", ess=sir_ess, r_hat=1.0),
             )
 
-    post_mu, slice_ess, slice_rhat = _hit_and_run_slice_sampler(
+    post_mu, slice_ess, slice_rhat, slice_info = _hit_and_run_slice_sampler(
         rng,
         prior_draw=_p_draw,
         prior_logpdf=_p_logpdf,
@@ -1755,6 +1759,11 @@ def _sample_synthetic_composite_multi_arm(
         thin=thin,
         a_ineq=a_ineq,
         b_ineq=b_ineq,
+        auto_continue=auto_continue,
+        target_rhat=target_rhat,
+        target_ess=target_ess,
+        max_iter_multiplier=max_iter_multiplier,
+        return_info=True,
     )
     return (
         post_mu,
@@ -1762,7 +1771,13 @@ def _sample_synthetic_composite_multi_arm(
         sigma_lik_comp,
         v_comp,
         scale_val,
-        SamplerDiagnostics(method="slice", ess=slice_ess, r_hat=slice_rhat),
+        SamplerDiagnostics(
+            method="slice",
+            ess=slice_ess,
+            r_hat=slice_rhat,
+            n_iterations=int(slice_info["n_iterations"]),
+            converged=slice_info["converged"],
+        ),
     )
 
 
@@ -1866,6 +1881,10 @@ def reconcile_multi_arm_multi_outcome_draws(
     num_chains: int = 4,
     num_warmup: int = 500,
     thin: int = 2,
+    auto_continue: bool = True,
+    target_rhat: float = 1.01,
+    target_ess: float = 400.0,
+    max_iter_multiplier: float = 8.0,
     seed: int = 0,
     return_prior_draws: bool = False,
 ) -> MultiArmMultiOutcomeReconciliationResult:
@@ -1924,6 +1943,12 @@ def reconcile_multi_arm_multi_outcome_draws(
       num_chains: Number of parallel hit-and-run slice chains (default ``4``).
       num_warmup: Warmup sweeps per slice chain (default ``500``).
       thin: Thinning interval per slice chain (default ``2``).
+      auto_continue: Continue slice chains in blocks until split R-hat ``<= target_rhat`` and
+        bulk ESS ``>= target_ess`` (see :func:`reconcile_multi_arm_draws`; default ``True``
+        since 0.10.0, ``False`` is bit-identical to 0.9.0).
+      target_rhat: Split R-hat target for ``auto_continue`` (default ``1.01``).
+      target_ess: Bulk ESS target for ``auto_continue`` (default ``400``).
+      max_iter_multiplier: Cap on slice sweeps relative to the default (default ``8``).
       seed: Random seed.
       return_prior_draws: Attach prior Mode-1 and trajectory draws when ``True``.
 
@@ -2032,6 +2057,10 @@ def reconcile_multi_arm_multi_outcome_draws(
             num_chains=num_chains,
             num_warmup=num_warmup,
             thin=thin,
+            auto_continue=auto_continue,
+            target_rhat=target_rhat,
+            target_ess=target_ess,
+            max_iter_multiplier=max_iter_multiplier,
             seed=int(seed) + 1009 * idx,
             return_prior_draws=return_prior_draws,
         )
@@ -2149,6 +2178,10 @@ def reconcile_multi_arm_multi_outcome_draws(
                     num_chains=num_chains,
                     num_warmup=num_warmup,
                     thin=thin,
+                    auto_continue=auto_continue,
+                    target_rhat=target_rhat,
+                    target_ess=target_ess,
+                    max_iter_multiplier=max_iter_multiplier,
                     seed=int(seed) + 20011 + 997 * comp_idx,
                     return_prior_draws=return_prior_draws,
                 )
@@ -2187,6 +2220,10 @@ def reconcile_multi_arm_multi_outcome_draws(
                     thin=thin,
                     seed=int(seed) + 20011 + 997 * comp_idx,
                     cover_edges=cover_edges_eff,
+                    auto_continue=auto_continue,
+                    target_rhat=target_rhat,
+                    target_ess=target_ess,
+                    max_iter_multiplier=max_iter_multiplier,
                 )
 
             comp_mu_full_raw = np.column_stack([np.zeros(n_draws, dtype=np.float64), comp_mu_raw])

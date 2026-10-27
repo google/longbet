@@ -23,6 +23,8 @@ $$\hat{\boldsymbol{\mu}} = (\mathbf{B}^\top \mathbf{B})^{-1} \mathbf{B}^\top \ha
 
 with cycle discrepancy diagnostic $r_{\text{cycle}} = \|\hat{\mathbf{y}} - \mathbf{B}\hat{\boldsymbol{\mu}}\|_2 / \max(\|\hat{\mathbf{y}}\|_2, 10^{-12})$.
 
+Since 0.10.0, `projection="huber"` (opt-in) replaces the Euclidean projection by iteratively reweighted least squares $\hat{\boldsymbol{\mu}} = (\mathbf{B}^\top\mathbf{W}\mathbf{B})^{-1}\mathbf{B}^\top\mathbf{W}\hat{\mathbf{y}}$ with Huber weights $w_p = \min(1, 1.345 / |r_p / \hat{s}|)$ on the cycle residual $\mathbf{r} = \hat{\mathbf{y}} - \mathbf{B}\hat{\boldsymbol{\mu}}$, $\hat{s} = 1.4826\,\operatorname{MAD}(\mathbf{r})$. Under the exact shared-arm model $\hat{\mathbf{y}} \in \operatorname{col}(\mathbf{B})$, all weights are one and Proposition 1 is unchanged; a single corrupted fit is down-weighted and reported in `flagged_pairs` (with `projection_weights`). $\boldsymbol{\Sigma}_{\text{lik}}$ is unchanged, since any weighted projection of a column-space vector has the same sampling covariance.
+
 ### Arm-Variance Recovery: Non-Bipartite vs. Bipartite Contrast Graphs
 
 Each pairwise fit $p = (j_p, \ell_p)$ provides a Mode-1 posterior variance $s_p^2 \approx v_{j_p} + v_{\ell_p}$, defining the unsigned incidence system $\mathbf{A}_{\text{var}} \mathbf{v} \approx \mathbf{s}^2$ with $\mathbf{A}_{\text{var}} \in \{0, 1\}^{P \times A}$:

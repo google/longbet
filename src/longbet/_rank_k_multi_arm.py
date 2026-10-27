@@ -93,6 +93,8 @@ _ALL_PRIOR_MODES = (*_BUNDLE_PRIOR_MODES, *_SPIKE_PRIOR_MODES, *_INDEPENDENT_PRI
 _TOPOLOGIES = ("chain", "poset")
 _SAMPLERS = ("auto", "sir", "slice")
 _BIPARTITE_POLICIES = ("allocation", "conservative", "marginalize")
+_PROJECTIONS = ("ols", "huber")
+_HUBER_K = 1.345
 # Prior family used when ``prior_mode=None`` on a non-bipartite / bipartite contrast graph.
 # The bipartite default only moves away from the bundle prior if the Tier A v2 C13' gate
 # (reconciled RMSE <= naive, Cov95 >= 0.93) is met by the independent family.
@@ -584,6 +586,10 @@ class MultiArmReconciliationResult:
         ``"marginalize"``, which integrates ``xi`` uniformly over ``null_shift_interval``).
       spike_posterior_prob: Posterior probability of the spike ``mu = 0`` under a
         spike-and-slab bundle prior (``None`` for other priors).
+      projection: Cut-space projection used for ``mu_hat`` (``"ols"`` or ``"huber"``).
+      projection_weights: ``{pair: weight}`` final IRLS Huber weights (``None`` for ``"ols"``).
+      flagged_pairs: Fitted pairs down-weighted by the robust projection (weight ``< 1``),
+        most down-weighted first.
     """
 
     arms: tuple[str, ...]
@@ -619,6 +625,9 @@ class MultiArmReconciliationResult:
     null_shift_interval: tuple[float, float] | None = None
     null_shift: float | None = None
     spike_posterior_prob: float | None = None
+    projection: str = "ols"
+    projection_weights: dict[tuple[str, str], float] | None = None
+    flagged_pairs: tuple[tuple[str, str], ...] = ()
 
     @property
     def all_pairs(self) -> tuple[tuple[str, str], ...]:
@@ -1616,6 +1625,54 @@ def _sigma_lik_from_arm_variances(v_vec: np.ndarray) -> np.ndarray:
     return np.diag(v_arr[1:]) + float(v_arr[0]) * np.ones((d_dim, d_dim), dtype=np.float64)
 
 
+def _huber_cut_space_projection(
+    b_cut: np.ndarray,
+    y_hat: np.ndarray,
+    s_pair: np.ndarray,
+    *,
+    huber_k: float = _HUBER_K,
+    max_iter: int = 200,
+    tol: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Robust cut-space projection by IRLS with Huber weights on the cycle residual.
+
+    Starts from the Euclidean projection ``mu = (B'B)^{-1} B' y`` and iterates
+    ``mu <- (B' W B)^{-1} B' W y`` with ``w_p = min(1, k / |r_p / scale|)``,
+    ``r = y - B mu``, ``k = 1.345`` and ``scale = 1.4826 * MAD(r)`` (floored at ``1e-6`` times
+    the median pairwise posterior SD). Under the exact shared-arm model ``y`` lies in the
+    column space of ``B``, every residual is zero, all weights are one and the Euclidean
+    projection (Proposition 1) is returned unchanged.
+
+    Args:
+      b_cut: ``(P, A - 1)`` reduced cut matrix.
+      y_hat: ``(P,)`` pairwise Mode-1 posterior means.
+      s_pair: ``(P,)`` pairwise posterior SDs (only for the scale floor).
+      huber_k: Huber tuning constant.
+      max_iter: Maximum IRLS iterations.
+      tol: Convergence tolerance on ``mu``.
+
+    Returns:
+      ``(mu_hat, weights, scale)``.
+    """
+    btb = b_cut.T @ b_cut
+    mu = np.linalg.solve(btb, b_cut.T @ y_hat)
+    weights = np.ones(y_hat.shape[0], dtype=np.float64)
+    floor = 1e-6 * max(float(np.median(s_pair)), 1e-12)
+    scale = floor
+    for _ in range(int(max_iter)):
+        resid = y_hat - b_cut @ mu
+        scale = max(1.4826 * float(np.median(np.abs(resid - np.median(resid)))), floor)
+        u_abs = np.abs(resid) / scale
+        weights = np.where(u_abs <= huber_k, 1.0, huber_k / np.maximum(u_abs, 1e-300))
+        bw = b_cut * weights[:, None]
+        mu_new = np.linalg.solve(b_cut.T @ bw, bw.T @ y_hat)
+        if float(np.max(np.abs(mu_new - mu))) <= tol * max(1.0, float(np.max(np.abs(mu)))):
+            mu = mu_new
+            break
+        mu = mu_new
+    return mu, weights, scale
+
+
 def _build_support_inequalities(
     n_arms: int,
     topology: str,
@@ -2411,6 +2468,7 @@ def reconcile_multi_arm_draws(
     return_prior_draws: bool = False,
     spike_prob: float = 0.5,
     prior_scale_floor: float | None = None,
+    projection: str = "ols",
     _force_general: bool = False,
 ) -> MultiArmReconciliationResult:
     """Reconcile ``P >= A - 1`` pairwise Rank-K BCF posteriors across ``A >= 2`` arms.
@@ -2495,6 +2553,11 @@ def reconcile_multi_arm_draws(
       max_iter_multiplier: Cap on slice sweeps relative to the default (default ``8``).
       seed: Random seed.
       return_prior_draws: Attach prior Mode-1 and trajectory draws to the result.
+      projection: ``"ols"`` (default; Euclidean cut-space projection, 0.9.0) or ``"huber"``
+        (IRLS with Huber weights, ``k = 1.345``, scale ``1.4826 * MAD`` of the cycle residual,
+        so one biased pairwise fit cannot drag the whole reconciliation; the down-weighted
+        fits are reported in ``flagged_pairs`` / ``projection_weights``). Identical to
+        ``"ols"`` under the exact shared-arm model.
       prior_scale_floor: Lower bound of the ``"empirical_bayes"`` scale (default: the in-sample
         posterior SD of the scale-defining contrast, i.e. its noise scale).
       spike_prob: Prior spike probability ``pi`` of ``prior_mode="bundle_spike_halfnormal"``
@@ -2527,6 +2590,8 @@ def reconcile_multi_arm_draws(
         raise ValueError(f"prior_mode must be one of {_ALL_PRIOR_MODES}; got {prior_mode!r}")
     if sampler not in _SAMPLERS:
         raise ValueError(f"sampler must be one of {_SAMPLERS}; got {sampler!r}")
+    if projection not in _PROJECTIONS:
+        raise ValueError(f"projection must be one of {_PROJECTIONS}; got {projection!r}")
     if bipartite_policy not in _BIPARTITE_POLICIES:
         raise ValueError(
             f"bipartite_policy must be one of {_BIPARTITE_POLICIES}; got {bipartite_policy!r}"
@@ -2627,6 +2692,13 @@ def reconcile_multi_arm_draws(
     cycle_discrepancy_ratio = float(
         np.linalg.norm(y_hat - y_proj) / max(float(np.linalg.norm(y_hat)), 1e-12)
     )
+    projection_weights: dict[tuple[str, str], float] | None = None
+    flagged_pairs: tuple[tuple[str, str], ...] = ()
+    if projection == "huber":
+        mu_hat, w_proj, _ = _huber_cut_space_projection(b_cut, y_hat, np.sqrt(s_sq))
+        projection_weights = {pair: float(w) for pair, w in zip(fitted_pairs, w_proj, strict=True)}
+        order = np.argsort(w_proj, kind="stable")
+        flagged_pairs = tuple(fitted_pairs[i] for i in order if w_proj[i] < 1.0 - 1e-12)
 
     sample_sizes_vec = _infer_arm_sample_sizes(arms_tuple, results_map, arm_sample_sizes)
     arm_variances, nnls_residual = _recover_arm_variances(
@@ -2675,6 +2747,7 @@ def reconcile_multi_arm_draws(
         and (arms_tuple[2], arms_tuple[0]) in results_map
         and isinstance(prior_scale, (int, float, str, type(None)))
         and prior_scale != "empirical_bayes"
+        and projection == "ols"
         and isinstance(prior_mean, (int, float))
     )
     if can_delegate_3arm:
@@ -3467,4 +3540,7 @@ def reconcile_multi_arm_draws(
         null_shift_interval=null_interval,
         null_shift=null_shift,
         spike_posterior_prob=spike_weight,
+        projection=projection,
+        projection_weights=projection_weights,
+        flagged_pairs=flagged_pairs,
     )

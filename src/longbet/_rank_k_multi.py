@@ -1542,6 +1542,9 @@ def _permute_multi_arm_reconciliation_result(
         null_shift_interval=rec.null_shift_interval,
         null_shift=rec.null_shift,
         spike_posterior_prob=rec.spike_posterior_prob,
+        projection=rec.projection,
+        projection_weights=rec.projection_weights,
+        flagged_pairs=rec.flagged_pairs,
     )
 
 
@@ -1881,6 +1884,9 @@ def _rescale_multi_arm_outcome(
         null_shift_interval=rec.null_shift_interval,
         null_shift=rec.null_shift,
         spike_posterior_prob=rec.spike_posterior_prob,
+        projection=rec.projection,
+        projection_weights=rec.projection_weights,
+        flagged_pairs=rec.flagged_pairs,
     )
 
 
@@ -1911,6 +1917,7 @@ def reconcile_multi_arm_multi_outcome_draws(
     min_arm_var_share: float = 0.15,
     bipartite_ridge: float = 1e-2,
     bipartite_policy: str = "allocation",
+    projection: str = "ols",
     horizon: int | None = None,
     sampler: str = "auto",
     n_proposals: int = 250_000,
@@ -1974,6 +1981,9 @@ def reconcile_multi_arm_multi_outcome_draws(
       ever: Optional ``{(treated, ref): ever}`` or ``{outcome: {(treated, ref): ever}}``.
       min_arm_var_share: Floor fraction ``eta`` for non-bipartite NNLS variance recovery.
       bipartite_ridge: Ridge weight ``lambda_bip`` for bipartite variance recovery.
+      bipartite_policy: See :func:`reconcile_multi_arm_draws` (default ``"allocation"``).
+      projection: ``"ols"`` (default) or ``"huber"`` robust cut-space projection per outcome
+        (see :func:`reconcile_multi_arm_draws`).
       horizon: Optional number of post-adoption periods summed into cumulative draws.
       sampler: ``"auto"``, ``"sir"``, or ``"slice"``.
       n_proposals: Importance-sampling proposal count per outcome (default ``250_000``).
@@ -2090,6 +2100,7 @@ def reconcile_multi_arm_multi_outcome_draws(
             min_arm_var_share=min_arm_var_share,
             bipartite_ridge=bipartite_ridge,
             bipartite_policy=bipartite_policy,
+            projection=projection,
             horizon=horizon,
             sampler=sampler,
             n_proposals=int(n_proposals),
@@ -2213,6 +2224,7 @@ def reconcile_multi_arm_multi_outcome_draws(
                     min_arm_var_share=min_arm_var_share,
                     bipartite_ridge=bipartite_ridge,
                     bipartite_policy=bipartite_policy,
+                    projection=projection,
                     horizon=horizon,
                     sampler=sampler,
                     n_proposals=int(n_proposals),

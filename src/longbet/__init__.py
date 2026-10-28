@@ -178,7 +178,7 @@ from longbet._stability import (
     wearout_ancova,
 )
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 
 def build_causal_timesfm_features(*args, **kwargs):  # pragma: no cover - thin deprecated alias

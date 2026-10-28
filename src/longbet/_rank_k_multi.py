@@ -1023,7 +1023,8 @@ def reconcile_nested_3arm_multi_draws(
       results_bc: ``{outcome: RankKLongBetResult}`` for the ``B - C`` fits.
       results_ab: ``{outcome: RankKLongBetResult}`` for the ``A - B`` fits.
       results_ac: ``{outcome: RankKLongBetResult}`` for the ``A - C`` fits.
-      prior_scales: Positive float, ``"in_sample"``, or ``{outcome: scale}`` mapping.
+      prior_scales: Positive float, ``"empirical_bayes"`` (default since 0.10.0),
+        ``"in_sample"`` (0.9.0 behavior), or ``{outcome: scale}`` mapping.
       prior_mode: Bundle prior family (``"bundle_halfnormal"``, ``"bundle_halfstudentt"``,
         ``"bundle_gamma_spike"``, or ``"independent_halfnormal"``).
       share_mean_logit: Prior mean of attribution share logit (reserved for API symmetry).
@@ -1900,7 +1901,7 @@ def reconcile_multi_arm_multi_outcome_draws(
     results_by_contrast: Mapping[Any, Mapping[Any, RankKLongBetResult]] | None = None,
     topology: str = "chain",
     edges: Sequence[tuple[str, str]] | None = None,
-    prior_scales: Mapping[str, float | str] | float | str = "in_sample",
+    prior_scales: Mapping[str, float | str] | float | str = "empirical_bayes",
     prior_scale: Mapping[str, float | str] | float | str | None = None,
     prior_mode: str | None = None,
     split_alpha: Sequence[float] | float | None = None,
@@ -1961,7 +1962,8 @@ def reconcile_multi_arm_multi_outcome_draws(
       results_by_contrast: Optional ``{(treated, ref): {outcome: RankKLongBetResult}}`` mapping.
       topology: ``"chain"`` or ``"poset"``.
       edges: Spanning-tree cover edges ``[(child, parent), ...]`` when ``topology="poset"``.
-      prior_scales: Positive float, ``"in_sample"``, or ``{outcome: scale}`` mapping.
+      prior_scales: Positive float, ``"empirical_bayes"`` (default since 0.10.0),
+        ``"in_sample"`` (0.9.0 behavior), or ``{outcome: scale}`` mapping.
       prior_scale: Optional alias for ``prior_scales``.
       prior_mode: Prior family (``"bundle_halfnormal"``, ``"bundle_halfstudentt"``,
         ``"bundle_gamma_spike"``, ``"independent"``, ``"independent_halfnormal"``, or ``"flat"``).
@@ -2217,7 +2219,7 @@ def reconcile_multi_arm_multi_outcome_draws(
                     comp_scale_arg = (
                         scales_arg
                         if isinstance(scales_arg, (int, float, str))
-                        else "in_sample"
+                        else "empirical_bayes"
                     )
                 rec_comp_direct = reconcile_multi_arm_draws(
                     composite_results[comp_name],

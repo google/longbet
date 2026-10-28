@@ -2486,7 +2486,9 @@ def reconcile_multi_arm_draws(
     topology: str = "chain",
     edges: Sequence[tuple[str, str]] | None = None,
     prior_mode: str | None = None,
-    prior_scale: float | str | Sequence[float] | Mapping[str, float] | None = "in_sample",
+    prior_scale: float | str | Sequence[float] | Mapping[str, float] | None = (
+        "empirical_bayes"
+    ),
     prior_mean: float | Sequence[float] | Mapping[str, float] = 0.0,
     split_alpha: Sequence[float] | float | None = None,
     monotone: bool = True,
@@ -2559,12 +2561,12 @@ def reconcile_multi_arm_draws(
         ``"bundle_gamma_spike"``, ``"bundle_spike_halfnormal"`` (spike-and-slab: point mass at
         ``mu = 0`` with probability ``spike_prob``, else the half-normal bundle prior),
         ``"independent"``, ``"independent_halfnormal"``, ``"independent_normal"``, or ``"flat"``.
-      prior_scale: Positive float in outcome units, ``"in_sample"`` (the in-sample posterior SD
-        of the scale-defining contrast), ``"empirical_bayes"`` (Type-II maximum likelihood of the
-        scale under the Gaussian cut-space likelihood of the top contrast, or of each coordinate
-        for the ``independent`` family: closed form for half-normal / normal priors, quadrature
-        otherwise, maximized over ``sigma >= prior_scale_floor``), or per-arm sequence/mapping for
-        the ``independent`` prior family.
+      prior_scale: Positive float in outcome units, ``"empirical_bayes"`` (default since 0.10.0;
+        Type-II maximum likelihood of the scale under the Gaussian cut-space likelihood of the top
+        contrast, or of each coordinate for the ``independent`` family: closed form for half-normal
+        / normal priors, quadrature otherwise, maximized over ``sigma >= prior_scale_floor``),
+        ``"in_sample"`` (0.9.0 behavior: sets the scale to the in-sample posterior SD of the
+        scale-defining contrast), or per-arm sequence/mapping for the ``independent`` prior family.
       prior_mean: Prior mean(s) for the ``independent`` prior family (default ``0.0``).
       split_alpha: Optional ``(A - 1,)`` concentration parameters for the chain Dirichlet split
         (default ``None``, which uses ``(1.0, ..., 1.0)``).

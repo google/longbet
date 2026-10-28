@@ -95,7 +95,8 @@ def test_default_fits_match_pre_remediation_golden_fixtures(name, kind, cfg_kw, 
         kw["coords"] = p["coords"]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        res = fit(p["y"], p["z"], p["x"], cfg=RankKLongBetConfig(**cfg_kw), **kw)
+        cfg_golden = {"treated_extra_variance": False, **cfg_kw}
+        res = fit(p["y"], p["z"], p["x"], cfg=RankKLongBetConfig(**cfg_golden), **kw)
     ref = np.load(FIXTURE_DIR / f"{name}.npz")
     got = {"att_draws": res.att_draws, "catt_draws": res.catt_draws, "theta_f_draws_0": res.theta_f_draws[0]}
     for k, td in enumerate(res.mode_tau_draws):
@@ -176,23 +177,16 @@ def test_gaussian_summary_prior_update_uses_sqrt_shrinkage():
 
 
 def test_reconcile_requires_an_explicit_prior_scale_and_returns_prior_draws(res_default):
-    with pytest.raises(ValueError, match="explicit prior scale"):
-        M.reconcile_nested_3arm_draws(res_default, res_default, res_default)
-    with pytest.warns(M.RankKConfigWarning, match="in_sample"):
-        rr = M.reconcile_nested_3arm_draws(res_default, res_default, res_default, prior_scale="in_sample", n_proposals=20000)
-    a, b, c = rr  # backward-compatible unpacking
+    for bad_scale in ("in_sample", "empirical_bayes", 0.0, -1.0):
+        with pytest.raises(ValueError, match="prior_scale"):
+            M.reconcile_nested_3arm_draws(res_default, res_default, res_default, prior_scale=bad_scale)
+    rr = M.reconcile_nested_3arm_draws(res_default, res_default, res_default, seed=2026)
+    a, b, c = rr  # backward-compatible unpacking (trt_catt_bc, trt_catt_ab, trt_catt_ac)
     np.testing.assert_allclose(c, a + b, atol=1e-12)
-    rr2 = M.reconcile_nested_3arm_draws(
-        res_default, res_default, res_default, prior_scale=1.0, return_prior_draws=True, n_proposals=20000
-    )
-    assert rr2.prior_catt_ac is not None and rr2.prior_catt_ac.shape == rr2.trt_catt_ac.shape
-    assert rr2.sir_ess > 1.0 and rr2.lik_cov.shape == (2, 2)
-    # GLS point reconciliation: the equal split of the additivity discrepancy
-    m = float(np.mean(res_default.att_draws))
-    np.testing.assert_allclose(rr2.lik_mean, [m - m / 3.0, m - m / 3.0], rtol=1e-10)
-    for mode in ("bundle_halfstudentt", "bundle_gamma_spike", "independent_halfnormal"):
-        out = M.reconcile_nested_3arm_draws(res_default, res_default, res_default, prior_scale=1.0, prior_mode=mode, n_proposals=20000)
-        assert out.trt_catt_ac.shape == rr2.trt_catt_ac.shape and np.all(np.isfinite(out.trt_catt_ac))
+    assert rr.max_cycle_discrepancy < 1e-13
+    assert rr.sampler_diagnostics.converged
+    rr2 = M.reconcile_nested_3arm_draws(res_default, res_default, res_default, prior_scale=1.0, seed=2026)
+    assert rr2.trt_catt_ac.shape == rr.trt_catt_ac.shape and np.all(np.isfinite(rr2.trt_catt_ac))
 
 
 # ---- Issue 2: short cohorts ----------------------------------------------------------------------------

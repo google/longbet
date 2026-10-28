@@ -324,7 +324,7 @@ def test_config_fields_are_the_documented_options():
 
 
 def test_public_api_and_packaging():
-    assert longbet.__version__ == "0.9.0"
+    assert longbet.__version__ == "0.11.0"
     assert "RankKConfigWarning" in longbet.__all__
     assert issubclass(RankKConfigWarning, UserWarning)
     tomllib = pytest.importorskip("tomllib")

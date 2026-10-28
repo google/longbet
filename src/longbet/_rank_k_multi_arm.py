@@ -12,64 +12,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""General A-arm coherent Mode-1 and trajectory reconciliation for Rank-K BCF posteriors.
+"""Joint hierarchical Bayesian reconciliation across multi-arm posets.
 
-Generalizes :func:`longbet._rank_k.reconcile_nested_3arm_draws` from a 3-arm nested chain
-to an arbitrary number of arms ``A >= 2`` and any connected set of ``P >= A - 1`` fitted
-pairwise contrasts under chain or poset treatment topologies:
+Implements the unified v0.11 Bayesian reconciliation engine shared by both
+single-outcome (:func:`reconcile_multi_arm_draws`) and multi-outcome
+(:func:`longbet._rank_k_multi.reconcile_multi_arm_multi_outcome_draws`) studies:
 
-1. **Graph validation and spanning tree**: verifies that the fitted contrasts form a
-   connected graph on ``arms`` (with ``arms[0]`` as control), constructs the spanning tree
-   ``T`` (adjacent chain edges for ``topology="chain"``, Hasse diagram edges for
-   ``topology="poset"``), requires every tree edge to have a fitted contrast, and
-   identifies redundant contrasts.
-2. **Mode-1 likelihood (Proposition 1 & Proposition 2)**: forms the signed incidence
-   matrix ``E`` and reduced cut matrix ``B = E[:, 1:]``, computes the Euclidean cut-space
-   projection ``mu_hat = (B' B)^{-1} B' y_hat`` and cycle discrepancy diagnostic
-   ``r_cycle = ||y_hat - B mu_hat||_2 / max(||y_hat||_2, 1e-12)``, checks whether the
-   contrast graph is bipartite via 2-coloring, and recovers the arm sampling variances
-   ``v in R_+^A`` via bounded NNLS (or sample-size-informed ridge-NNLS with a
-   ``UserWarning`` when the contrast graph is bipartite).
-3. **Prior families**: supports chain bundle priors with ``Dirichlet(alpha)`` increments,
-   unique-top poset order-polytope priors via uniform linear extensions, independent
-   truncated Gaussian/half-normal priors with optional poset monotonicity, and flat
-   priors.
-4. **Dimension-adaptive posterior sampling**: uses generalized defensive-mixture SIR for
-   ``d = A - 1 <= 3`` with an effective sample size gate ``ess >= max(100, 0.02 * n_prop)``
-   and automatic fallback (or for ``d >= 4`` / ``sampler="slice"``) to a vectorized
-   multi-chain analytical-polyhedron hit-and-run slice sampler reporting split R-hat and
-   bulk ESS.
-5. **Exact trajectory cycle coherence (Proposition 3)**: projects each spanning-tree edge
-   increment draw through that edge's fit via ``_project_cohort_damped_trajectory`` and
-   synthesizes every contrast trajectory as the signed path sum on ``T`` so cycle
-   identities hold to machine precision across all triples, draws, and periods.
+1. **Window & exposure basis**: Extracts treated-average trajectory draws on
+   ``t = 1..H`` from Stage-1 ``catt_draws`` (never 15-month ``att_draws``) and
+   projects onto the Euclidean-orthonormal basis ``Psi`` of dimension ``K'``
+   whose first column is ``1_H / sqrt(H)``.
+2. **Collapsed SUR + shared-arm + composite likelihood**: Marginalizes shared
+   arm-level sampling noise ``xi_{m,a} ~ N(0, V_{m,a})`` (with cross-outcome
+   correlation ``R``) analytically when updating ``Theta``, while accounting
+   for fit-specific forest errors ``eta_{q} | omega_{q} ~ N(0, F_{q} / omega_{q})``
+   and exact linear composite measurements.
+3. **Poset-cone prior & Huang--Wand Half-t_3 scales**: Enforces cover-relation
+   monotonicity and per-period positivity in prior support (a polyhedral cone)
+   with exact cone-normalized scale updates (global Half-t_3 ``P1`` or local
+   per-cover Half-t_3 ``P2``).
+4. **Exact Pakman--Paninski (2014) truncated-Gaussian HMC**: Wall-reflecting
+   harmonic HMC in posterior-whitened coordinates across 4 chains with
+   unconditional auto-continuation until ``split-Rhat <= 1.01`` and
+   ``ESS >= 400``.
 """
 
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 import math
 from typing import Any
 import warnings
 
 import numpy as np
+from scipy import interpolate as sp_interpolate
 from scipy import optimize as sp_optimize
 from scipy import special as sp_special
 from scipy import stats as sp_stats
+from scipy.stats import qmc as sp_qmc
 
 from longbet._rank_k import (
-    _BUNDLE_PRIOR_MODES,
-    _bundle_prior_logpdf,
-    _draw_bundle_prior,
-    _get_rhat_ess,
-    _infer_panel_masks_from_result,
-    _project_cohort_damped_trajectory,
-    _warn_rank_k,
-    Nested3ArmReconciliationResult,
     RankKLongBetResult,
-    reconcile_nested_3arm_draws,
+    _infer_panel_masks_from_result,
+    orthonormal_exposure_basis,
 )
 
 __all__ = [
@@ -80,3541 +67,3055 @@ __all__ = [
     "reconcile_multi_arm_draws",
 ]
 
-_INDEPENDENT_PRIOR_MODES = (
-    "independent",
-    "independent_halfnormal",
-    "independent_normal",
-)
-# Spike-and-slab bundle priors: tau_top ~ pi delta_0 + (1 - pi) slab, increments split by the
-# slab's Dirichlet only on the slab component (v0.10 item B1).
-_SPIKE_PRIOR_MODES = ("bundle_spike_halfnormal",)
-_SPIKE_SLAB_MODE = {"bundle_spike_halfnormal": "bundle_halfnormal"}
-_ALL_PRIOR_MODES = (*_BUNDLE_PRIOR_MODES, *_SPIKE_PRIOR_MODES, *_INDEPENDENT_PRIOR_MODES, "flat")
-_TOPOLOGIES = ("chain", "poset")
-_SAMPLERS = ("auto", "sir", "slice")
-_BIPARTITE_POLICIES = ("allocation", "conservative", "marginalize")
-_PROJECTIONS = ("ols", "huber")
-_ARM_VARIANCE_SOURCES = ("backsolve", "direct")
-_HUBER_K = 1.345
-# Prior family used when ``prior_mode=None`` on a non-bipartite / bipartite contrast graph.
-# The bipartite default only moves away from the bundle prior if the Tier A v2 C13' gate
-# (reconciled RMSE <= naive, Cov95 >= 0.93) is met by the independent family.
-_DEFAULT_PRIOR_MODE = "bundle_halfnormal"
-_BIPARTITE_DEFAULT_PRIOR_MODE = "bundle_halfnormal"
-_N_NULL_GRID = 9
+_ALLOWED_SCALE_PRIORS = ("global_halft", "local_halft")
+_ALLOWED_ROBUST_ERRORS = ("t4", "mixture", "gaussian")
+_ALLOWED_MODEL_OPTION_KEYS = frozenset({
+    "scale_prior",
+    "robust_error",
+    "period_positivity",
+    "use_sur",
+    "dynamic_shrinkage",
+    "n_chains",
+    "n_warmup",
+    "n_draws_per_chain",
+    "max_continuation_rounds",
+})
 
+# Precomputed Gauss-Hermite & Gauss-Legendre rules for deterministic integrals.
+_GH16_X, _GH16_W = np.polynomial.hermite.hermgauss(16)
+_GH16_Z = _GH16_X * math.sqrt(2.0)
+_GH16_PROB = _GH16_W / math.sqrt(math.pi)
+_GL16_X, _GL16_W = np.polynomial.legendre.leggauss(16)
+_GL8_X, _GL8_W = np.polynomial.legendre.leggauss(3)
+_GL8_P0_Z = sp_special.ndtri(np.clip(0.75 + 0.25 * _GL8_X, 0.5, 1.0 - 1e-15))
 
-_NORM_PDF_LOGC = np.log(np.sqrt(2 * np.pi))
-
-
-def _fast_bundle_prior_logpdf(prior_mode: str, sd_ac: float, t: np.ndarray) -> np.ndarray:
-    """Bit-identical, scipy-free fast path of ``_bundle_prior_logpdf`` for ``bundle_halfnormal``.
-
-    Evaluates ``log 2 + (-(t / sd)^2 / 2 - log sqrt(2 pi)) - log sd`` in exactly the
-    floating-point order of ``scipy.stats.norm.logpdf`` (about 7x faster on the small arrays
-    of the slice sampler); other families defer to :func:`_bundle_prior_logpdf`.
-    """
-    if prior_mode != "bundle_halfnormal":
-        return _bundle_prior_logpdf(prior_mode, sd_ac, t)
-    t_arr = np.asarray(t, dtype=np.float64)
-    x_arr = t_arr / sd_ac
-    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        val = np.log(2.0) + (-x_arr**2 / 2.0 - _NORM_PDF_LOGC) - np.log(sd_ac)
-    return np.where(t_arr > 0.0, val, -np.inf)
-
-
-def _spike_slab_mix(
-    rng: np.random.Generator,
-    post_mu_slab: np.ndarray,
-    log_z_slab: float,
-    mu_hat: np.ndarray,
-    sigma_lik: np.ndarray,
-    spike_prob: float,
-    lik_logpdf: Any = None,
-) -> tuple[np.ndarray, float]:
-    """Mixes slab posterior draws with the point mass at ``mu = 0`` (spike-and-slab prior).
-
-    The posterior spike weight is exact given the slab evidence:
-    ``Pr(spike | y) = pi L(0) / (pi L(0) + (1 - pi) Z_slab)`` with ``L(0)`` the Gaussian
-    cut-space likelihood at ``mu = 0`` (closed form) and ``Z_slab = int p_slab(mu) L(mu) dmu``.
-
-    Args:
-      rng: Random generator for the draw-wise spike indicators.
-      post_mu_slab: ``(S, d)`` draws from the slab posterior.
-      log_z_slab: Log evidence of the slab component.
-      mu_hat: ``(d,)`` likelihood mean.
-      sigma_lik: ``(d, d)`` likelihood covariance.
-      spike_prob: Prior spike probability ``pi`` in ``(0, 1)``.
-      lik_logpdf: Optional non-Gaussian likelihood (evaluated at ``mu = 0``).
-
-    Returns:
-      ``(post_mu, spike_weight)`` where rows of ``post_mu`` drawn from the spike are zero.
-    """
-    d_dim = int(mu_hat.shape[0])
-    zero = np.zeros((1, d_dim), dtype=np.float64)
-    if lik_logpdf is None:
-        log_l0 = float(
-            sp_stats.multivariate_normal(mean=mu_hat, cov=sigma_lik, allow_singular=True).logpdf(zero[0])
-        )
-    else:
-        log_l0 = float(np.asarray(lik_logpdf(zero), dtype=np.float64).reshape(-1)[0])
-    log_a = math.log(float(spike_prob)) + log_l0
-    log_b = math.log1p(-float(spike_prob)) + float(log_z_slab)
-    if not math.isfinite(log_b):
-        weight = 1.0
-    elif not math.isfinite(log_a):
-        weight = 0.0
-    else:
-        weight = float(math.exp(log_a - np.logaddexp(log_a, log_b)))
-    is_spike = rng.random(post_mu_slab.shape[0]) < weight
-    post_mu = np.array(post_mu_slab, dtype=np.float64, copy=True)
-    post_mu[is_spike] = 0.0
-    return post_mu, weight
-
-
-def _log_marginal_1d(
-    sigma: float,
-    t_hat: float,
-    s_lik: float,
-    family: str,
-    *,
-    low: float = 0.0,
-    high: float = math.inf,
-    mean: float = 0.0,
-    spike_prob: float | None = None,
-) -> float:
-    """Log marginal likelihood ``log int p(tau; sigma) N(t_hat; tau, s_lik^2) dtau`` of one coordinate.
-
-    Closed form for the half-normal (skew-normal convolution) and the untruncated normal;
-    a fine-grid quadrature otherwise (half-Student-t / gamma bundle families, truncated or
-    shifted normals). A spike at zero with probability ``spike_prob`` is mixed in exactly.
-
-    Args:
-      sigma: Prior scale.
-      t_hat: Likelihood mean of the coordinate.
-      s_lik: Likelihood standard deviation of the coordinate.
-      family: ``"bundle_halfnormal"``, ``"bundle_halfstudentt"``, ``"bundle_gamma_spike"``,
-        ``"halfnormal"`` or ``"normal"`` (truncated to ``[low, high]`` with ``mean``).
-      low: Lower truncation of the normal families.
-      high: Upper truncation of the normal families.
-      mean: Prior mean of the normal families.
-      spike_prob: Optional prior probability of a point mass at zero.
-
-    Returns:
-      The log marginal likelihood.
-    """
-    sig = max(float(sigma), 1e-300)
-    s_l = max(float(s_lik), 1e-300)
-    t_v = float(t_hat)
-    halfnormal_like = family in ("bundle_halfnormal", "halfnormal") or (
-        family == "normal" and low == 0.0 and math.isinf(high) and mean == 0.0
-    )
-    if halfnormal_like and low == 0.0 and math.isinf(high) and mean == 0.0:
-        tot_sd = math.sqrt(sig**2 + s_l**2)
-        log_m = (
-            math.log(2.0)
-            + float(sp_stats.norm.logpdf(t_v, loc=0.0, scale=tot_sd))
-            + float(sp_special.log_ndtr(t_v * sig / (s_l * tot_sd)))
-        )
-    elif family == "normal" and math.isinf(low) and math.isinf(high):
-        log_m = float(sp_stats.norm.logpdf(t_v, loc=float(mean), scale=math.sqrt(sig**2 + s_l**2)))
-    else:
-        if family.startswith("bundle_"):
-            g_lo, g_hi = 0.0, max(t_v + 12.0 * s_l, 40.0 * sig, 1e-12)
-        else:
-            g_lo = max(low, min(t_v - 12.0 * s_l, mean - 12.0 * sig))
-            g_hi = min(high, max(t_v + 12.0 * s_l, mean + 12.0 * sig))
-        if not g_hi > g_lo:
-            return -math.inf
-        grid = np.linspace(g_lo, g_hi, 4001)[1:] if family.startswith("bundle_") else np.linspace(g_lo, g_hi, 4001)
-        if family.startswith("bundle_"):
-            log_p = _fast_bundle_prior_logpdf(family, sig, grid)
-        else:
-            a_std = (low - mean) / sig if math.isfinite(low) else -math.inf
-            b_std = (high - mean) / sig if math.isfinite(high) else math.inf
-            mass = max(float(sp_special.ndtr(b_std) - sp_special.ndtr(a_std)), 1e-300)
-            log_p = sp_stats.norm.logpdf(grid, loc=mean, scale=sig) - math.log(mass)
-        log_f = log_p + sp_stats.norm.logpdf(t_v, loc=grid, scale=s_l)
-        log_m = float(sp_special.logsumexp(log_f) + math.log(float(grid[1] - grid[0])))
-    if spike_prob is not None:
-        log_spike = math.log(float(spike_prob)) + float(sp_stats.norm.logpdf(t_v, loc=0.0, scale=s_l))
-        log_m = float(np.logaddexp(log_spike, math.log1p(-float(spike_prob)) + log_m))
-    return log_m
-
-
-def _empirical_bayes_scale(
-    t_hat: float,
-    s_lik: float,
-    family: str,
-    floor: float,
-    **marginal_kwargs: Any,
-) -> float:
-    """Type-II maximum likelihood prior scale ``argmax_{sigma >= floor} log m(t_hat | sigma)``.
-
-    Args:
-      t_hat: Likelihood mean of the scale-defining coordinate (the top contrast for bundle
-        priors).
-      s_lik: Its likelihood standard deviation.
-      family: Prior family passed to :func:`_log_marginal_1d`.
-      floor: Lower bound on the scale (the in-sample noise scale by default).
-      **marginal_kwargs: Extra arguments of :func:`_log_marginal_1d`.
-
-    Returns:
-      The empirical-Bayes scale (at least ``floor``).
-    """
-    flo = max(float(floor), 1e-12)
-    upper = max(50.0 * flo, 20.0 * abs(float(t_hat)) + 20.0 * float(s_lik))
-    grid = np.geomspace(flo, upper, 161)
-    vals = np.array([_log_marginal_1d(g, t_hat, s_lik, family, **marginal_kwargs) for g in grid])
-    k_best = int(np.argmax(vals))
-    if 0 < k_best < grid.size - 1:
-        res = sp_optimize.minimize_scalar(
-            lambda lg: -_log_marginal_1d(math.exp(lg), t_hat, s_lik, family, **marginal_kwargs),
-            bounds=(math.log(grid[k_best - 1]), math.log(grid[k_best + 1])),
-            method="bounded",
-            options={"xatol": 1e-6},
-        )
-        best = math.exp(float(res.x)) if res.success and -res.fun >= vals[k_best] else float(grid[k_best])
-    else:
-        best = float(grid[k_best])
-    return max(best, flo)
+# Contamination-mixture log-normal inflation hyperparameters (R2: median 16x var = 4x SD).
+_R2_BETA_ALPHA = 1.0
+_R2_BETA_BETA = 9.0
+_R2_LOG_INFL_MU = math.log(16.0)
+_R2_LOG_INFL_SD = 1.0
 
 
 class RankKDesignWarning(UserWarning):
-    """The fitted contrast design leaves part of the reconciliation unidentified.
-
-    Emitted by :func:`reconcile_multi_arm_draws` when the contrast graph is bipartite
-    (has no odd cycle): the arm sampling variances are then identified only up to the
-    alternating 2-coloring null direction, so the off-diagonal likelihood covariance
-    ``v_0`` rests on an assumption (``bipartite_policy``) instead of on the data. The
-    message names the one extra pairwise fit that would close an odd cycle.
-    """
-
-
-class _ArmVarianceArray(np.ndarray):
-    """1-D float64 array of arm variances supporting both integer and arm-name indexing."""
-
-    _arm_to_idx: dict[str, int]
-    _arms: tuple[str, ...]
-
-    def __new__(
-        cls, values: Sequence[float] | np.ndarray, arms: Sequence[str]
-    ) -> _ArmVarianceArray:
-        obj = np.asarray(values, dtype=np.float64).view(cls)
-        obj._arms = tuple(str(a) for a in arms)
-        obj._arm_to_idx = {arm: idx for idx, arm in enumerate(obj._arms)}
-        return obj
-
-    def __array_finalize__(self, obj: Any) -> None:
-        if obj is None:
-            return
-        self._arms = getattr(obj, "_arms", ())
-        self._arm_to_idx = getattr(obj, "_arm_to_idx", {})
-
-    def __getitem__(self, key: Any) -> Any:
-        if isinstance(key, str):
-            if key not in self._arm_to_idx:
-                raise KeyError(f"Unknown arm {key!r}; available arms are {self._arms}")
-            return float(super().__getitem__(self._arm_to_idx[key]))
-        return super().__getitem__(key)
-
-    def __contains__(self, item: Any) -> bool:
-        if isinstance(item, str):
-            return item in self._arm_to_idx
-        return super().__contains__(item)
-
-    def keys(self) -> tuple[str, ...]:
-        """Return the tuple of arm names."""
-        return self._arms
-
-    def values(self) -> tuple[float, ...]:
-        """Return the tuple of arm variances in arm order."""
-        return tuple(float(super().__getitem__(i)) for i in range(len(self._arms)))
-
-    def items(self) -> tuple[tuple[str, float], ...]:
-        """Return ``(arm_name, variance)`` pairs in arm order."""
-        return tuple(
-            (arm, float(super().__getitem__(i))) for i, arm in enumerate(self._arms)
-        )
-
-    def get(self, arm: str, default: Any = None) -> Any:
-        """Return the variance for ``arm`` or ``default`` if not present."""
-        if arm in self._arm_to_idx:
-            return float(super().__getitem__(self._arm_to_idx[arm]))
-        return default
-
-    def to_dict(self) -> dict[str, float]:
-        """Convert to a standard ``{arm: variance}`` dictionary."""
-        return dict(self.items())
+    """Emitted when a contrast graph is bipartite and admits no odd-cycle check."""
 
 
 @dataclass(frozen=True)
 class SamplerDiagnostics:
-    """Convergence and efficiency diagnostics for the Mode-1 reconciliation sampler.
+    """Convergence and mixing diagnostics of the 4-chain Bayesian reconciliation sampler."""
 
-    Supports both attribute access (``diag.method``, ``diag.ess``, ``diag.r_hat``) and
-    dictionary-style lookup (``diag["method"]``, ``diag["ess"]``, ``diag["r_hat"]``).
-
-    Attributes:
-      method: Sampler used (``"sir"`` or ``"slice"``).
-      ess: Scalar effective sample size (importance-weight ESS for SIR, minimum
-        coordinate bulk ESS for slice sampling).
-      r_hat: Maximum split R-hat across the ``A - 1`` coordinates.
-      ess_per_param: Per-coordinate bulk ESS tuple of length ``A - 1``.
-      r_hat_per_param: Per-coordinate split R-hat tuple of length ``A - 1``.
-      n_proposals: Number of importance proposals or total MCMC evaluations.
-      fallback_triggered: ``True`` if ``sampler="auto"`` fell back from SIR to slice.
-      n_iterations: Slice sampler sweeps per chain actually run (burn-in included; ``0`` for
-        SIR). Larger than the default when ``auto_continue`` appended blocks.
-      converged: Whether the slice sampler met the ``auto_continue`` targets (split R-hat and
-        bulk ESS); ``None`` when ``auto_continue`` was off or SIR was used.
-    """
-
-    method: str
-    ess: float
+    sampler: str
     r_hat: float
-    ess_per_param: tuple[float, ...] = ()
-    r_hat_per_param: tuple[float, ...] = ()
-    n_proposals: int = 0
-    fallback_triggered: bool = False
-    n_iterations: int = 0
-    converged: bool | None = None
+    ess: float
+    ess_tail: float
+    n_chains: int
+    n_draws_per_chain: int
+    n_warmup: int
+    n_continuation_rounds: int
+    converged: bool
+    max_rhat_by_block: dict[str, float] = field(default_factory=dict)
+    min_ess_by_block: dict[str, float] = field(default_factory=dict)
 
     @property
-    def rhat(self) -> float:
-        """Alias for ``r_hat``."""
+    def max_rhat(self) -> float:
+        """Alias for :attr:`r_hat` (worst-case split-Rhat across all parameter blocks)."""
         return self.r_hat
 
-    def _as_dict(self) -> dict[str, Any]:
-        return {
-            "method": self.method,
-            "ess": self.ess,
-            "r_hat": self.r_hat,
-            "rhat": self.r_hat,
-            "ess_per_param": self.ess_per_param,
-            "r_hat_per_param": self.r_hat_per_param,
-            "n_proposals": self.n_proposals,
-            "fallback_triggered": self.fallback_triggered,
-            "n_iterations": self.n_iterations,
-            "converged": self.converged,
-        }
-
-    def __getitem__(self, key: str) -> Any:
-        data = self._as_dict()
-        if key not in data:
-            raise KeyError(key)
-        return data[key]
-
-    def __contains__(self, key: object) -> bool:
-        return key in self._as_dict()
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Return diagnostic ``key`` or ``default``."""
-        return self._as_dict().get(key, default)
-
-    def keys(self) -> tuple[str, ...]:
-        """Return canonical diagnostic keys."""
-        return (
-            "method",
-            "ess",
-            "r_hat",
-            "ess_per_param",
-            "r_hat_per_param",
-            "n_proposals",
-            "fallback_triggered",
-            "n_iterations",
-            "converged",
-        )
-
-    def items(self) -> tuple[tuple[str, Any], ...]:
-        """Return ``(key, value)`` pairs for canonical diagnostic keys."""
-        data = self._as_dict()
-        return tuple((k, data[k]) for k in self.keys())
+    @property
+    def min_ess_bulk(self) -> float:
+        """Alias for :attr:`ess` (minimum bulk ESS across all parameter blocks)."""
+        return self.ess
 
 
 @dataclass(frozen=True)
 class ContrastReconciliationResult:
-    """Reconciled posterior draws and summaries for a single contrast ``(treated, ref)``.
+    """Posterior summary and draw arrays for a single arm contrast ``(arm_high, arm_low)``."""
 
-    Attributes:
-      treated_arm: Treated arm name.
-      reference_arm: Reference arm name.
-      mode1_draws: ``(S,)`` posterior Mode-1 ATT draws for ``treated - ref``.
-      trajectory_draws: ``(S, T_post)`` posterior post-adoption trajectory draws.
-      cumulative_draws: ``(S,)`` cumulative post-adoption effect draws over ``horizon``.
-      prior_mode1_draws: Optional ``(S,)`` prior Mode-1 draws.
-      prior_trajectory_draws: Optional ``(S, T_post)`` prior trajectory draws.
-    """
-
-    treated_arm: str
-    reference_arm: str
+    contrast: tuple[str, str]
     mode1_draws: np.ndarray
     trajectory_draws: np.ndarray
     cumulative_draws: np.ndarray
-    prior_mode1_draws: np.ndarray | None = None
-    prior_trajectory_draws: np.ndarray | None = None
-
-    @property
-    def att_draws(self) -> np.ndarray:
-        """Alias for ``mode1_draws``."""
-        return self.mode1_draws
-
-    @property
-    def post_att(self) -> np.ndarray:
-        """Alias for ``mode1_draws``."""
-        return self.mode1_draws
-
-    @property
-    def post_att_draws(self) -> np.ndarray:
-        """Alias for ``mode1_draws``."""
-        return self.mode1_draws
-
-    @property
-    def catt_draws(self) -> np.ndarray:
-        """Alias for ``trajectory_draws``."""
-        return self.trajectory_draws
-
-    @property
-    def trt_catt(self) -> np.ndarray:
-        """Alias for ``trajectory_draws``."""
-        return self.trajectory_draws
-
-    @property
-    def trt_catt_draws(self) -> np.ndarray:
-        """Alias for ``trajectory_draws``."""
-        return self.trajectory_draws
-
-    @property
-    def cum_att(self) -> np.ndarray:
-        """Alias for ``cumulative_draws``."""
-        return self.cumulative_draws
-
-    @property
-    def prior_att(self) -> np.ndarray | None:
-        """Alias for ``prior_mode1_draws``."""
-        return self.prior_mode1_draws
-
-    @property
-    def prior_catt(self) -> np.ndarray | None:
-        """Alias for ``prior_trajectory_draws``."""
-        return self.prior_trajectory_draws
-
-    @property
-    def mean(self) -> float:
-        """Posterior mean of ``mode1_draws``."""
-        return float(np.mean(self.mode1_draws))
-
-    @property
-    def sd(self) -> float:
-        """Posterior standard deviation of ``mode1_draws``."""
-        return float(np.std(self.mode1_draws, ddof=1))
-
-    @property
-    def ci_low(self) -> float:
-        """2.5% posterior percentile of ``mode1_draws``."""
-        return float(np.percentile(self.mode1_draws, 2.5))
-
-    @property
-    def ci_high(self) -> float:
-        """97.5% posterior percentile of ``mode1_draws``."""
-        return float(np.percentile(self.mode1_draws, 97.5))
-
-    def __getitem__(self, key: str) -> Any:
-        mapping = {
-            "treated_arm": self.treated_arm,
-            "reference_arm": self.reference_arm,
-            "mode1_draws": self.mode1_draws,
-            "att_draws": self.mode1_draws,
-            "post_att_draws": self.mode1_draws,
-            "trajectory_draws": self.trajectory_draws,
-            "catt_draws": self.trajectory_draws,
-            "trt_catt_draws": self.trajectory_draws,
-            "cumulative_draws": self.cumulative_draws,
-            "prior_mode1_draws": self.prior_mode1_draws,
-            "prior_trajectory_draws": self.prior_trajectory_draws,
-            "mean": self.mean,
-            "sd": self.sd,
-            "ci_low": self.ci_low,
-            "ci_high": self.ci_high,
-        }
-        if key not in mapping:
-            raise KeyError(key)
-        return mapping[key]
+    mean: float
+    sd: float
+    ci_95: tuple[float, float]
 
 
 @dataclass
 class MultiArmReconciliationResult:
-    """Output of :func:`reconcile_multi_arm_draws` for ``A >= 2`` arms and ``P >= A - 1`` contrasts.
-
-    Attributes:
-      arms: Tuple of ``A`` arm labels, with ``arms[0]`` as the control arm.
-      topology: ``"chain"`` or ``"poset"``.
-      tree_edges: Tuple of ``A - 1`` spanning-tree edges ``(treated_arm, reference_arm)``.
-      fitted_pairs: Tuple of ``P`` fitted contrast pairs ``(treated_arm, reference_arm)``.
-      redundant_pairs: Tuple of ``P - (A - 1)`` non-tree fitted contrast pairs.
-      tau_mu_draws: ``(S, A - 1)`` posterior Mode-1 draws of ``mu_j = tau_{(arms[j], arms[0])}``.
-      tau_increment_draws: ``(S, A - 1)`` posterior Mode-1 draws along ``tree_edges``.
-      contrast_mode1_draws: Mapping ``(treated, ref) -> (S,)`` Mode-1 draws across all pairs.
-      contrast_trajectory_draws: Mapping ``(treated, ref) -> (S, T_post)`` trajectory draws.
-      contrast_catt_draws: Mapping ``(treated, ref) -> (S, T_post)`` trajectory draws (alias).
-      contrast_cumulative_draws: Mapping ``(treated, ref) -> (S,)`` cumulative trajectory sums.
-      mu_hat: ``(A - 1,)`` Euclidean cut-space projection of the Mode-1 posterior means.
-      sigma_lik: ``(A - 1, A - 1)`` Mode-1 Gaussian likelihood covariance on ``mu``.
-      arm_variances: Length-``A`` array/mapping of recovered arm variances ``(v_0, ..., v_{A-1})``.
-      nnls_residual: Euclidean norm ``||A_var v_hat - s^2||_2`` of the variance fit.
-      is_bipartite: ``True`` iff the contrast graph is bipartite (contains no odd cycle).
-      cycle_discrepancy_ratio: ``||y_hat - B mu_hat||_2 / max(||y_hat||_2, 1e-12)``.
-      trajectory_additivity_max_gap: Maximum absolute difference between a redundant contrast's
-        own projected trajectory and its spanning-tree-implied trajectory.
-      sampler_diagnostics: :class:`SamplerDiagnostics` with ``method``, ``ess``, ``r_hat``.
-      trajectory_additivity_gaps: Per-redundant-pair max trajectory discrepancy.
-      prior_mode: Prior family name.
-      prior_scale: Resolved prior scale(s).
-      prior_mu_draws: Optional ``(S, A - 1)`` prior draws of ``mu``.
-      prior_increment_draws: Optional ``(S, A - 1)`` prior draws of tree increments.
-      prior_contrast_mode1_draws: Optional mapping ``(treated, ref) -> (S,)`` of prior Mode-1 draws.
-      prior_contrast_trajectory_draws: Optional mapping ``(treated, ref) -> (S, T_post)`` of prior
-        trajectory draws.
-      legacy_3arm_result: Underlying :class:`Nested3ArmReconciliationResult` when ``A = 3``
-        chain delegates to the legacy 3-arm path.
-      bipartite_policy: Policy that resolved the unidentified arm-variance direction on a
-        bipartite contrast graph (``None`` when the graph has an odd cycle).
-      null_shift_interval: Feasible interval ``[xi_lo, xi_hi]`` of the shift
-        ``v(xi) = v_alloc + xi z`` along the alternating null vector ``z`` (``z_a = +1`` on the
-        control's color class, ``-1`` on the other) that keeps every arm variance above its
-        floor (``None`` when the graph has an odd cycle).
-      null_shift: Shift ``xi`` used by the policy (``0`` for ``"allocation"``; ``None`` for
-        ``"marginalize"``, which integrates ``xi`` uniformly over ``null_shift_interval``).
-      spike_posterior_prob: Posterior probability of the spike ``mu = 0`` under a
-        spike-and-slab bundle prior (``None`` for other priors).
-      projection: Cut-space projection used for ``mu_hat`` (``"ols"`` or ``"huber"``).
-      projection_weights: ``{pair: weight}`` final IRLS Huber weights (``None`` for ``"ols"``).
-      flagged_pairs: Fitted pairs down-weighted by the robust projection (weight ``< 1``),
-        most down-weighted first.
-      arm_variance_source: ``"backsolve"`` or ``"direct"`` (see :func:`reconcile_multi_arm_draws`).
-    """
+    """Posterior draws and diagnostics for a reconciled multi-arm study."""
 
     arms: tuple[str, ...]
+    order: tuple[str, ...] | None
+    cover_edges: tuple[tuple[str, str], ...]
     topology: str
     tree_edges: tuple[tuple[str, str], ...]
     fitted_pairs: tuple[tuple[str, str], ...]
     redundant_pairs: tuple[tuple[str, str], ...]
+    all_pairs: tuple[tuple[str, str], ...]
+    horizon: int
+    n_modes: int
+    basis: np.ndarray
+    monotone: bool
+    prior_scale: float | None
+    s0_scale: float
+    theta_draws: np.ndarray
+    sigma_draws: np.ndarray
+    kappa_draws: np.ndarray
+    local_scale_draws: np.ndarray
+    omega_draws: dict[tuple[str, str], np.ndarray]
     tau_mu_draws: np.ndarray
     tau_increment_draws: np.ndarray
+    arm_trajectory_draws: dict[str, np.ndarray]
     contrast_mode1_draws: dict[tuple[str, str], np.ndarray]
     contrast_trajectory_draws: dict[tuple[str, str], np.ndarray]
-    contrast_catt_draws: dict[tuple[str, str], np.ndarray]
     contrast_cumulative_draws: dict[tuple[str, str], np.ndarray]
-    mu_hat: np.ndarray
-    sigma_lik: np.ndarray
-    arm_variances: _ArmVarianceArray
-    nnls_residual: float
-    is_bipartite: bool
-    cycle_discrepancy_ratio: float
-    trajectory_additivity_max_gap: float
+    contrast_catt_draws: dict[tuple[str, str], np.ndarray]
+    contrast_scale_inflation: dict[tuple[str, str], float]
+    posterior_corruption_prob: dict[tuple[str, str], float]
+    ppc_cycle_pvalue: float | None
+    ppc_composite_pvalue: float | None
+    ppc_basis_pvalue: float | None
+    max_cycle_discrepancy: float
     sampler_diagnostics: SamplerDiagnostics
-    trajectory_additivity_gaps: dict[tuple[str, str], float]
-    prior_mode: str = "bundle_halfnormal"
-    prior_scale: float | tuple[float, ...] | None = None
-    horizon: int = 0
-    own_vs_implied_trajectory_max_gap: float = 0.0
-    prior_mu_draws: np.ndarray | None = None
-    prior_increment_draws: np.ndarray | None = None
-    prior_contrast_mode1_draws: dict[tuple[str, str], np.ndarray] | None = None
-    prior_contrast_trajectory_draws: dict[tuple[str, str], np.ndarray] | None = None
-    legacy_3arm_result: Nested3ArmReconciliationResult | None = None
-    bipartite_policy: str | None = None
-    null_shift_interval: tuple[float, float] | None = None
-    null_shift: float | None = None
-    spike_posterior_prob: float | None = None
-    projection: str = "ols"
-    projection_weights: dict[tuple[str, str], float] | None = None
-    flagged_pairs: tuple[tuple[str, str], ...] = ()
-    arm_variance_source: str = "backsolve"
 
     @property
-    def all_pairs(self) -> tuple[tuple[str, str], ...]:
-        """Tuple of all canonical ordered contrast pairs stored in ``contrast_mode1_draws``."""
-        return tuple(self.contrast_mode1_draws.keys())
+    def diagnostics(self) -> SamplerDiagnostics:
+        """Alias for :attr:`sampler_diagnostics`."""
+        return self.sampler_diagnostics
 
     @property
-    def own_vs_implied_max_gap(self) -> dict[tuple[str, str], float]:
-        """Alias for ``trajectory_additivity_gaps`` (own vs tree-implied trajectory gap per redundant pair)."""
-        return self.trajectory_additivity_gaps
+    def trt_catt_bc(self) -> np.ndarray | None:
+        """3-arm convenience accessor for ``("B", "C")`` treated trajectory draws."""
+        return self.contrast_trajectory_draws.get(("B", "C"))
 
     @property
-    def prior_tau_mu_draws(self) -> np.ndarray | None:
-        """Alias for ``prior_mu_draws``."""
-        return self.prior_mu_draws
+    def trt_catt_ab(self) -> np.ndarray | None:
+        """3-arm convenience accessor for ``("A", "B")`` treated trajectory draws."""
+        return self.contrast_trajectory_draws.get(("A", "B"))
 
     @property
-    def prior_tau_increment_draws(self) -> np.ndarray | None:
-        """Alias for ``prior_increment_draws``."""
-        return self.prior_increment_draws
+    def trt_catt_ac(self) -> np.ndarray | None:
+        """3-arm convenience accessor for ``("A", "C")`` treated trajectory draws."""
+        return self.contrast_trajectory_draws.get(("A", "C"))
 
-    @property
-    def prior_att_bc(self) -> np.ndarray | None:
-        """For 3-arm chains, prior Mode-1 draws of ``(arms[1], arms[0])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.prior_att_bc
-        if self.prior_contrast_mode1_draws is None:
-            return None
-        return self.prior_contrast_mode1_draws.get((self.arms[1], self.arms[0]))
-
-    @property
-    def prior_att_ab(self) -> np.ndarray | None:
-        """For 3-arm chains, prior Mode-1 draws of ``(arms[2], arms[1])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.prior_att_ab
-        if self.prior_contrast_mode1_draws is None:
-            return None
-        return self.prior_contrast_mode1_draws.get((self.arms[2], self.arms[1]))
-
-    @property
-    def prior_att_ac(self) -> np.ndarray | None:
-        """For 3-arm chains, prior Mode-1 draws of ``(arms[2], arms[0])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.prior_att_ac
-        if self.prior_contrast_mode1_draws is None:
-            return None
-        return self.prior_contrast_mode1_draws.get((self.arms[2], self.arms[0]))
-
-    @property
-    def prior_catt_bc(self) -> np.ndarray | None:
-        """For 3-arm chains, prior trajectory draws of ``(arms[1], arms[0])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.prior_catt_bc
-        if self.prior_contrast_trajectory_draws is None:
-            return None
-        return self.prior_contrast_trajectory_draws.get((self.arms[1], self.arms[0]))
-
-    @property
-    def prior_catt_ab(self) -> np.ndarray | None:
-        """For 3-arm chains, prior trajectory draws of ``(arms[2], arms[1])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.prior_catt_ab
-        if self.prior_contrast_trajectory_draws is None:
-            return None
-        return self.prior_contrast_trajectory_draws.get((self.arms[2], self.arms[1]))
-
-    @property
-    def prior_catt_ac(self) -> np.ndarray | None:
-        """For 3-arm chains, prior trajectory draws of ``(arms[2], arms[0])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.prior_catt_ac
-        if self.prior_contrast_trajectory_draws is None:
-            return None
-        return self.prior_contrast_trajectory_draws.get((self.arms[2], self.arms[0]))
-
-    @property
-    def sir_ess(self) -> float:
-        """Effective sample size from ``sampler_diagnostics.ess``."""
-        return self.sampler_diagnostics.ess
-
-    @property
-    def ess(self) -> float:
-        """Effective sample size from ``sampler_diagnostics.ess``."""
-        return self.sampler_diagnostics.ess
-
-    @property
-    def r_hat(self) -> float:
-        """Split R-hat from ``sampler_diagnostics.r_hat``."""
-        return self.sampler_diagnostics.r_hat
-
-    @property
-    def lik_mean(self) -> np.ndarray:
-        """Likelihood mean ``mu_hat`` (or legacy 3-arm increment mean if delegated)."""
-        if self.legacy_3arm_result is not None and self.legacy_3arm_result.lik_mean is not None:
-            return self.legacy_3arm_result.lik_mean
-        return self.mu_hat
-
-    @property
-    def lik_cov(self) -> np.ndarray:
-        """Likelihood covariance ``sigma_lik`` (or legacy 3-arm increment covariance if delegated)."""
-        if self.legacy_3arm_result is not None and self.legacy_3arm_result.lik_cov is not None:
-            return self.legacy_3arm_result.lik_cov
-        return self.sigma_lik
-
-    @property
-    def trt_catt_bc(self) -> np.ndarray:
-        """For 3-arm chains, posterior trajectory draws of ``(arms[1], arms[0])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.trt_catt_bc
-        return self.contrast_trajectory_draws[(self.arms[1], self.arms[0])]
-
-    @property
-    def trt_catt_ab(self) -> np.ndarray:
-        """For 3-arm chains, posterior trajectory draws of ``(arms[2], arms[1])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.trt_catt_ab
-        return self.contrast_trajectory_draws[(self.arms[2], self.arms[1])]
-
-    @property
-    def trt_catt_ac(self) -> np.ndarray:
-        """For 3-arm chains, posterior trajectory draws of ``(arms[2], arms[0])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.trt_catt_ac
-        return self.contrast_trajectory_draws[(self.arms[2], self.arms[0])]
-
-    @property
-    def post_att_bc(self) -> np.ndarray:
-        """For 3-arm chains, posterior Mode-1 draws of ``(arms[1], arms[0])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.post_att_bc
-        return self.contrast_mode1_draws[(self.arms[1], self.arms[0])]
-
-    @property
-    def post_att_ab(self) -> np.ndarray:
-        """For 3-arm chains, posterior Mode-1 draws of ``(arms[2], arms[1])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.post_att_ab
-        return self.contrast_mode1_draws[(self.arms[2], self.arms[1])]
-
-    @property
-    def post_att_ac(self) -> np.ndarray:
-        """For 3-arm chains, posterior Mode-1 draws of ``(arms[2], arms[0])``."""
-        if self.legacy_3arm_result is not None:
-            return self.legacy_3arm_result.post_att_ac
-        return self.contrast_mode1_draws[(self.arms[2], self.arms[0])]
-
-    def get_contrast_result(
-        self, treated: str, ref: str
-    ) -> ContrastReconciliationResult:
-        """Return the :class:`ContrastReconciliationResult` for ``(treated, ref)``.
-
-        Supports any ordered pair of distinct arms in ``self.arms``. When ``(ref, treated)``
-        is stored as the canonical orientation, the returned draws are negated so that
-        ``get_contrast_result(ref, treated) == -get_contrast_result(treated, ref)`` holds
-        draw by draw.
-
-        Args:
-          treated: Treated arm label in ``self.arms``.
-          ref: Reference arm label in ``self.arms`` (must differ from ``treated``).
-
-        Returns:
-          :class:`ContrastReconciliationResult`.
-        """
-        t_arm, r_arm = str(treated), str(ref)
-        if t_arm not in self.arms or r_arm not in self.arms:
-            raise ValueError(
-                f"Both treated ({t_arm!r}) and ref ({r_arm!r}) must be in arms {self.arms}"
-            )
-        if t_arm == r_arm:
-            raise ValueError(f"treated and ref must be distinct arms; got {t_arm!r}")
-        pair = (t_arm, r_arm)
-        rev_pair = (r_arm, t_arm)
-        if pair in self.contrast_mode1_draws:
-            mode1 = self.contrast_mode1_draws[pair]
-            traj = self.contrast_trajectory_draws[pair]
-            cum = self.contrast_cumulative_draws[pair]
-            pri_m1 = (
-                None
-                if self.prior_contrast_mode1_draws is None
-                else self.prior_contrast_mode1_draws.get(pair)
-            )
-            pri_tr = (
-                None
-                if self.prior_contrast_trajectory_draws is None
-                else self.prior_contrast_trajectory_draws.get(pair)
-            )
+    def get_contrast_result(self, arm_high: str, arm_low: str) -> ContrastReconciliationResult:
+        """Return posterior draws and summary for any distinct ordered pair ``(arm_high, arm_low)``."""
+        u, v = str(arm_high), str(arm_low)
+        if u not in self.arms or v not in self.arms:
+            raise ValueError(f"Contrast ({u!r}, {v!r}) references arm outside {self.arms}")
+        if u == v:
+            raise ValueError(f"Contrast requires two distinct arms; got ({u!r}, {v!r})")
+        if (u, v) in self.contrast_trajectory_draws:
+            m1 = self.contrast_mode1_draws[(u, v)]
+            traj = self.contrast_trajectory_draws[(u, v)]
+            cum = self.contrast_cumulative_draws[(u, v)]
         else:
-            mode1 = -self.contrast_mode1_draws[rev_pair]
-            traj = -self.contrast_trajectory_draws[rev_pair]
-            cum = -self.contrast_cumulative_draws[rev_pair]
-            pri_m1 = (
-                None
-                if self.prior_contrast_mode1_draws is None
-                or rev_pair not in self.prior_contrast_mode1_draws
-                else -self.prior_contrast_mode1_draws[rev_pair]
-            )
-            pri_tr = (
-                None
-                if self.prior_contrast_trajectory_draws is None
-                or rev_pair not in self.prior_contrast_trajectory_draws
-                else -self.prior_contrast_trajectory_draws[rev_pair]
-            )
+            m1 = -self.contrast_mode1_draws[(v, u)]
+            traj = -self.contrast_trajectory_draws[(v, u)]
+            cum = -self.contrast_cumulative_draws[(v, u)]
+        q_lo, q_hi = np.quantile(m1, [0.025, 0.975])
         return ContrastReconciliationResult(
-            treated_arm=t_arm,
-            reference_arm=r_arm,
-            mode1_draws=mode1,
+            contrast=(u, v),
+            mode1_draws=m1,
             trajectory_draws=traj,
             cumulative_draws=cum,
-            prior_mode1_draws=pri_m1,
-            prior_trajectory_draws=pri_tr,
+            mean=float(np.mean(m1)),
+            sd=float(np.std(m1, ddof=1)),
+            ci_95=(float(q_lo), float(q_hi)),
         )
 
-    def __iter__(self) -> Iterator[np.ndarray]:
-        if len(self.arms) == 3 and self.topology == "chain":
-            yield self.trt_catt_bc
-            yield self.trt_catt_ab
-            yield self.trt_catt_ac
-        else:
-            for edge in self.tree_edges:
-                yield self.contrast_trajectory_draws[edge]
 
-    def __getitem__(self, item: int | tuple[str, str]) -> Any:
-        if isinstance(item, tuple):
-            return self.get_contrast_result(item[0], item[1])
-        if len(self.arms) == 3 and self.topology == "chain":
-            return (self.trt_catt_bc, self.trt_catt_ab, self.trt_catt_ac)[item]
-        return self.contrast_trajectory_draws[self.tree_edges[item]]
-
-    def __len__(self) -> int:
-        if len(self.arms) == 3 and self.topology == "chain":
-            return 3
-        return len(self.tree_edges)
+# ---- Linear algebra, diagnostics, and validation helpers -----------------------------------------
 
 
-def _normalize_results_mapping(
-    results: Mapping[Any, RankKLongBetResult],
-    arms: tuple[str, ...],
-) -> dict[tuple[str, str], RankKLongBetResult]:
-    """Validate and normalize the ``results`` mapping keys to ``(treated_arm, ref_arm)``."""
-    if not isinstance(results, Mapping) or not results:
-        raise ValueError("results must be a non-empty mapping of {(treated, ref): RankKLongBetResult}")
-    arm_set = set(arms)
-    normalized: dict[tuple[str, str], RankKLongBetResult] = {}
-    seen_undirected: set[frozenset[str]] = set()
-    for raw_key, fit in results.items():
-        if isinstance(raw_key, tuple) and len(raw_key) == 2:
-            t_arm, r_arm = str(raw_key[0]), str(raw_key[1])
-        elif isinstance(raw_key, str) and len(raw_key) == 2 and raw_key[0] in arm_set and raw_key[1] in arm_set:
-            t_arm, r_arm = raw_key[0], raw_key[1]
-        else:
-            raise ValueError(
-                f"results key {raw_key!r} must be a 2-tuple (treated_arm, reference_arm) of arms in {arms}"
-            )
-        if t_arm not in arm_set or r_arm not in arm_set:
-            raise ValueError(
-                f"Contrast pair {(t_arm, r_arm)} references an arm not in arms={arms}"
-            )
-        if t_arm == r_arm:
-            raise ValueError(f"Contrast pair {(t_arm, r_arm)} compares an arm to itself")
-        undir = frozenset((t_arm, r_arm))
-        if undir in seen_undirected:
-            raise ValueError(
-                f"Duplicate or reverse-oriented contrast for arms {sorted(undir)} in results"
-            )
-        seen_undirected.add(undir)
-        normalized[(t_arm, r_arm)] = fit
-    return normalized
+def _psd_clip(mat: np.ndarray, floor: float = 1e-12) -> np.ndarray:
+    """Symmetrize ``mat`` and clip eigenvalues below ``floor``."""
+    arr = np.atleast_2d(np.asarray(mat, dtype=np.float64))
+    sym = 0.5 * (arr + arr.T)
+    eigvals, eigvecs = np.linalg.eigh(sym)
+    eigvals = np.maximum(eigvals, float(floor))
+    out = (eigvecs * eigvals[None, :]) @ eigvecs.T
+    return 0.5 * (out + out.T)
 
 
-def _chain_order_as_poset(
-    arms: tuple[str, ...],
-    topology: str,
-    edges: Sequence[tuple[str, str]] | None,
-    fitted_pairs: Sequence[tuple[str, str]],
-    split_alpha: Sequence[float] | float | None = None,
-) -> tuple[str, Sequence[tuple[str, str]] | None]:
-    """Maps a chain order whose adjacent edges are not all fitted to an equivalent poset.
-
-    A chain ``arms[0] < ... < arms[A-1]`` fitted only through, e.g., a vs-control star has no
-    fitted chain spanning tree. It is reconciled as the poset whose cover relations are the
-    chain edges plus every fitted pair (oriented high -> low), so the spanning tree comes from
-    the fitted pairs while the chain order stays the monotonicity constraint. With the
-    default uniform split the poset's order-polytope bundle prior equals the chain's
-    ``Dirichlet(1, ..., 1)`` bundle prior.
-
-    Args:
-      arms: Arm labels in chain order.
-      topology: Requested topology.
-      edges: Requested poset edges (must be ``None`` for chains).
-      fitted_pairs: Fitted contrasts ``(treated, ref)``.
-      split_alpha: Requested Dirichlet split (only uniform is supported on the mapped poset).
-
-    Returns:
-      ``(topology, edges)`` to use internally (unchanged unless the mapping applies).
-    """
-    if topology != "chain" or edges is not None:
-        return topology, edges
-    arm_to_idx = {arm: idx for idx, arm in enumerate(arms)}
-    fitted_undir = {frozenset(p) for p in fitted_pairs}
-    chain_edges = [(arms[a], arms[a - 1]) for a in range(1, len(arms))]
-    if all(frozenset(e) in fitted_undir for e in chain_edges):
-        return topology, edges
-    if split_alpha is not None and not np.allclose(np.asarray(split_alpha, dtype=np.float64), 1.0):
-        raise ValueError(
-            "A chain whose adjacent edges are not all fitted is reconciled as a poset with the "
-            "chain as cover relations; only the uniform split (split_alpha=None) is supported"
-        )
-    extra = []
-    for t_arm, r_arm in fitted_pairs:
-        hi, lo = (t_arm, r_arm) if arm_to_idx[t_arm] > arm_to_idx[r_arm] else (r_arm, t_arm)
-        if frozenset((hi, lo)) not in {frozenset(e) for e in chain_edges}:
-            extra.append((hi, lo))
-    return "poset", [*chain_edges, *extra]
+def _psd_sqrt(mat: np.ndarray) -> np.ndarray:
+    """Symmetric positive-semidefinite square root ``V^{1/2}``."""
+    sym = _psd_clip(mat, floor=0.0)
+    eigvals, eigvecs = np.linalg.eigh(sym)
+    sqrt_vals = np.sqrt(np.maximum(eigvals, 0.0))
+    out = (eigvecs * sqrt_vals[None, :]) @ eigvecs.T
+    return 0.5 * (out + out.T)
 
 
-def _check_connected_and_bipartite(
-    n_arms: int,
-    pair_indices: Sequence[tuple[int, int]],
-) -> tuple[bool, bool, np.ndarray]:
-    """Check graph connectivity and 2-colorability (bipartiteness) via BFS from arm 0.
-
-    Returns:
-      ``(is_connected, is_bipartite, colors)`` where ``colors[a] in {0, 1}`` is the
-      2-coloring when bipartite.
-    """
-    adj: list[list[int]] = [[] for _ in range(n_arms)]
-    for j_idx, l_idx in pair_indices:
-        adj[j_idx].append(l_idx)
-        adj[l_idx].append(j_idx)
-
-    colors = np.full(n_arms, -1, dtype=np.int32)
-    colors[0] = 0
-    queue: deque[int] = deque([0])
-    visited = 1
-    is_bipartite = True
-
-    while queue:
-        u = queue.popleft()
-        for v in adj[u]:
-            if colors[v] == -1:
-                colors[v] = 1 - colors[u]
-                visited += 1
-                queue.append(v)
-            elif colors[v] == colors[u]:
-                is_bipartite = False
-
-    is_connected = visited == n_arms
-    return is_connected, is_bipartite, colors
+def _euclidean_exposure_basis(horizon: int, n_modes: int) -> np.ndarray:
+    """Euclidean-orthonormal exposure basis ``Psi`` of shape ``(H, K')`` with ``Psi[:, 0] = 1/sqrt(H)``."""
+    h_int = int(horizon)
+    k_eff = min(int(n_modes), h_int)
+    raw = orthonormal_exposure_basis(h_int, k_eff)
+    psi = np.asarray(raw[:, :k_eff], dtype=np.float64) / math.sqrt(float(h_int))
+    return psi
 
 
-def _validate_and_orient_poset(
-    arms: tuple[str, ...],
-    topology: str,
-    edges: Sequence[tuple[str, str]] | None,
-    results_map: Mapping[tuple[str, str], RankKLongBetResult],
-) -> tuple[
-    tuple[tuple[str, str], ...],
-    tuple[tuple[str, str], ...],
-    list[tuple[int, int]],
-    np.ndarray,
-    tuple[int, ...],
-]:
-    """Validate topology, build spanning tree edges, poset reachability, and maximal arms.
-
-    Returns:
-      ``(tree_edges, redundant_pairs, poset_cover_pairs, reachability, maximal_arms)``
-      where:
-      - ``tree_edges`` has length ``A - 1`` with each edge ``(treated, ref)`` in ``arms``;
-      - ``redundant_pairs`` are the fitted keys in ``results_map`` not in ``tree_edges``;
-      - ``poset_cover_pairs`` is a list of ``(lower_idx, higher_idx)`` cover relations;
-      - ``reachability`` is an ``(A, A)`` boolean matrix with ``reachability[l, j] == True``
-        iff ``l <= j`` in the poset;
-      - ``maximal_arms`` are the arm indices ``j >= 1`` that have no strict successor.
-    """
-    n_arms = len(arms)
-    arm_to_idx = {arm: idx for idx, arm in enumerate(arms)}
-    undir_to_fitted: dict[frozenset[str], tuple[str, str]] = {
-        frozenset(pair): pair for pair in results_map.keys()
-    }
-
-    if topology == "chain":
-        if edges is not None:
-            raise ValueError("edges must be None when topology='chain'")
-        tree_edges_list: list[tuple[str, str]] = []
-        cover_pairs: list[tuple[int, int]] = []
-        for a_idx in range(1, n_arms):
-            t_arm, r_arm = arms[a_idx], arms[a_idx - 1]
-            if frozenset((t_arm, r_arm)) not in undir_to_fitted:
-                raise ValueError(
-                    f"Missing tree-edge fit for chain edge {(t_arm, r_arm)!r}; every spanning-tree "
-                    "edge must have a fitted contrast in results"
-                )
-            tree_edges_list.append((t_arm, r_arm))
-            cover_pairs.append((a_idx - 1, a_idx))
-    elif topology == "poset":
-        if edges is None or len(edges) < n_arms - 1:
-            raise ValueError(
-                f"topology='poset' requires edges with at least A - 1 = {n_arms - 1} cover relations; "
-                f"got {edges!r}"
-            )
-        raw_pairs: list[tuple[int, int]] = []
-        for raw_u, raw_v in edges:
-            u_str, v_str = str(raw_u), str(raw_v)
-            if u_str not in arm_to_idx or v_str not in arm_to_idx or u_str == v_str:
-                raise ValueError(
-                    f"Invalid poset edge {(raw_u, raw_v)!r} for arms {arms}"
-                )
-            raw_pairs.append((arm_to_idx[u_str], arm_to_idx[v_str]))
-
-        # Check connectivity of the supplied poset edges
-        poset_conn, _, _ = _check_connected_and_bipartite(n_arms, raw_pairs)
-        if not poset_conn:
-            raise ValueError(
-                f"Poset edges {list(edges)} form a disconnected graph on arms {arms}"
-            )
-
-        # Determine whether user passed (lower, higher) or (higher, lower) by checking arm 0
-        zero_first = any(u == 0 for u, _ in raw_pairs)
-        zero_second = any(v == 0 for _, v in raw_pairs)
-        if zero_first and not zero_second:
-            cover_pairs = [(u, v) for u, v in raw_pairs]
-        elif zero_second and not zero_first:
-            cover_pairs = [(v, u) for u, v in raw_pairs]
-        else:
-            # Orient from smaller arm index (closer to control 0) to larger arm index
-            cover_pairs = [(min(u, v), max(u, v)) for u, v in raw_pairs]
-
-        # Check acyclicity via transitive closure
-        reach = np.eye(n_arms, dtype=bool)
-        for lo, hi in cover_pairs:
-            reach[lo, hi] = True
-        for k in range(n_arms):
-            reach |= np.outer(reach[:, k], reach[k, :])
-        for i in range(n_arms):
-            for j in range(i + 1, n_arms):
-                if reach[i, j] and reach[j, i]:
-                    raise ValueError(
-                        f"Poset edges {list(edges)} contain a directed cycle involving "
-                        f"{arms[i]!r} and {arms[j]!r}"
-                    )
-        if not np.all(reach[0, :]):
-            raise ValueError(
-                f"Control arm {arms[0]!r} must precede all other arms in the poset; "
-                f"unreachable arms: {[arms[i] for i in range(n_arms) if not reach[0, i]]}"
-            )
-
-        # Every cover edge when len(edges) == A - 1 is a mandatory tree edge; when len(edges) > A - 1
-        # (e.g. 2x2 diamond), pick a spanning tree of fitted cover edges (requiring every arm j >= 1
-        # to have an incoming fitted cover edge, and requiring all edges if len(edges) == n_arms - 1).
-        if len(cover_pairs) == n_arms - 1:
-            tree_edges_list = []
-            for lo, hi in cover_pairs:
-                t_arm, r_arm = arms[hi], arms[lo]
-                if frozenset((t_arm, r_arm)) not in undir_to_fitted:
-                    raise ValueError(
-                        f"Missing tree-edge fit for poset edge {(t_arm, r_arm)!r}; every "
-                        "spanning-tree edge must have a fitted contrast in results"
-                    )
-                tree_edges_list.append((t_arm, r_arm))
-        else:
-            # Build BFS spanning tree from control 0 using cover edges present in results_map
-            parent_of: dict[int, int] = {}
-            visited_tree = {0}
-            bfs_q: deque[int] = deque([0])
-            while bfs_q:
-                u = bfs_q.popleft()
-                for lo, hi in cover_pairs:
-                    if lo == u and hi not in visited_tree:
-                        if frozenset((arms[hi], arms[lo])) in undir_to_fitted:
-                            visited_tree.add(hi)
-                            parent_of[hi] = lo
-                            bfs_q.append(hi)
-            if len(visited_tree) != n_arms:
-                missing_arms = [arms[a] for a in range(1, n_arms) if a not in visited_tree]
-                raise ValueError(
-                    f"Missing tree-edge fit in poset: no fitted cover-edge path from control "
-                    f"{arms[0]!r} to arm(s) {missing_arms}"
-                )
-            tree_edges_list = [(arms[a], arms[parent_of[a]]) for a in range(1, n_arms)]
-    else:
-        raise ValueError(f"topology must be one of {_TOPOLOGIES}; got {topology!r}")
-
-    reachability = np.eye(n_arms, dtype=bool)
-    for lo, hi in cover_pairs:
-        reachability[lo, hi] = True
-    for k in range(n_arms):
-        reachability |= np.outer(reachability[:, k], reachability[k, :])
-
-    maximal_arms = tuple(
-        j for j in range(1, n_arms) if not any(reachability[j, k] for k in range(n_arms) if k != j)
-    )
-
-    tree_undir = {frozenset(edge) for edge in tree_edges_list}
-    redundant_list = [
-        pair for pair in results_map.keys() if frozenset(pair) not in tree_undir
-    ]
-    return (
-        tuple(tree_edges_list),
-        tuple(redundant_list),
-        cover_pairs,
-        reachability,
-        maximal_arms,
-    )
-
-
-def _enumerate_linear_extensions(
-    reachability_or_non_top: np.ndarray | Sequence[int],
-    poset_edges_idx: Sequence[tuple[int, int]] | None = None,
-) -> np.ndarray:
-    """Enumerate all topological sort permutations of an ``m``-element interior poset.
-
-    Accepts either an ``(m, m)`` boolean reachability matrix ``reachability_or_non_top``
-    or ``(non_top_arms, poset_edges_idx)`` where ``poset_edges_idx`` are directed edges
-    (either ``(child, parent)`` or ``(lower, higher)``).
-
-    Returns:
-      ``(n_ext, m)`` int32 array of linear extensions (each row is a permutation of ``0..m-1``).
-    """
-    if poset_edges_idx is not None:
-        non_top = [int(a) for a in reachability_or_non_top]
-        m = len(non_top)
-        if m == 0:
-            return np.zeros((1, 0), dtype=np.int32)
-        n_total = max([0, *non_top, *(max(u, v) for u, v in poset_edges_idx)]) + 1
-        reach_all = np.eye(n_total, dtype=bool)
-        zero_first = any(u == 0 for u, _ in poset_edges_idx)
-        zero_second = any(v == 0 for _, v in poset_edges_idx)
-        for u, v in poset_edges_idx:
-            if zero_second and not zero_first:
-                lo, hi = int(v), int(u)
-            elif zero_first and not zero_second:
-                lo, hi = int(u), int(v)
-            else:
-                lo, hi = min(int(u), int(v)), max(int(u), int(v))
-            reach_all[lo, hi] = True
-        for k in range(n_total):
-            reach_all |= np.outer(reach_all[:, k], reach_all[k, :])
-        reachability_interior = reach_all[np.ix_(non_top, non_top)]
-    else:
-        reachability_interior = np.asarray(reachability_or_non_top, dtype=bool)
-        m = int(reachability_interior.shape[0])
-        if m == 0:
-            return np.zeros((1, 0), dtype=np.int32)
-
-    strict_pred_mask = [
-        int(sum((1 << i) for i in range(m) if i != j and reachability_interior[i, j]))
-        for j in range(m)
-    ]
-    extensions: list[list[int]] = []
-    current: list[int] = []
-
-    def _backtrack(placed_mask: int) -> None:
-        if len(current) == m:
-            extensions.append(current.copy())
-            return
-        for j in range(m):
-            if (
-                not (placed_mask & (1 << j))
-                and (strict_pred_mask[j] & placed_mask) == strict_pred_mask[j]
-            ):
-                current.append(j)
-                _backtrack(placed_mask | (1 << j))
-                current.pop()
-
-    _backtrack(0)
-    return np.asarray(extensions, dtype=np.int32)
-
-
-def _draw_prior_mu(
-    rng: np.random.Generator,
-    *,
-    n: int,
-    dim: int,
-    topology: str,
-    prior_mode: str,
-    scale_val: float,
-    alpha_vec: np.ndarray,
-    monotone: bool,
-    tau_clip: tuple[float, float],
-    poset_edges_idx: Sequence[tuple[int, int]],
-    non_top_arms: Sequence[int],
-    linear_extensions: np.ndarray | None = None,
-) -> np.ndarray:
-    """Draw ``n`` samples of ``mu in R^{dim}`` from the specified multi-arm prior family."""
-    if prior_mode in _BUNDLE_PRIOR_MODES:
-        tot = _draw_bundle_prior(rng, prior_mode, float(scale_val), n)
-        if topology == "chain" and monotone:
-            u_mat = rng.dirichlet(np.asarray(alpha_vec, dtype=np.float64), size=n)
-            theta_mat = u_mat * tot[:, None]
-            return np.cumsum(theta_mat, axis=1)
-        m_int = len(non_top_arms)
-        pts = np.zeros((n, dim), dtype=np.float64)
-        pts[:, -1] = tot
-        if m_int > 0:
-            interior_cols = [a - 1 for a in non_top_arms]
-            if monotone:
-                lin_exts = (
-                    linear_extensions
-                    if linear_extensions is not None
-                    else _enumerate_linear_extensions(non_top_arms, poset_edges_idx)
-                )
-                n_exts = int(lin_exts.shape[0])
-                ext_idx = rng.integers(0, n_exts, size=n)
-                chosen_exts = lin_exts[ext_idx]
-                u_sorted = np.sort(rng.uniform(0.0, 1.0, size=(n, m_int)), axis=1)
-                w_mat = np.empty((n, m_int), dtype=np.float64)
-                w_mat[np.arange(n)[:, None], chosen_exts] = u_sorted
-            else:
-                w_mat = rng.uniform(0.0, 1.0, size=(n, m_int))
-            pts[:, interior_cols] = tot[:, None] * w_mat
-        return pts
-
-    low_c = max(float(tau_clip[0]), 0.0) if prior_mode == "independent_halfnormal" else float(tau_clip[0])
-    high_c = float(tau_clip[1])
-    sd = float(scale_val)
-    a_std = low_c / sd if math.isfinite(low_c) else -np.inf
-    b_std = high_c / sd if math.isfinite(high_c) else np.inf
-    pts = np.zeros((n, dim), dtype=np.float64)
-    for j in range(dim):
-        if math.isfinite(a_std) or math.isfinite(b_std):
-            pts[:, j] = sp_stats.truncnorm.rvs(a_std, b_std, loc=0.0, scale=sd, size=n, random_state=rng)
-        else:
-            pts[:, j] = sd * rng.standard_normal(n)
-    return pts
-
-
-def _prior_logpdf_mu(
-    pts: np.ndarray,
-    *,
-    dim: int,
-    topology: str,
-    prior_mode: str,
-    scale_val: float,
-    alpha_vec: np.ndarray,
-    monotone: bool,
-    tau_clip: tuple[float, float],
-    poset_edges_idx: Sequence[tuple[int, int]],
-    non_top_arms: Sequence[int],
-    linear_extensions: np.ndarray | None = None,
-) -> np.ndarray:
-    """Evaluate log prior density ``log p(mu)`` at rows of ``pts`` of shape ``(N, dim)``."""
-    pts_arr = np.atleast_2d(np.asarray(pts, dtype=np.float64))
-    n_pts = pts_arr.shape[0]
-    low_c = (
-        max(float(tau_clip[0]), 0.0)
-        if prior_mode == "independent_halfnormal"
-        else float(tau_clip[0])
-    )
-    high_c = float(tau_clip[1])
-    valid = np.all((pts_arr >= low_c) & (pts_arr <= high_c), axis=1)
-
-    if prior_mode in _BUNDLE_PRIOR_MODES:
-        if topology == "chain" and monotone:
-            theta_mat = np.empty_like(pts_arr)
-            theta_mat[:, 0] = pts_arr[:, 0]
-            if dim > 1:
-                theta_mat[:, 1:] = np.diff(pts_arr, axis=1)
-            valid &= np.all(theta_mat > 0.0, axis=1)
-            out = np.full(n_pts, -np.inf, dtype=np.float64)
-            if not np.any(valid):
-                return out
-            th_v = theta_mat[valid]
-            tot_v = np.sum(th_v, axis=1)
-            a_vec = np.asarray(alpha_vec, dtype=np.float64)
-            u_v = th_v / np.maximum(tot_v[:, None], 1e-300)
-            log_dir_norm = float(sp_special.gammaln(np.sum(a_vec)) - np.sum(sp_special.gammaln(a_vec)))
-            dir_log = log_dir_norm + np.sum((a_vec[None, :] - 1.0) * np.log(np.maximum(u_v, 1e-300)), axis=1)
-            out[valid] = (
-                _fast_bundle_prior_logpdf(prior_mode, float(scale_val), tot_v)
-                - float(dim - 1) * np.log(np.maximum(tot_v, 1e-300))
-                + dir_log
-            )
-            return out
-
-        m_int = len(non_top_arms)
-        interior_cols = [a - 1 for a in non_top_arms]
-        tot = pts_arr[:, -1]
-        valid &= tot > 0.0
-        if m_int > 0:
-            w_int = pts_arr[:, interior_cols]
-            valid &= np.all((w_int >= 0.0) & (w_int <= tot[:, None]), axis=1)
-            if monotone:
-                zero_first = any(u == 0 for u, _ in poset_edges_idx)
-                zero_second = any(v == 0 for _, v in poset_edges_idx)
-                for u, v in poset_edges_idx:
-                    if zero_second and not zero_first:
-                        lo, hi = int(v), int(u)
-                    elif zero_first and not zero_second:
-                        lo, hi = int(u), int(v)
-                    else:
-                        lo, hi = min(int(u), int(v)), max(int(u), int(v))
-                    if lo >= 1 and hi >= 1:
-                        valid &= pts_arr[:, hi - 1] >= pts_arr[:, lo - 1]
-                    elif lo == 0 and hi >= 1:
-                        valid &= pts_arr[:, hi - 1] >= 0.0
-        out = np.full(n_pts, -np.inf, dtype=np.float64)
-        if not np.any(valid):
-            return out
-        lin_exts = (
-            linear_extensions
-            if linear_extensions is not None
-            else (_enumerate_linear_extensions(non_top_arms, poset_edges_idx) if (monotone and m_int > 0) else np.zeros((1, m_int), dtype=np.int32))
-        )
-        n_exts = max(int(lin_exts.shape[0]), 1)
-        log_inv_vol = float(sp_special.gammaln(m_int + 1) - math.log(n_exts)) if (monotone and m_int > 0) else 0.0
-        tot_v = tot[valid]
-        out[valid] = (
-            _fast_bundle_prior_logpdf(prior_mode, float(scale_val), tot_v)
-            - float(m_int) * np.log(np.maximum(tot_v, 1e-300))
-            + log_inv_vol
-        )
-        return out
-
-    if monotone:
-        if topology == "chain":
-            theta_mat = np.empty_like(pts_arr)
-            theta_mat[:, 0] = pts_arr[:, 0]
-            if dim > 1:
-                theta_mat[:, 1:] = np.diff(pts_arr, axis=1)
-            valid &= np.all(theta_mat >= 0.0, axis=1)
-        else:
-            zero_first = any(u == 0 for u, _ in poset_edges_idx)
-            zero_second = any(v == 0 for _, v in poset_edges_idx)
-            for u, v in poset_edges_idx:
-                if zero_second and not zero_first:
-                    lo, hi = int(v), int(u)
-                elif zero_first and not zero_second:
-                    lo, hi = int(u), int(v)
-                else:
-                    lo, hi = min(int(u), int(v)), max(int(u), int(v))
-                if lo >= 1 and hi >= 1:
-                    valid &= pts_arr[:, hi - 1] >= pts_arr[:, lo - 1]
-                elif lo == 0 and hi >= 1:
-                    valid &= pts_arr[:, hi - 1] >= 0.0
-
-    if prior_mode == "flat":
-        return np.where(valid, 0.0, -np.inf)
-
-    sd = float(scale_val)
-    out = np.full(n_pts, -np.inf, dtype=np.float64)
-    if not np.any(valid):
-        return out
-    pts_v = pts_arr[valid]
-    a_std = low_c / sd if math.isfinite(low_c) else -np.inf
-    b_std = high_c / sd if math.isfinite(high_c) else np.inf
-    trunc_mass = max(float(sp_special.ndtr(b_std) - sp_special.ndtr(a_std)), 1e-300)
-    log_norm_per_dim = -0.5 * math.log(2.0 * math.pi) - math.log(sd) - math.log(trunc_mass)
-    out[valid] = -0.5 * np.sum((pts_v / sd) ** 2, axis=1) + float(dim) * log_norm_per_dim
-    return out
-
-
-def _infer_arm_sample_sizes(
-    arms: tuple[str, ...],
-    results_map: Mapping[tuple[str, str], RankKLongBetResult],
-    explicit_sizes: Mapping[str, float] | Sequence[float] | None,
-) -> np.ndarray:
-    """Resolve per-arm sample sizes ``(n_0, ..., n_{A-1})`` for bipartite variance regularization."""
-    n_arms = len(arms)
-    if explicit_sizes is not None:
-        if isinstance(explicit_sizes, Mapping):
-            sizes = np.array([float(explicit_sizes[a]) for a in arms], dtype=np.float64)
-        else:
-            sizes = np.asarray(explicit_sizes, dtype=np.float64)
-        if sizes.shape != (n_arms,) or np.any(~np.isfinite(sizes)) or np.any(sizes <= 0.0):
-            raise ValueError(
-                f"arm_sample_sizes must provide {n_arms} finite positive numbers; got {explicit_sizes!r}"
-            )
-        return sizes
-
-    arm_to_idx = {arm: idx for idx, arm in enumerate(arms)}
-    counts: list[list[float]] = [[] for _ in range(n_arms)]
-    for (t_arm, r_arm), res in results_map.items():
-        try:
-            catt = np.asarray(res.catt_draws)
-            trt_mask = np.asarray(res.treated_units, dtype=bool)
-        except (AttributeError, TypeError, ValueError):
-            continue
-        n_total = int(catt.shape[1]) if catt.ndim == 3 else 0
-        n_trt = int(np.sum(trt_mask)) if trt_mask.ndim == 1 else 0
-        n_ref = n_total - n_trt
-        if n_trt >= 2 and n_ref >= 2:
-            counts[arm_to_idx[t_arm]].append(float(n_trt))
-            counts[arm_to_idx[r_arm]].append(float(n_ref))
-
-    if all(len(c) > 0 for c in counts):
-        return np.array([float(np.median(c)) for c in counts], dtype=np.float64)
-    return np.ones(n_arms, dtype=np.float64)
-
-
-def _recover_arm_variances(
-    arms: tuple[str, ...],
-    pair_indices: Sequence[tuple[int, int]],
-    s_sq: np.ndarray,
-    is_bipartite: bool,
-    colors: np.ndarray,
-    arm_sample_sizes: np.ndarray,
-    min_group_var_share: float,
-    bipartite_ridge_weight: float,
-    bipartite_policy: str = "allocation",
-) -> tuple[_ArmVarianceArray, float]:
-    """Recover arm sampling variances ``v in R_+^A`` from pairwise posterior variances ``s_p^2``."""
-    n_arms = len(arms)
-    n_pairs = len(pair_indices)
-    share = float(min_group_var_share)
-    if not (0.0 <= share < 0.5):
-        raise ValueError(f"min_group_var_share must lie in [0, 0.5); got {min_group_var_share!r}")
-
-    a_var = np.zeros((n_pairs, n_arms), dtype=np.float64)
-    incident_vars: list[list[float]] = [[] for _ in range(n_arms)]
-    for p_idx, (j_idx, l_idx) in enumerate(pair_indices):
-        a_var[p_idx, j_idx] = 1.0
-        a_var[p_idx, l_idx] = 1.0
-        var_p = max(float(s_sq[p_idx]), 1e-12)
-        incident_vars[j_idx].append(var_p)
-        incident_vars[l_idx].append(var_p)
-
-    v_floor = np.array(
-        [share * min(inc) if inc else 1e-12 for inc in incident_vars],
-        dtype=np.float64,
-    )
-
-    if not is_bipartite:
-        # Exact reproduction of _backsolve_group_variances for A = 3 triangle
-        if n_arms == 3 and n_pairs == 3:
-            pair_var_map: dict[frozenset[int], float] = {
-                frozenset((j_idx, l_idx)): float(s_sq[p_idx])
-                for p_idx, (j_idx, l_idx) in enumerate(pair_indices)
-            }
-            v_bc = pair_var_map[frozenset((1, 0))]
-            v_ab = pair_var_map[frozenset((2, 1))]
-            v_ac = pair_var_map[frozenset((2, 0))]
-            v_b = max(0.5 * (v_bc + v_ab - v_ac), share * min(v_bc, v_ab))
-            v_c = max(v_bc - v_b, share * v_bc)
-            v_a = max(v_ab - v_b, share * v_ab)
-            v_vec = np.array([v_c, v_b, v_a], dtype=np.float64)
-            residual = float(np.linalg.norm(a_var @ v_vec - s_sq))
-            return _ArmVarianceArray(v_vec, arms), residual
-
-        sol = sp_optimize.lsq_linear(
-            a_var,
-            s_sq,
-            bounds=(v_floor, np.full(n_arms, np.inf)),
-        )
-        v_vec = np.maximum(np.asarray(sol.x, dtype=np.float64), v_floor)
-        residual = float(np.linalg.norm(a_var @ v_vec - s_sq))
-        return _ArmVarianceArray(v_vec, arms), residual
-
-    # Bipartite graph: rank(A_var) = A - 1 with null vector z_a = (-1)^{colors[a]}.
-    suggestion = _suggest_odd_cycle_fit(arms, pair_indices, colors)
-    if suggestion is None:
-        hint = "No single extra pairwise fit closes an odd cycle on these arms."
-    else:
-        (fit_j, fit_l), cycle = suggestion
-        hint = (
-            f"The missing odd cycle is {' -> '.join(arms[a] for a in cycle)}: fitting the "
-            f"contrast ({arms[fit_j]!r}, {arms[fit_l]!r}) would close it and identify every arm "
-            "variance."
-        )
-    _warn_rank_k(
-        f"reconcile_multi_arm_draws: contrast graph on arms {arms} is bipartite (contains no odd "
-        "cycle), so the unsigned variance incidence matrix A_var has rank A - 1 and arm variances "
-        "are under-identified along the alternating 2-coloring null vector; the shared-arm "
-        f"covariance of the likelihood then rests on bipartite_policy={bipartite_policy!r} "
-        f"rather than on the data. {hint}",
-        category=RankKDesignWarning,
-    )
-    inv_n = 1.0 / np.maximum(arm_sample_sizes, 1e-12)
-    pair_weights = a_var @ inv_n
-    sigma_sq_hat = float(
-        np.dot(s_sq, pair_weights) / max(float(np.dot(pair_weights, pair_weights)), 1e-12)
-    )
-    v_target = np.maximum(sigma_sq_hat * inv_n, v_floor)
-
-    null_vec = np.where(colors == 0, 1.0, -1.0).astype(np.float64)
-    null_vec /= max(float(np.linalg.norm(null_vec)), 1e-12)
-    scale_ref = max(float(np.mean(s_sq)), 1e-6)
-    lam_null = max(float(bipartite_ridge_weight), 1e-4)
-    # Regularize strongly along the 1-D null direction and lightly on the full vector for strict SPD
-    a_aug = np.vstack([
-        a_var,
-        math.sqrt(scale_ref) * null_vec[None, :],
-        math.sqrt(lam_null * scale_ref) * np.eye(n_arms, dtype=np.float64),
-    ])
-    b_aug = np.concatenate([
-        s_sq,
-        np.array([math.sqrt(scale_ref) * float(np.dot(null_vec, v_target))]),
-        math.sqrt(lam_null * scale_ref) * v_target,
-    ])
-    sol = sp_optimize.lsq_linear(
-        a_aug,
-        b_aug,
-        bounds=(v_floor, np.full(n_arms, np.inf)),
-    )
-    v_vec = np.maximum(np.asarray(sol.x, dtype=np.float64), v_floor)
-    residual = float(np.linalg.norm(a_var @ v_vec - s_sq))
-    return _ArmVarianceArray(v_vec, arms), residual
-
-
-def _suggest_odd_cycle_fit(
-    arms: tuple[str, ...],
-    pair_indices: Sequence[tuple[int, int]],
-    colors: np.ndarray,
-) -> tuple[tuple[int, int], list[int]] | None:
-    """Return the extra fit ``(j, l)`` that closes the shortest odd cycle, and that cycle.
-
-    On a connected bipartite graph any unfitted pair of same-colored arms closes an odd
-    cycle (the tree path between them has even length). Pairs adjacent in ``arms`` order
-    are preferred, then pairs away from the control arm.
-
-    Args:
-      arms: Arm labels.
-      pair_indices: Fitted contrasts as ``(treated_idx, ref_idx)``.
-      colors: 2-coloring of the arms.
-
-    Returns:
-      ``((j, l), cycle)`` with ``j > l`` and ``cycle`` the arm-index path ``l -> ... -> j -> l``,
-      or ``None`` when every same-colored pair is already fitted (cannot happen on a
-      bipartite graph with ``A >= 3``).
-    """
-    n_arms = len(arms)
-    fitted = {frozenset(p) for p in pair_indices}
-    adj: list[list[int]] = [[] for _ in range(n_arms)]
-    for j_idx, l_idx in pair_indices:
-        adj[j_idx].append(l_idx)
-        adj[l_idx].append(j_idx)
-    candidates = [
-        (j, l)
-        for l in range(n_arms)
-        for j in range(l + 1, n_arms)
-        if colors[j] == colors[l] and frozenset((j, l)) not in fitted
-    ]
-    if not candidates:
+def _validate_prior_scale_scalar(value: Any, name: str = "prior_scale") -> float | None:
+    """Validate ``prior_scale``: only ``None`` or a positive finite float is permitted."""
+    if value is None:
         return None
-    candidates.sort(key=lambda p: (p[0] - p[1], p[1] == 0, p[1], p[0]))
-    j_best, l_best = candidates[0]
-    parent = {l_best: -1}
-    queue: deque[int] = deque([l_best])
-    while queue:
-        u = queue.popleft()
-        for v in sorted(adj[u]):
-            if v not in parent:
-                parent[v] = u
-                queue.append(v)
-    path = [j_best]
-    while parent[path[-1]] != -1:
-        path.append(parent[path[-1]])
-    path.reverse()  # l_best -> ... -> j_best
-    return (j_best, l_best), [*path, l_best]
+    if isinstance(value, (str, bytes, bool, np.bool_)):
+        raise ValueError(
+            f"{name} must be None (hierarchical Half-t_3 default) or a positive float; "
+            f"string/boolean modes such as {value!r} were removed in v0.11"
+        )
+    try:
+        val = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be None or a positive float; got {value!r}") from exc
+    if not (math.isfinite(val) and val > 0.0):
+        raise ValueError(f"{name} must be finite and strictly positive; got {value!r}")
+    return val
 
 
-def _bipartite_null_interval(
-    arm_variances: np.ndarray,
-    pair_indices: Sequence[tuple[int, int]],
-    s_sq: np.ndarray,
-    colors: np.ndarray,
-    min_group_var_share: float,
-) -> tuple[np.ndarray, float, float]:
-    """Null vector ``z`` and the feasible shift interval keeping ``v + xi z >= floor``.
+def _parse_model_options(options: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Validate private ``_model_options`` dictionary for candidate comparisons and ablations."""
+    cfg: dict[str, Any] = {
+        "scale_prior": "global_halft",
+        "robust_error": "t4",
+        "period_positivity": True,
+        "use_sur": True,
+        "dynamic_shrinkage": True,
+        "n_chains": 4,
+        "n_warmup": 300,
+        "n_draws_per_chain": 400,
+        "max_continuation_rounds": 4,
+    }
+    if options is None:
+        return cfg
+    if not isinstance(options, Mapping):
+        raise ValueError(f"_model_options must be a mapping or None; got {type(options).__name__}")
+    unknown = set(options.keys()) - _ALLOWED_MODEL_OPTION_KEYS
+    if unknown:
+        raise ValueError(f"Unsupported _model_options keys: {sorted(unknown)}")
+    for k, v in options.items():
+        cfg[k] = v
+    if cfg["scale_prior"] not in _ALLOWED_SCALE_PRIORS:
+        raise ValueError(f"scale_prior must be one of {_ALLOWED_SCALE_PRIORS}; got {cfg['scale_prior']!r}")
+    if cfg["robust_error"] not in _ALLOWED_ROBUST_ERRORS:
+        raise ValueError(f"robust_error must be one of {_ALLOWED_ROBUST_ERRORS}; got {cfg['robust_error']!r}")
+    cfg["period_positivity"] = bool(cfg["period_positivity"])
+    cfg["use_sur"] = bool(cfg["use_sur"])
+    cfg["dynamic_shrinkage"] = bool(cfg["dynamic_shrinkage"])
+    cfg["n_chains"] = max(int(cfg["n_chains"]), 2)
+    cfg["n_warmup"] = max(int(cfg["n_warmup"]), 50)
+    cfg["n_draws_per_chain"] = max(int(cfg["n_draws_per_chain"]), 50)
+    cfg["max_continuation_rounds"] = max(int(cfg["max_continuation_rounds"]), 0)
+    return cfg
 
-    Args:
-      arm_variances: ``(A,)`` allocation solution ``v_alloc``.
-      pair_indices: Fitted contrasts as ``(treated_idx, ref_idx)``.
-      s_sq: ``(P,)`` pairwise posterior variances.
-      colors: 2-coloring of the arms (control has color ``0``).
-      min_group_var_share: Floor share ``eta`` of the minimum incident pairwise variance.
 
-    Returns:
-      ``(z, xi_lo, xi_hi)`` with ``z_a = +1`` on the control's color class and ``-1`` else.
+def _split_rhat_and_ess_1d(chains_2d: np.ndarray) -> tuple[float, float, float]:
+    """Compute Vehtari et al. (2021) split-Rhat, bulk ESS, and tail ESS for ``(C, N)`` chains."""
+    arr = np.asarray(chains_2d, dtype=np.float64)
+    n_c, n_s = arr.shape
+    half = n_s // 2
+    if half < 4:
+        return 1.0, float(n_c * n_s), float(n_c * n_s)
+    split = np.concatenate([arr[:, :half], arr[:, 2 * half - half : 2 * half]], axis=0)
+    if float(np.std(split)) < 1e-14:
+        return 1.0, float(n_c * n_s), float(n_c * n_s)
+
+    def _rhat_ess_raw(x: np.ndarray) -> tuple[float, float]:
+        m_chains, n_len = x.shape
+        chain_means = np.mean(x, axis=1)
+        chain_vars = np.var(x, axis=1, ddof=1)
+        w_var = float(np.mean(chain_vars))
+        b_var = float(n_len * np.var(chain_means, ddof=1)) if m_chains > 1 else 0.0
+        if w_var <= 1e-30:
+            return 1.0, float(m_chains * n_len)
+        var_hat = ((n_len - 1.0) / n_len) * w_var + (1.0 / n_len) * b_var
+        r_hat_val = math.sqrt(max(var_hat / w_var, 1.0))
+
+        # FFT autocorrelation pooled across split chains (Geyer initial positive sequence)
+        centered = x - chain_means[:, None]
+        n_fft = 1 << (2 * n_len - 1).bit_length()
+        spec = np.fft.rfft(centered, n=n_fft, axis=1)
+        acov = np.fft.irfft(spec * np.conj(spec), n=n_fft, axis=1)[:, :n_len]
+        acov /= np.arange(n_len, 0, -1, dtype=np.float64)[None, :]
+        mean_acov = np.mean(acov, axis=0)
+        rho_t = 1.0 - (w_var - mean_acov) / max(var_hat, 1e-30)
+        rho_t[0] = 1.0
+        tau = -1.0
+        max_pair = n_len // 2
+        for t_idx in range(max_pair):
+            pair_sum = float(rho_t[2 * t_idx] + (rho_t[2 * t_idx + 1] if 2 * t_idx + 1 < n_len else 0.0))
+            if pair_sum <= 0.0:
+                break
+            tau += 2.0 * pair_sum
+        tau = max(tau, 1.0 / float(m_chains * n_len))
+        ess_val = float(m_chains * n_len) / tau
+        return r_hat_val, min(ess_val, float(m_chains * n_len))
+
+    # Rank-normalize for bulk Rhat/ESS
+    flat = split.reshape(-1)
+    ranks = sp_stats.rankdata(flat, method="average")
+    z_bulk = sp_special.ndtri((ranks - 0.375) / ( float(flat.size) + 0.25 )).reshape(split.shape)
+    rhat_bulk, ess_bulk = _rhat_ess_raw(z_bulk)
+
+    # Folded rank-normalize for tail Rhat/ESS
+    folded = np.abs(split - np.median(split))
+    f_ranks = sp_stats.rankdata(folded.reshape(-1), method="average")
+    z_tail = sp_special.ndtri((f_ranks - 0.375) / (float(flat.size) + 0.25)).reshape(split.shape)
+    rhat_tail, ess_tail = _rhat_ess_raw(z_tail)
+
+    return max(rhat_bulk, rhat_tail), ess_bulk, ess_tail
+
+
+# ---- Topology, poset transitive reduction, and bipartite graph check -----------------------------
+
+
+def _transitive_reduction_dag(
+    nodes: Sequence[str],
+    directed_edges: Sequence[tuple[str, str]],
+) -> tuple[tuple[str, str], ...]:
+    """Validate acyclicity on ``(high, low)`` relations and return the unique cover edges."""
+    node_set = set(nodes)
+    adj: dict[str, set[str]] = {u: set() for u in nodes}
+    dedup_edges: list[tuple[str, str]] = []
+    seen_e: set[tuple[str, str]] = set()
+    for raw_hi, raw_lo in directed_edges:
+        hi, lo = str(raw_hi), str(raw_lo)
+        if hi == lo:
+            raise ValueError(f"Poset relation cannot be reflexive: ({hi!r}, {lo!r})")
+        if hi not in node_set or lo not in node_set:
+            raise ValueError(f"Relation ({hi!r}, {lo!r}) references arm outside {tuple(nodes)}")
+        if (hi, lo) not in seen_e:
+            seen_e.add((hi, lo))
+            dedup_edges.append((hi, lo))
+            adj[hi].add(lo)
+
+    # Cycle check via 3-color DFS on high -> low
+    state: dict[str, int] = {u: 0 for u in nodes}
+
+    def _dfs_cycle(u: str) -> None:
+        state[u] = 1
+        for v in adj[u]:
+            if state[v] == 1:
+                raise ValueError(f"Poset relations contain a directed cycle involving {u!r} and {v!r}")
+            if state[v] == 0:
+                _dfs_cycle(v)
+        state[u] = 2
+
+    for u in nodes:
+        if state[u] == 0:
+            _dfs_cycle(u)
+
+    # Reachability in >= 1 steps from each node
+    reach: dict[str, set[str]] = {}
+    for u in nodes:
+        vis: set[str] = set()
+        q: deque[str] = deque(adj[u])
+        while q:
+            cur = q.popleft()
+            if cur not in vis:
+                vis.add(cur)
+                q.extend(adj[cur] - vis)
+        reach[u] = vis
+
+    # (hi, lo) is a cover edge iff lo is not reachable from any intermediate w in adj[hi]
+    covers: list[tuple[str, str]] = []
+    for hi, lo in dedup_edges:
+        if not any(lo in reach[w] for w in adj[hi] if w != lo):
+            covers.append((hi, lo))
+    return tuple(covers)
+
+
+def _topological_sort_low_to_high(
+    nodes: Sequence[str],
+    cover_edges: Sequence[tuple[str, str]],
+    control_arm: str,
+) -> tuple[str, ...]:
+    """Topological order ``(control, ..., top)`` where ``low`` precedes ``high`` for every ``(high, low)``."""
+    order_hint = {a: idx for idx, a in enumerate(nodes)}
+    in_deg = {a: 0 for a in nodes}
+    up_adj: dict[str, list[str]] = {a: [] for a in nodes}
+    for hi, lo in cover_edges:
+        up_adj[lo].append(hi)
+        in_deg[hi] += 1
+    if in_deg[control_arm] > 0:
+        raise ValueError(f"Control arm {control_arm!r} cannot be strictly above another arm in poset")
+
+    ready = sorted([a for a in nodes if in_deg[a] == 0], key=lambda a: (0 if a == control_arm else 1, order_hint[a]))
+    result: list[str] = []
+    while ready:
+        cur = ready.pop(0)
+        result.append(cur)
+        for nxt in sorted(up_adj[cur], key=lambda a: order_hint[a]):
+            in_deg[nxt] -= 1
+            if in_deg[nxt] == 0:
+                ready.append(nxt)
+                ready.sort(key=lambda a: (0 if a == control_arm else 1, order_hint[a]))
+    if len(result) != len(nodes):
+        raise ValueError("Poset relations contain a cycle")
+    if result[0] != control_arm:
+        result.remove(control_arm)
+        result.insert(0, control_arm)
+    return tuple(result)
+
+
+def _resolve_arms_and_poset(
+    pair_keys: Sequence[tuple[str, str]],
+    arms: Sequence[str] | None,
+    order: Sequence[str] | None,
+    poset: Sequence[tuple[str, str]] | None,
+) -> dict[str, Any]:
+    """Resolve arm list, cover edges, spanning tree, cut matrix, cycle basis, and bipartiteness."""
+    if not pair_keys:
+        raise ValueError("results must contain at least one fitted contrast pair")
+    if order is not None and poset is not None:
+        raise ValueError("Specify at most one of `order` or `poset`, not both")
+
+    clean_pairs: list[tuple[str, str]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    discovered_arms: list[str] = []
+    for item in pair_keys:
+        if not (isinstance(item, tuple) and len(item) == 2):
+            raise ValueError(f"Contrast keys must be 2-tuples (arm_high, arm_low); got {item!r}")
+        u, v = str(item[0]), str(item[1])
+        if not u or not v or u == v:
+            raise ValueError(f"Contrast pair must name two distinct non-empty arms; got {item!r}")
+        if (u, v) in seen_pairs or (v, u) in seen_pairs:
+            raise ValueError(f"Duplicate or reversed contrast pair ({u!r}, {v!r}) in results")
+        seen_pairs.add((u, v))
+        clean_pairs.append((u, v))
+        for a in (u, v):
+            if a not in discovered_arms:
+                discovered_arms.append(a)
+
+    if arms is not None:
+        arms_list = [str(a) for a in arms]
+        if len(arms_list) < 2 or len(set(arms_list)) != len(arms_list):
+            raise ValueError(f"`arms` must contain >= 2 unique arm names; got {arms!r}")
+        unknown = set(discovered_arms) - set(arms_list)
+        if unknown:
+            raise ValueError(f"Fitted pairs reference arms {sorted(unknown)} not present in `arms`")
+    else:
+        arms_list = None
+
+    resolved_order: tuple[str, ...] | None = None
+    if order is not None:
+        ord_list = [str(a) for a in order]
+        if len(ord_list) < 2 or len(set(ord_list)) != len(ord_list):
+            raise ValueError(f"`order` must contain >= 2 unique arm names; got {order!r}")
+        if arms_list is not None and set(arms_list) != set(ord_list):
+            raise ValueError(f"`arms` {arms_list} and `order` {ord_list} must contain the same arms")
+        unknown = set(discovered_arms) - set(ord_list)
+        if unknown:
+            raise ValueError(f"Fitted pairs reference arms {sorted(unknown)} not in `order`")
+        arms_tuple = tuple(ord_list)
+        resolved_order = arms_tuple
+        cover_edges = tuple((arms_tuple[i], arms_tuple[i - 1]) for i in range(1, len(arms_tuple)))
+    elif poset is not None:
+        poset_list = [(str(hi), str(lo)) for hi, lo in poset]
+        if not poset_list:
+            raise ValueError("`poset` must contain at least one (high, low) cover relation")
+        poset_nodes = list(arms_list) if arms_list is not None else list(discovered_arms)
+        for hi, lo in poset_list:
+            for a in (hi, lo):
+                if a not in poset_nodes:
+                    if arms_list is not None:
+                        raise ValueError(f"`poset` references arm {a!r} not in `arms`")
+                    poset_nodes.append(a)
+        cover_edges = _transitive_reduction_dag(poset_nodes, poset_list)
+        if arms_list is not None:
+            control_arm = arms_list[0]
+            # Preserve caller's `arms` order if already topologically valid; otherwise sort cleanly.
+            pos_of = {a: idx for idx, a in enumerate(arms_list)}
+            if any(hi == control_arm for hi, _ in cover_edges):
+                raise ValueError(f"Control arm {control_arm!r} (arms[0]) cannot dominate another arm in `poset`")
+            if all(pos_of[lo] < pos_of[hi] for hi, lo in cover_edges):
+                arms_tuple = tuple(arms_list)
+            else:
+                arms_tuple = _topological_sort_low_to_high(arms_list, cover_edges, control_arm)
+        else:
+            highs = {hi for hi, _ in cover_edges}
+            minimals = [a for a in poset_nodes if a not in highs]
+            if len(minimals) != 1:
+                raise ValueError(
+                    f"Cannot infer a unique control arm from `poset` (minimal arms: {minimals}); pass `arms=` explicitly"
+                )
+            arms_tuple = _topological_sort_low_to_high(poset_nodes, cover_edges, minimals[0])
+    else:
+        # Infer DAG directly from directed keys (arm_high, arm_low) in results
+        base_nodes = list(arms_list) if arms_list is not None else list(discovered_arms)
+        cover_edges = _transitive_reduction_dag(base_nodes, clean_pairs)
+        if arms_list is not None:
+            control_arm = arms_list[0]
+            pos_of = {a: idx for idx, a in enumerate(arms_list)}
+            if any(hi == control_arm for hi, _ in cover_edges):
+                raise ValueError(
+                    f"Inferred directed graph has {control_arm!r} (arms[0]) as treated; pass `order=` or `poset=`"
+                )
+            if all(pos_of[lo] < pos_of[hi] for hi, lo in cover_edges):
+                arms_tuple = tuple(arms_list)
+            else:
+                arms_tuple = _topological_sort_low_to_high(arms_list, cover_edges, control_arm)
+        else:
+            highs = {hi for hi, _ in cover_edges}
+            minimals = [a for a in base_nodes if a not in highs]
+            if len(minimals) != 1:
+                raise ValueError(
+                    f"Cannot infer a unique control arm from pair keys (minimal arms: {minimals}); "
+                    "pass `order=` or `poset=` explicitly"
+                )
+            arms_tuple = _topological_sort_low_to_high(base_nodes, cover_edges, minimals[0])
+
+    n_arms = len(arms_tuple)
+    arm_to_idx = {a: idx for idx, a in enumerate(arms_tuple)}
+
+    # Cut matrix B_cut of shape (P, A - 1) on non-control arms 1..A-1
+    n_pairs = len(clean_pairs)
+    b_cut = np.zeros((n_pairs, n_arms - 1), dtype=np.float64)
+    for p_idx, (u, v) in enumerate(clean_pairs):
+        iu, iv = arm_to_idx[u], arm_to_idx[v]
+        if iu > 0:
+            b_cut[p_idx, iu - 1] = 1.0
+        if iv > 0:
+            b_cut[p_idx, iv - 1] = -1.0
+    if np.linalg.matrix_rank(b_cut) < n_arms - 1:
+        raise ValueError(
+            f"Fitted contrast pairs {clean_pairs} do not form a connected graph across arms {arms_tuple}"
+        )
+
+    chain_covers = tuple((arms_tuple[i], arms_tuple[i - 1]) for i in range(1, n_arms))
+    topology = "chain" if set(cover_edges) == set(chain_covers) and len(cover_edges) == n_arms - 1 else "poset"
+    if topology == "chain" and resolved_order is None:
+        resolved_order = arms_tuple
+
+    # Spanning tree rooted at arms_tuple[0] (preferring cover edges, then fitted pairs)
+    undir_adj: dict[str, list[str]] = {a: [] for a in arms_tuple}
+    for hi, lo in (*cover_edges, *clean_pairs):
+        if hi not in undir_adj[lo]:
+            undir_adj[lo].append(hi)
+        if lo not in undir_adj[hi]:
+            undir_adj[hi].append(lo)
+    parent_of: dict[str, str] = {}
+    bfs_q: deque[str] = deque([arms_tuple[0]])
+    visited_tree = {arms_tuple[0]}
+    while bfs_q:
+        cur = bfs_q.popleft()
+        for nb in undir_adj[cur]:
+            if nb not in visited_tree:
+                visited_tree.add(nb)
+                parent_of[nb] = cur
+                bfs_q.append(nb)
+    tree_edges = tuple((a, parent_of[a]) for a in arms_tuple[1:])
+
+    # Partition fitted_pairs into a spanning forest vs redundant cycle-closing pairs
+    uf_parent = list(range(n_arms))
+
+    def _find(x: int) -> int:
+        while uf_parent[x] != x:
+            uf_parent[x] = uf_parent[uf_parent[x]]
+            x = uf_parent[x]
+        return x
+
+    redundant_pairs: list[tuple[str, str]] = []
+    for u, v in clean_pairs:
+        ru, rv = _find(arm_to_idx[u]), _find(arm_to_idx[v])
+        if ru == rv:
+            redundant_pairs.append((u, v))
+        else:
+            uf_parent[ru] = rv
+
+    # Left nullspace N_cycle of B_cut (N_cycle^T B_cut == 0)
+    u_svd, s_svd, _ = np.linalg.svd(b_cut, full_matrices=True)
+    rank_b = int(np.sum(s_svd > 1e-10))
+    n_cycle = u_svd[:, rank_b:]  # (P, P - (A - 1))
+
+    # Bipartiteness check on undirected fitted contrast graph
+    f_adj: dict[int, list[int]] = {i: [] for i in range(n_arms)}
+    fitted_undir: set[tuple[int, int]] = set()
+    for u, v in clean_pairs:
+        iu, iv = arm_to_idx[u], arm_to_idx[v]
+        f_adj[iu].append(iv)
+        f_adj[iv].append(iu)
+        fitted_undir.add((max(iu, iv), min(iu, iv)))
+    color = [-1] * n_arms
+    color[0] = 0
+    is_bipartite = True
+    q_bip: deque[int] = deque([0])
+    while q_bip and is_bipartite:
+        cur = q_bip.popleft()
+        for nb in f_adj[cur]:
+            if color[nb] == -1:
+                color[nb] = 1 - color[cur]
+                q_bip.append(nb)
+            elif color[nb] == color[cur]:
+                is_bipartite = False
+                break
+
+    suggested_odd_pair: tuple[str, str] | None = None
+    if is_bipartite and n_arms >= 3:
+        # Pick the highest-indexed missing pair within the same color class to close an odd cycle
+        candidates: list[tuple[int, int]] = []
+        for j in range(n_arms - 1, -1, -1):
+            for l in range(j - 1, -1, -1):
+                if color[j] == color[l] and (j, l) not in fitted_undir:
+                    # Prefer closing a 3-cycle with two already-fitted edges
+                    closes_triangle = any(
+                        (max(j, w), min(j, w)) in fitted_undir and (max(l, w), min(l, w)) in fitted_undir
+                        for w in range(n_arms)
+                        if w not in (j, l)
+                    )
+                    candidates.append((1 if closes_triangle else 0, j, l))
+        if candidates:
+            candidates.sort(reverse=True)
+            _, hi_i, lo_i = candidates[0]
+            suggested_odd_pair = (arms_tuple[hi_i], arms_tuple[lo_i])
+
+    all_pairs = tuple(
+        (arms_tuple[j], arms_tuple[l])
+        for j in range(1, n_arms)
+        for l in range(j)
+    )
+
+    # Cover matrix C_cover of shape (E_c, A - 1)
+    c_cover = np.zeros((len(cover_edges), n_arms - 1), dtype=np.float64)
+    for e_idx, (hi, lo) in enumerate(cover_edges):
+        ihi, ilo = arm_to_idx[hi], arm_to_idx[lo]
+        if ihi > 0:
+            c_cover[e_idx, ihi - 1] = 1.0
+        if ilo > 0:
+            c_cover[e_idx, ilo - 1] = -1.0
+
+    # Strict interior heights h_a >= 1 for cone feasibility
+    heights = np.zeros(n_arms, dtype=np.float64)
+    for a in arms_tuple[1:]:
+        ia = arm_to_idx[a]
+        lows_of_a = [arm_to_idx[lo] for hi, lo in cover_edges if hi == a]
+        heights[ia] = (max(heights[lo_i] for lo_i in lows_of_a) + 1.0) if lows_of_a else 1.0
+
+    return {
+        "arms": arms_tuple,
+        "arm_to_idx": arm_to_idx,
+        "order": resolved_order,
+        "cover_edges": cover_edges,
+        "c_cover": c_cover,
+        "topology": topology,
+        "tree_edges": tree_edges,
+        "fitted_pairs": tuple(clean_pairs),
+        "redundant_pairs": tuple(redundant_pairs),
+        "all_pairs": all_pairs,
+        "b_cut": b_cut,
+        "n_cycle": n_cycle,
+        "is_bipartite": is_bipartite,
+        "suggested_odd_pair": suggested_odd_pair,
+        "interior_heights": heights[1:],  # (A - 1,)
+    }
+
+
+# ---- Stage-1 trajectory & arm residual covariance extraction ------------------------------------
+
+
+def _extract_raw_trt_trajectory(res: RankKLongBetResult) -> np.ndarray:
+    """Extract ``(S, T_post)`` treated-average post-adoption trajectory draws from ``res``."""
+    meta = getattr(res, "arm_metadata", None)
+    if isinstance(meta, Mapping):
+        for k_traj in (
+            "trt_trajectory_draws",
+            "treated_trajectory_draws",
+            "catt_trt_draws",
+            "trt_post_traj_draws",
+        ):
+            if k_traj in meta and meta[k_traj] is not None:
+                traj = np.asarray(meta[k_traj], dtype=np.float64)
+                if (
+                    traj.ndim == 2
+                    and traj.shape[0] >= 2
+                    and traj.shape[1] >= 1
+                    and np.all(np.isfinite(traj))
+                ):
+                    return traj
+
+    catt = np.asarray(res.catt_draws, dtype=np.float64)
+    if catt.ndim != 3 or catt.shape[0] < 2:
+        raise ValueError(f"RankKLongBetResult.catt_draws must be 3-D (S, N, T) with S >= 2; got {catt.shape}")
+    cohorts_arr, ever_arr, _ = _infer_panel_masks_from_result(res, None, None, None)
+    if not np.any(ever_arr):
+        raise ValueError("RankKLongBetResult has no ever-treated units to extract post-adoption trajectory")
+    n_draws, _, n_periods = catt.shape
+    waves = sorted(int(g) for g in np.unique(cohorts_arr[ever_arr]))
+    t0 = waves[0]
+    t_post = max(n_periods - t0, 1)
+    if len(waves) <= 1:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            traj = np.nanmean(catt[:, ever_arr, t0 : t0 + t_post], axis=1)
+        return np.asarray(traj, dtype=np.float64)
+
+    traj = np.zeros((n_draws, t_post), dtype=np.float64)
+    trt_idx = np.nonzero(ever_arr)[0]
+    trt_c = cohorts_arr[trt_idx]
+    for s_step in range(t_post):
+        cal_t = trt_c + s_step
+        valid = cal_t < n_periods
+        if np.any(valid):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                traj[:, s_step] = np.nanmean(catt[:, trt_idx[valid], cal_t[valid]], axis=1)
+        elif s_step > 0:
+            traj[:, s_step] = traj[:, s_step - 1]
+    return traj
+
+
+def _lookup_meta_cov(meta: Mapping[str, Any] | None, role: str) -> np.ndarray | None:
+    """Read treated or control post-window residual covariance from ``arm_metadata``."""
+    if not isinstance(meta, Mapping):
+        return None
+    if role == "treated":
+        keys = ("post_residual_cov_treated", "treated_post_cov", "post_cov_treated")
+    else:
+        keys = ("post_residual_cov_control", "control_post_cov", "post_cov_control")
+    for k in keys:
+        if k in meta and meta[k] is not None:
+            arr = np.asarray(meta[k], dtype=np.float64)
+            if arr.ndim == 2 and arr.shape[0] == arr.shape[1] and arr.shape[0] >= 1 and np.all(np.isfinite(arr)):
+                return arr
+    nested = meta.get(role)
+    if isinstance(nested, Mapping) and nested.get("post_cov") is not None:
+        arr = np.asarray(nested["post_cov"], dtype=np.float64)
+        if arr.ndim == 2 and arr.shape[0] == arr.shape[1] and arr.shape[0] >= 1 and np.all(np.isfinite(arr)):
+            return arr
+    return None
+
+
+def _lookup_meta_n(res: RankKLongBetResult, role: str) -> float:
+    """Read arm unit count from ``arm_metadata`` or infer from ``catt_draws``."""
+    meta = getattr(res, "arm_metadata", None)
+    if isinstance(meta, Mapping):
+        direct_key = "n_treated" if role == "treated" else "n_control"
+        if direct_key in meta and meta[direct_key] is not None:
+            return max(float(meta[direct_key]), 1.0)
+        nested = meta.get(role)
+        if isinstance(nested, Mapping):
+            for nk in ("n", "n_units"):
+                if nk in nested and nested[nk] is not None:
+                    return max(float(nested[nk]), 1.0)
+    cohorts_arr, ever_arr, _ = _infer_panel_masks_from_result(res, None, None, None)
+    n_trt = float(np.sum(ever_arr))
+    n_ctrl = float(max(cohorts_arr.size - int(n_trt), 1))
+    return max(n_trt if role == "treated" else n_ctrl, 1.0)
+
+
+def _extract_outcome_summaries(
+    results_map: Mapping[tuple[str, str], RankKLongBetResult],
+    arms: tuple[str, ...],
+    arm_to_idx: Mapping[str, int],
+    fitted_pairs: tuple[tuple[str, str], ...],
+    psi: np.ndarray,
+    horizon: int,
+) -> dict[str, Any]:
+    """Extract basis projections ``(y_p, S_p, V_a, F_p)`` and out-of-basis trajectory stats."""
+    n_arms = len(arms)
+    k_dim = int(psi.shape[1])
+    y_by_pair: dict[tuple[str, str], np.ndarray] = {}
+    s_by_pair: dict[tuple[str, str], np.ndarray] = {}
+    traj_mean_by_pair: dict[tuple[str, str], np.ndarray] = {}
+    traj_cov_by_pair: dict[tuple[str, str], np.ndarray] = {}
+    v_candidates: list[list[np.ndarray]] = [[] for _ in range(n_arms)]
+    n_candidates: list[list[float]] = [[] for _ in range(n_arms)]
+    fallback_ssq: list[list[float]] = [[] for _ in range(n_arms)]
+
+    for pair in fitted_pairs:
+        if pair not in results_map:
+            rev = (pair[1], pair[0])
+            if rev in results_map:
+                raise ValueError(
+                    f"Pair {pair!r} missing, found reversed {rev!r}; all outcomes must use identical pair orientation"
+                )
+            raise ValueError(f"Missing RankKLongBetResult for contrast pair {pair!r}")
+        res = results_map[pair]
+        raw_traj = _extract_raw_trt_trajectory(res)
+        if raw_traj.shape[1] < horizon:
+            raise ValueError(
+                f"Contrast {pair!r} has only {raw_traj.shape[1]} post-adoption period(s), fewer than horizon={horizon}"
+            )
+        traj_h = np.asarray(raw_traj[:, :horizon], dtype=np.float64)
+        if not np.all(np.isfinite(traj_h)):
+            raise ValueError(f"Non-finite post-adoption trajectory draws in contrast {pair!r}")
+        traj_mean_by_pair[pair] = np.mean(traj_h, axis=0)
+        traj_cov_by_pair[pair] = _psd_clip(np.atleast_2d(np.cov(traj_h, rowvar=False, ddof=1)), floor=1e-12)
+
+        proj_draws = traj_h @ psi  # (S, K')
+        y_by_pair[pair] = np.mean(proj_draws, axis=0)
+        s_by_pair[pair] = _psd_clip(np.atleast_2d(np.cov(proj_draws, rowvar=False, ddof=1)), floor=1e-12)
+
+        ia, ib = arm_to_idx[pair[0]], arm_to_idx[pair[1]]
+        meta = getattr(res, "arm_metadata", None)
+        cov_trt = _lookup_meta_cov(meta, "treated")
+        cov_ctrl = _lookup_meta_cov(meta, "control")
+        if cov_trt is not None and cov_trt.shape[0] >= horizon:
+            v_candidates[ia].append(_psd_clip(psi.T @ cov_trt[:horizon, :horizon] @ psi, floor=1e-12))
+        if cov_ctrl is not None and cov_ctrl.shape[0] >= horizon:
+            v_candidates[ib].append(_psd_clip(psi.T @ cov_ctrl[:horizon, :horizon] @ psi, floor=1e-12))
+
+        n_trt = _lookup_meta_n(res, "treated")
+        n_ctrl = _lookup_meta_n(res, "control")
+        n_candidates[ia].append(n_trt)
+        n_candidates[ib].append(n_ctrl)
+
+        # Stage-1 residual s_sq fallback strictly for synthetic/mock RankKLongBetResult without arm_metadata
+        gp_list = getattr(res, "gp_hyper_draws", None) or []
+        if gp_list and isinstance(gp_list[0], Mapping) and "s_sq" in gp_list[0]:
+            ssq_arr = np.asarray(gp_list[0]["s_sq"], dtype=np.float64)
+            if ssq_arr.size > 0 and np.all(np.isfinite(ssq_arr)) and float(np.mean(ssq_arr)) > 0.0:
+                ssq_mean = float(np.mean(ssq_arr))
+                fallback_ssq[ia].append(ssq_mean / n_trt)
+                fallback_ssq[ib].append(ssq_mean / n_ctrl)
+
+    # Resolve V_{m,a} for every arm a = 0..A-1
+    v_arms: list[np.ndarray] = []
+    missing_arms: list[int] = []
+    for a in range(n_arms):
+        if v_candidates[a]:
+            v_arms.append(_psd_clip(np.mean(np.stack(v_candidates[a], axis=0), axis=0), floor=1e-12))
+        elif fallback_ssq[a]:
+            v_iso = float(np.mean(fallback_ssq[a]))
+            v_arms.append(v_iso * np.eye(k_dim, dtype=np.float64))
+        else:
+            v_arms.append(np.zeros((k_dim, k_dim), dtype=np.float64))
+            missing_arms.append(a)
+
+    if missing_arms:
+        # Fallback NNLS variance allocation from S_{m,p} inversely proportional to n_a (mock unit tests only)
+        inv_n = np.array(
+            [1.0 / max(float(np.mean(n_candidates[a])) if n_candidates[a] else 1.0, 1.0) for a in range(n_arms)],
+            dtype=np.float64,
+        )
+        p_len = len(fitted_pairs)
+        a_inc = np.zeros((p_len, n_arms), dtype=np.float64)
+        rhs = np.zeros(p_len, dtype=np.float64)
+        for p_i, pair in enumerate(fitted_pairs):
+            ia, ib = arm_to_idx[pair[0]], arm_to_idx[pair[1]]
+            a_inc[p_i, ia] = 1.0
+            a_inc[p_i, ib] = 1.0
+            rhs[p_i] = 0.80 * float(np.trace(s_by_pair[pair])) / float(k_dim)
+        # Regularized NNLS toward sample-size-proportional baseline
+        scale_guess = float(np.median(rhs / np.maximum(a_inc @ inv_n, 1e-12)))
+        v_prior = scale_guess * inv_n
+        reg = 0.15
+        a_aug = np.vstack([a_inc, math.sqrt(reg) * np.eye(n_arms)])
+        b_aug = np.concatenate([rhs, math.sqrt(reg) * v_prior])
+        sol, _ = sp_optimize.nnls(a_aug, b_aug)
+        for a in missing_arms:
+            v_arms[a] = max(float(sol[a]), 1e-12) * np.eye(k_dim, dtype=np.float64)
+
+    f_by_pair: dict[tuple[str, str], np.ndarray] = {}
+    for pair in fitted_pairs:
+        ia, ib = arm_to_idx[pair[0]], arm_to_idx[pair[1]]
+        s_mp = s_by_pair[pair]
+        floor_mp = 1e-10 * max(float(np.trace(s_mp)) / float(k_dim), 1e-12)
+        f_by_pair[pair] = _psd_clip(s_mp - v_arms[ia] - v_arms[ib], floor=floor_mp)
+
+    # Realization-independent baseline scale s_{0,m}: stage-1 posterior SD of top contrast window Mode-1
+    top_arm = arms[-1]
+    ctrl_arm = arms[0]
+    if (top_arm, ctrl_arm) in s_by_pair:
+        s0_var = float(s_by_pair[(top_arm, ctrl_arm)][0, 0]) / float(horizon)
+    else:
+        # Project stage-1 pair variances onto top - ctrl via unweighted cut pseudoinverse
+        b_pinv = np.linalg.pinv(
+            np.array(
+                [
+                    [(1.0 if arm_to_idx[u] == j else (-1.0 if arm_to_idx[v] == j else 0.0)) for j in range(1, n_arms)]
+                    for u, v in fitted_pairs
+                ],
+                dtype=np.float64,
+            )
+        )
+        top_row = b_pinv[-1]
+        s0_var = float(sum((top_row[i] ** 2) * s_by_pair[p][0, 0] for i, p in enumerate(fitted_pairs))) / float(horizon)
+    s0_scale = max(math.sqrt(max(s0_var, 1e-16)), 1e-6)
+
+    return {
+        "y_by_pair": y_by_pair,
+        "s_by_pair": s_by_pair,
+        "v_arms": v_arms,
+        "f_by_pair": f_by_pair,
+        "traj_mean_by_pair": traj_mean_by_pair,
+        "traj_cov_by_pair": traj_cov_by_pair,
+        "s0_scale": s0_scale,
+    }
+
+
+# ---- Polyhedral cone constraints & exact cone normalizer Z_m(r, lambda) -------------------------
+
+
+def _build_cone_matrix_outcome(
+    c_cover: np.ndarray,
+    psi: np.ndarray,
+    horizon: int,
+    monotone: bool,
+    period_positivity: bool,
+) -> np.ndarray:
+    """Build ``A_m`` such that ``A_m @ vec_colmajor(Theta_m) >= 0`` defines ``K_m``.
+
+    Parameter ordering for outcome ``m`` is mode-major ``(Theta_{m,:,0}, ..., Theta_{m,:,K'-1})``
+    of length ``(A - 1) * K'``. When ``K' == 2`` and ``period_positivity=True``, the ``H + 1``
+    per-edge inequalities reduce algebraically to the 2 extreme envelope walls
+    ``u_{e,0} + m_min * u_{e,1} >= 0`` and ``u_{e,0} + m_max * u_{e,1} >= 0``.
     """
-    n_arms = int(arm_variances.shape[0])
-    incident: list[list[float]] = [[] for _ in range(n_arms)]
-    for p_idx, (j_idx, l_idx) in enumerate(pair_indices):
-        var_p = max(float(s_sq[p_idx]), 1e-12)
-        incident[j_idx].append(var_p)
-        incident[l_idx].append(var_p)
-    floor = np.array(
-        [float(min_group_var_share) * min(inc) if inc else 1e-12 for inc in incident],
+    n_nonctrl = int(c_cover.shape[1])
+    k_dim = int(psi.shape[1])
+    d_m = n_nonctrl * k_dim
+    if not monotone or c_cover.shape[0] == 0:
+        return np.zeros((0, d_m), dtype=np.float64)
+
+    if not period_positivity or k_dim == 1:
+        a_mat = np.zeros((c_cover.shape[0], d_m), dtype=np.float64)
+        a_mat[:, :n_nonctrl] = c_cover
+        return a_mat
+
+    psi_scaled = math.sqrt(float(horizon)) * psi  # column 0 == 1.0
+    if k_dim == 2:
+        p1 = psi_scaled[:, 1]
+        m_min = float(np.min(p1))
+        m_max = float(np.max(p1))
+        if m_max - m_min <= 1e-12:
+            a_mat = np.zeros((c_cover.shape[0], d_m), dtype=np.float64)
+            a_mat[:, :n_nonctrl] = c_cover
+            return a_mat
+        rows: list[np.ndarray] = []
+        for e_idx in range(c_cover.shape[0]):
+            ce = c_cover[e_idx]
+            rows.append(np.concatenate([ce, m_min * ce]))
+            rows.append(np.concatenate([ce, m_max * ce]))
+        return np.vstack(rows)
+
+    # General K' >= 3: Mode-1 constraint + H period constraints
+    rows = []
+    for e_idx in range(c_cover.shape[0]):
+        ce = c_cover[e_idx]
+        r0 = np.zeros(d_m, dtype=np.float64)
+        r0[:n_nonctrl] = ce
+        rows.append(r0)
+        for t_idx in range(horizon):
+            rt = np.concatenate([psi_scaled[t_idx, k] * ce for k in range(k_dim)])
+            rows.append(rt)
+    return np.vstack(rows)
+
+
+class _OutcomeConePriorSpec:
+    """Precomputed prior precision structure and exact cone normalizer ``log Z_m(r, lambda)``."""
+
+    def __init__(
+        self,
+        *,
+        c_cover: np.ndarray,
+        psi: np.ndarray,
+        horizon: int,
+        monotone: bool,
+        period_positivity: bool,
+        scale_prior: str,
+    ) -> None:
+        self.c_cover = np.asarray(c_cover, dtype=np.float64)
+        self.n_edges, self.n_nonctrl = self.c_cover.shape
+        self.psi = np.asarray(psi, dtype=np.float64)
+        self.horizon = int(horizon)
+        self.k_dim = int(psi.shape[1])
+        self.monotone = bool(monotone)
+        self.period_positivity = bool(period_positivity)
+        self.scale_prior = str(scale_prior)
+
+        base_prec = self.c_cover.T @ self.c_cover
+        if np.linalg.matrix_rank(base_prec) < self.n_nonctrl:
+            base_prec = base_prec + 1e-6 * np.eye(self.n_nonctrl)
+        base_cov = np.linalg.inv(base_prec)
+        self.c_scale = max(float(base_cov[-1, -1]), 1e-12)
+        self.lambda0_unit = self.c_scale * base_prec
+        _, logdet_u = np.linalg.slogdet(self.lambda0_unit)
+        self.logdet_unit = float(logdet_u)
+
+        self.is_tree_poset = (
+            self.n_edges == self.n_nonctrl
+            and np.linalg.matrix_rank(self.c_cover) == self.n_nonctrl
+        )
+        self.c_cover_inv: np.ndarray | None = (
+            np.linalg.inv(self.c_cover) if self.is_tree_poset else None
+        )
+        # Detect standard 2x2 diamond (A-1 == 3, E_c == 4, arms 10 and 01 conditionally independent given 11)
+        self.is_2x2_diamond = (
+            self.n_nonctrl == 3
+            and self.n_edges == 4
+            and abs(float(base_prec[0, 1])) < 1e-12
+            and np.allclose(np.sort(np.abs(self.c_cover), axis=0), np.sort(np.abs(self.c_cover), axis=0))
+        )
+        if self.is_2x2_diamond:
+            # Map which edges are (10, 00), (01, 00), (11, 10), (11, 01)
+            self._diamond_map = self._identify_diamond_edges()
+        else:
+            self._diamond_map = None
+
+        psi_scaled = math.sqrt(float(self.horizon)) * self.psi
+        if self.k_dim >= 2:
+            p1 = psi_scaled[:, 1]
+            self.m_plus = max(float(np.max(p1)), 1e-12)
+            self.m_minus = max(float(-np.min(p1)), 1e-12)
+        else:
+            self.m_plus = 0.0
+            self.m_minus = 0.0
+
+        self.a_cone = _build_cone_matrix_outcome(
+            self.c_cover, self.psi, self.horizon, self.monotone, self.period_positivity
+        )
+
+        # Deterministic QMC normal bank for general non-tree K' >= 3 fallback
+        self._qmc_z: np.ndarray | None = None
+        self._p1_spline: sp_interpolate.CubicSpline | None = None
+        if self.monotone and not self.is_tree_poset:
+            if self.scale_prior == "global_halft" and self.period_positivity and self.k_dim >= 2:
+                self._p1_spline = self._build_p1_logz_spline()
+
+    def _identify_diamond_edges(self) -> tuple[int, int, int, int] | None:
+        """Identify edge indices ``(e_10_0, e_01_0, e_11_10, e_11_01)`` if standard 2x2 diamond."""
+        e_10_0 = e_01_0 = e_11_10 = e_11_01 = -1
+        for idx, row in enumerate(self.c_cover):
+            tup = tuple(int(round(x)) for x in row)
+            if tup == (1, 0, 0):
+                e_10_0 = idx
+            elif tup == (0, 1, 0):
+                e_01_0 = idx
+            elif tup == (-1, 0, 1):
+                e_11_10 = idx
+            elif tup == (0, -1, 1):
+                e_11_01 = idx
+        if min(e_10_0, e_01_0, e_11_10, e_11_01) >= 0:
+            return (e_10_0, e_01_0, e_11_10, e_11_01)
+        return None
+
+    def precision_and_logdet(self, local_scales: np.ndarray) -> tuple[np.ndarray, float]:
+        """Return ``(Lambda_0(lambda), log det Lambda_0(lambda))``."""
+        if self.scale_prior == "global_halft":
+            return self.lambda0_unit, self.logdet_unit
+        inv_sq = 1.0 / np.maximum(np.asarray(local_scales, dtype=np.float64) ** 2, 1e-24)
+        prec = self.c_scale * ((self.c_cover.T * inv_sq[None, :]) @ self.c_cover)
+        sign, logdet = np.linalg.slogdet(prec)
+        if sign <= 0:
+            prec = _psd_clip(prec, floor=1e-12)
+            _, logdet = np.linalg.slogdet(prec)
+        return prec, float(logdet)
+
+    def _ensure_qmc_bank(self) -> np.ndarray:
+        if self._qmc_z is None:
+            d_tot = self.n_nonctrl * self.k_dim
+            sampler = sp_qmc.Sobol(d=d_tot, scramble=True, seed=20260311)
+            u = np.clip(sampler.random_base2(m=12), 1e-9, 1.0 - 1e-9)  # 4096 points
+            z_half = sp_special.ndtri(u)
+            self._qmc_z = np.concatenate([z_half, -z_half], axis=0)  # 8192 antithetic points
+        return self._qmc_z
+
+    def _diamond_logz_exact(
+        self, ratio: float, local_scales: np.ndarray, *, fast_grid: bool = False
+    ) -> float:
+        """Deterministic Gauss-Legendre exact cone probability on 2x2 diamond."""
+        assert self._diamond_map is not None
+        e10, e01, e31, e32 = self._diamond_map
+        lam = np.asarray(local_scales, dtype=np.float64)
+        tau1 = 1.0 / max(float(lam[e10]) ** 2, 1e-20)
+        tau2 = 1.0 / max(float(lam[e01]) ** 2, 1e-20)
+        tau3 = 1.0 / max(float(lam[e31]) ** 2, 1e-20)
+        tau4 = 1.0 / max(float(lam[e32]) ** 2, 1e-20)
+
+        w1 = tau3 / (tau1 + tau3)
+        w2 = tau4 / (tau2 + tau4)
+        v1 = 1.0 / (self.c_scale * (tau1 + tau3))
+        v2 = 1.0 / (self.c_scale * (tau2 + tau4))
+        prec_33 = self.c_scale * (
+            (tau1 * tau3) / (tau1 + tau3) + (tau2 * tau4) / (tau2 + tau4)
+        )
+        var_3 = 1.0 / max(prec_33, 1e-20)
+        sd_3 = math.sqrt(var_3)
+        sd_v1 = math.sqrt(v1)
+        sd_v2 = math.sqrt(v2)
+
+        if not self.period_positivity or self.k_dim == 1 or ratio <= 1e-12:
+            # 1D integral over x_{11,0} >= 0: p in [0.5, 1.0)
+            p_nodes = 0.75 + 0.25 * _GL16_X
+            p_weights = 0.25 * _GL16_W
+            x3 = sd_3 * sp_special.ndtri(np.clip(p_nodes, 0.5, 1.0 - 1e-15))
+            p10 = sp_special.ndtr(((1.0 - w1) * x3) / sd_v1) - sp_special.ndtr((-w1 * x3) / sd_v1)
+            p01 = sp_special.ndtr(((1.0 - w2) * x3) / sd_v2) - sp_special.ndtr((-w2 * x3) / sd_v2)
+            prob = float(np.sum(p_weights * np.maximum(p10, 0.0) * np.maximum(p01, 0.0)))
+            return math.log(max(prob, 1e-300))
+
+        if self.k_dim == 2:
+            gl_x = _GL8_X if fast_grid else _GL16_X
+            gl_w = _GL8_W if fast_grid else _GL16_W
+            w0 = 0.25 * gl_w
+            if fast_grid:
+                x3_0 = sd_3 * _GL8_P0_Z
+            else:
+                p0 = 0.75 + 0.25 * gl_x
+                x3_0 = sd_3 * sp_special.ndtri(np.clip(p0, 0.5, 1.0 - 1e-15))
+
+            mp, mm = self.m_plus, self.m_minus
+            m_sum = mp + mm
+            r_sd3 = ratio * sd_3
+            q_lo = sp_special.ndtr((-x3_0 / mp) / r_sd3)
+            q_hi = sp_special.ndtr((x3_0 / mm) / r_sd3)
+            q_span = np.maximum(q_hi - q_lo, 0.0)
+            q_grid = q_lo[:, None] + 0.5 * q_span[:, None] * (1.0 + gl_x[None, :])
+            w_q = 0.5 * q_span[:, None] * gl_w[None, :]
+            x3_1 = r_sd3 * sp_special.ndtri(np.clip(q_grid, 1e-15, 1.0 - 1e-15))
+
+            # Exact piecewise-linear support [lb, ub] of x_{b,1} where low_0(x_{b,1}) < high_0(x_{b,1})
+            lb = np.maximum(
+                -x3_0[:, None] / mp,
+                np.maximum(x3_1 - x3_0[:, None] / mm, (mm * x3_1 - x3_0[:, None]) / m_sum),
+            )
+            ub = np.minimum(
+                x3_0[:, None] / mm,
+                np.minimum(x3_1 + x3_0[:, None] / mp, (mp * x3_1 + x3_0[:, None]) / m_sum),
+            )
+
+            def _branch_prob(w_b: float, sd_b: float) -> np.ndarray:
+                r_sdb = ratio * sd_b
+                mu_1 = w_b * x3_1
+                c_lo = sp_special.ndtr((lb - mu_1) / r_sdb)
+                c_hi = sp_special.ndtr((ub - mu_1) / r_sdb)
+                c_span = np.where(ub > lb, np.maximum(c_hi - c_lo, 0.0), 0.0)
+                c_grid = c_lo[:, :, None] + 0.5 * c_span[:, :, None] * (1.0 + gl_x[None, None, :])
+                w_c = 0.5 * c_span[:, :, None] * gl_w[None, None, :]
+                xb_1 = mu_1[:, :, None] + r_sdb * sp_special.ndtri(np.clip(c_grid, 1e-15, 1.0 - 1e-15))
+                diff_1 = x3_1[:, :, None] - xb_1
+                low_0 = np.maximum(0.0, np.maximum(-mp * xb_1, mm * xb_1))
+                high_0 = x3_0[:, None, None] - np.maximum(0.0, np.maximum(-mp * diff_1, mm * diff_1))
+                mu_0 = w_b * x3_0[:, None, None]
+                p_int = np.where(
+                    high_0 > low_0,
+                    np.maximum(
+                        sp_special.ndtr((high_0 - mu_0) / sd_b) - sp_special.ndtr((low_0 - mu_0) / sd_b),
+                        0.0,
+                    ),
+                    0.0,
+                )
+                return np.sum(w_c * p_int, axis=2)
+
+            prob_10 = _branch_prob(w1, sd_v1)
+            prob_01 = _branch_prob(w2, sd_v2)
+            total = float(np.sum(w0[:, None] * w_q * prob_10 * prob_01))
+            return math.log(max(total, 1e-300))
+
+        return self._qmc_logz(ratio, local_scales)
+
+    def _qmc_logz(self, ratio: float, local_scales: np.ndarray) -> float:
+        """Smooth QMC fallback for general non-tree posets with K' >= 3."""
+        z_bank = self._ensure_qmc_bank()
+        prec, _ = self.precision_and_logdet(local_scales)
+        cov = np.linalg.inv(prec)
+        chol = np.linalg.cholesky(_psd_clip(cov, floor=1e-14))
+        n_pts = z_bank.shape[0]
+        # Map z_bank (N, (A-1)*K') -> Theta samples in mode-major order
+        blocks = []
+        for k in range(self.k_dim):
+            zk = z_bank[:, k * self.n_nonctrl : (k + 1) * self.n_nonctrl]
+            scale_k = 1.0 if k == 0 else ratio
+            blocks.append(scale_k * (zk @ chol.T))
+        pts = np.concatenate(blocks, axis=1)
+        inside = np.all((pts @ self.a_cone.T) >= 0.0, axis=1)
+        prob = max(float(np.mean(inside)), 0.5 / float(n_pts))
+        return math.log(prob)
+
+    def _build_p1_logz_spline(self) -> sp_interpolate.CubicSpline:
+        """Precompute cubic spline of ``log Z_m(exp(u), 1)`` on ``u in [-12, 12]``."""
+        u_grid = np.linspace(-12.0, 12.0, 97)
+        ones = np.ones(self.n_edges, dtype=np.float64)
+        vals = np.array(
+            [
+                self._diamond_logz_exact(float(math.exp(u)), ones)
+                if self._diamond_map is not None
+                else self._qmc_logz(float(math.exp(u)), ones)
+                for u in u_grid
+            ],
+            dtype=np.float64,
+        )
+        return sp_interpolate.CubicSpline(u_grid, vals, extrapolate=True)
+
+    def log_normalizer(self, ratio: float, local_scales: np.ndarray) -> float:
+        """Return ``log Pr((X_0, ratio * X_{1..K'-1}) in K_m | Lambda_0(local_scales))``."""
+        if not self.monotone or self.n_edges == 0:
+            return 0.0
+        r_clamped = float(np.clip(ratio, 1e-8, 1e8))
+        if self.is_tree_poset:
+            if not self.period_positivity or self.k_dim == 1:
+                return -float(self.n_nonctrl) * math.log(2.0)
+            if self.k_dim == 2:
+                p_edge = (
+                    math.atan(1.0 / (r_clamped * self.m_plus))
+                    + math.atan(1.0 / (r_clamped * self.m_minus))
+                ) / (2.0 * math.pi)
+                return float(self.n_nonctrl) * math.log(max(p_edge, 1e-300))
+            return self._qmc_logz(r_clamped, local_scales)
+
+        if self.scale_prior == "global_halft":
+            if not self.period_positivity or self.k_dim == 1:
+                if self._diamond_map is not None:
+                    return self._diamond_logz_exact(0.0, np.ones(self.n_edges))
+                return self._qmc_logz(0.0, np.ones(self.n_edges))
+            assert self._p1_spline is not None
+            u_val = float(np.clip(math.log(r_clamped), -12.0, 12.0))
+            if math.log(r_clamped) > 12.0:
+                # Asymptotic tail: Z(r) ~ r^{-(A-1)(K'-1)} for large r
+                base_12 = float(self._p1_spline(12.0))
+                return base_12 - float(self.n_nonctrl * (self.k_dim - 1)) * (math.log(r_clamped) - 12.0)
+            return float(self._p1_spline(u_val))
+
+        if self._diamond_map is not None:
+            return self._diamond_logz_exact(r_clamped, local_scales, fast_grid=True)
+        return self._qmc_logz(r_clamped, local_scales)
+
+
+# ---- Exact Pakman--Paninski (2014) truncated-Gaussian HMC & Gibbs samplers ----------------------
+
+
+def _sample_univariate_truncnorm(
+    mean: float,
+    sd: float,
+    low: float,
+    high: float,
+    rng: np.random.Generator,
+) -> float:
+    """Exact 1-D truncated normal draw on ``[low, high]`` stable deep into the tails."""
+    if high <= low + 1e-15:
+        return 0.5 * (low + high) if math.isfinite(low) and math.isfinite(high) else (low if math.isfinite(low) else high)
+    a = (low - mean) / sd if math.isfinite(low) else -math.inf
+    b = (high - mean) / sd if math.isfinite(high) else math.inf
+    if a <= -6.0 and b >= 6.0:
+        z = float(rng.standard_normal())
+        return mean + sd * float(np.clip(z, a, b))
+    if a >= 4.5:
+        # Robert (1995) shifted-exponential tail rejection for far right tail [a, b]
+        lam = 0.5 * (a + math.sqrt(a * a + 4.0))
+        for _ in range(128):
+            u_exp = float(rng.uniform(1e-15, 1.0))
+            if math.isfinite(b):
+                max_u = 1.0 - math.exp(-lam * (b - a))
+                z = a - math.log(max(1.0 - u_exp * max_u, 1e-300)) / lam
+            else:
+                z = a - math.log(u_exp) / lam
+            if math.log(float(rng.uniform(1e-15, 1.0))) <= -0.5 * (z - lam) ** 2:
+                return mean + sd * float(np.clip(z, a, b))
+        return mean + sd * a
+    if b <= -4.5:
+        return -_sample_univariate_truncnorm(-mean, sd, -high, -low, rng)
+
+    cdf_a = float(sp_special.ndtr(a)) if math.isfinite(a) else 0.0
+    cdf_b = float(sp_special.ndtr(b)) if math.isfinite(b) else 1.0
+    diff = cdf_b - cdf_a
+    if diff > 1e-12:
+        u = float(rng.uniform(cdf_a, cdf_b))
+        z = float(sp_special.ndtri(np.clip(u, 1e-15, 1.0 - 1e-15)))
+        return mean + sd * float(np.clip(z, a, b))
+    # Narrow interval fallback
+    return float(rng.uniform(low, high)) if (math.isfinite(low) and math.isfinite(high)) else (mean + sd * float(np.clip(0.0, a, b)))
+
+
+def _univariate_tn_gibbs_sweep(
+    z: np.ndarray,
+    f_walls: np.ndarray,
+    g_walls: np.ndarray,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """One exact coordinate-wise truncated-normal Gibbs sweep on ``z ~ N(0, I_D)`` s.t. ``F z + g >= 0``."""
+    z_cur = z.copy()
+    slack = f_walls @ z_cur + g_walls
+    d_dim = z_cur.shape[0]
+    for i in rng.permutation(d_dim):
+        col = f_walls[:, i]
+        slack_wo = slack - col * z_cur[i]
+        pos_mask = col > 1e-13
+        neg_mask = col < -1e-13
+        low = float(np.max(-slack_wo[pos_mask] / col[pos_mask])) if np.any(pos_mask) else -math.inf
+        high = float(np.min(-slack_wo[neg_mask] / col[neg_mask])) if np.any(neg_mask) else math.inf
+        z_new_i = _sample_univariate_truncnorm(0.0, 1.0, low, high, rng)
+        slack = slack_wo + col * z_new_i
+        z_cur[i] = z_new_i
+    return z_cur
+
+
+def _pakman_paninski_hmc_whitened(
+    z_init: np.ndarray,
+    f_walls: np.ndarray,
+    g_walls: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    n_steps: int = 2,
+    max_events: int = 400,
+) -> np.ndarray:
+    """Exact Pakman & Paninski (2014) wall-reflecting HMC for ``z ~ N(0, I_D)`` s.t. ``F z + g >= 0``.
+
+    Every row of ``f_walls`` must have unit Euclidean norm ``||f_j||_2 == 1``.
+    Travel time is randomized ``T ~ Uniform(0.35 * pi, 0.65 * pi)`` (mean ``pi / 2``)
+    to eliminate periodic harmonic orbits while preserving exact detailed balance.
+    """
+    m_walls, d_dim = f_walls.shape
+    if m_walls == 0:
+        return rng.standard_normal(d_dim)
+
+    z = z_init.copy()
+    # Ensure strict interior feasibility up to machine epsilon
+    if float(np.min(f_walls @ z + g_walls)) < 1e-12:
+        z = _univariate_tn_gibbs_sweep(z, f_walls, g_walls, rng)
+
+    two_pi = 2.0 * math.pi
+    for _ in range(n_steps):
+        z_saved = z.copy()
+        v = rng.standard_normal(d_dim)
+        t_rem = float(rng.uniform(0.35 * math.pi, 0.65 * math.pi))
+        last_wall = -1
+        bounced_cleanly = True
+
+        for _event in range(max_events):
+            a_vec = f_walls @ z
+            b_vec = f_walls @ v
+            u_vec = np.hypot(a_vec, b_vec)
+
+            # Candidate outward wall hit: u_j * cos(t + phi_j) + g_j == 0 with sin(t + phi_j) > 0
+            can_hit = u_vec > np.abs(g_walls) + 1e-14
+            if not np.any(can_hit):
+                z = z * math.cos(t_rem) + v * math.sin(t_rem)
+                break
+
+            hit_times = np.full(m_walls, math.inf, dtype=np.float64)
+            idx_cand = np.nonzero(can_hit)[0]
+            u_c = u_vec[idx_cand]
+            ratio_c = np.clip(-g_walls[idx_cand] / u_c, -1.0, 1.0)
+            alpha_c = np.arccos(ratio_c)  # in [0, pi], sin(alpha_c) >= 0
+            phi_c = np.arctan2(-b_vec[idx_cand], a_vec[idx_cand])
+            t_c = np.mod(alpha_c - phi_c, two_pi)
+
+            # Outward normal velocity at t_c is -u_c * sin(alpha_c) <= 0
+            vel_out = -u_c * np.sin(alpha_c)
+            for k_local, w_idx in enumerate(idx_cand):
+                tk = float(t_c[k_local])
+                if w_idx == last_wall:
+                    # Just reflected inward off last_wall (b > 0); next outward hit is at 2 * alpha
+                    tk = float(2.0 * alpha_c[k_local]) if alpha_c[k_local] > 1e-11 else two_pi
+                elif tk < 1e-13 and b_vec[w_idx] >= 0.0:
+                    tk += two_pi
+                if vel_out[k_local] < -1e-13 and tk > 1e-14:
+                    hit_times[w_idx] = tk
+
+            j_hit = int(np.argmin(hit_times))
+            t_hit = float(hit_times[j_hit])
+            if t_hit >= t_rem:
+                z = z * math.cos(t_rem) + v * math.sin(t_rem)
+                break
+
+            # Advance to wall j_hit and reflect momentum elastically
+            cos_h = math.cos(t_hit)
+            sin_h = math.sin(t_hit)
+            z_next = z * cos_h + v * sin_h
+            v_next = -z * sin_h + v * cos_h
+            fj = f_walls[j_hit]
+            vn = float(np.dot(fj, v_next))
+            if vn < 0.0:
+                v_next = v_next - 2.0 * vn * fj
+            # Snap exact wall coordinate to zero to prevent cumulative drift
+            wall_err = float(np.dot(fj, z_next) + g_walls[j_hit])
+            z_next = z_next - wall_err * fj
+
+            z = z_next
+            v = v_next
+            t_rem -= t_hit
+            last_wall = j_hit
+            if t_rem <= 1e-14:
+                break
+        else:
+            bounced_cleanly = False
+
+        if not bounced_cleanly or float(np.min(f_walls @ z + g_walls)) < -1e-9:
+            # Reject rare grazing corner trajectory (detailed balance preserved) + exact Gibbs sweep
+            z = _univariate_tn_gibbs_sweep(z_saved, f_walls, g_walls, rng)
+
+    return z
+
+
+def _sample_truncated_mvn(
+    mean: np.ndarray,
+    precision: np.ndarray,
+    a_cone: np.ndarray,
+    theta_current: np.ndarray,
+    interior_ray: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    n_hmc_steps: int = 2,
+) -> np.ndarray:
+    """Sample ``theta ~ N(mean, precision^{-1})`` truncated to ``{theta : a_cone @ theta >= 0}``."""
+    d_dim = mean.shape[0]
+    chol_prec = np.linalg.cholesky(_psd_clip(precision, floor=1e-12))
+    # precision = L L^T => cov = L^{-T} L^{-1}; set M_cov = L^{-T}
+    m_cov = np.linalg.solve(chol_prec, np.eye(d_dim, dtype=np.float64)).T
+    if a_cone.shape[0] == 0:
+        return mean + m_cov @ rng.standard_normal(d_dim)
+
+    f_raw = a_cone @ m_cov
+    g_raw = a_cone @ mean
+    row_norms = np.linalg.norm(f_raw, axis=1)
+    keep = row_norms > 1e-14
+    if not np.any(keep):
+        return mean + m_cov @ rng.standard_normal(d_dim)
+    f_walls = f_raw[keep] / row_norms[keep, None]
+    g_walls = g_raw[keep] / row_norms[keep]
+
+    # Ensure theta_current is strictly inside cone before whitening
+    theta_init = theta_current
+    min_slack = float(np.min(a_cone @ theta_init))
+    if min_slack <= 1e-11:
+        ray_slack = float(np.min(a_cone @ interior_ray))
+        push = (1e-6 - min_slack) / max(ray_slack, 1e-12)
+        theta_init = theta_init + max(push, 1e-8) * interior_ray
+
+    z_init = chol_prec.T @ (theta_init - mean)
+    z_draw = _pakman_paninski_hmc_whitened(z_init, f_walls, g_walls, rng, n_steps=n_hmc_steps)
+    theta_draw = mean + m_cov @ z_draw
+
+    # Nudge tiny machine-rounding boundary violations (< 1e-13) onto cone interior
+    post_slack = float(np.min(a_cone @ theta_draw))
+    if post_slack < 0.0:
+        ray_slack = float(np.min(a_cone @ interior_ray))
+        theta_draw = theta_draw + ((-post_slack + 1e-14) / max(ray_slack, 1e-12)) * interior_ray
+    return theta_draw
+
+
+def _cone_qp_mode(
+    mean: np.ndarray,
+    precision: np.ndarray,
+    a_cone: np.ndarray,
+    interior_ray: np.ndarray,
+) -> np.ndarray:
+    """Compute exact cone-constrained posterior mode ``argmin 0.5 (x - mu)^T P (x - mu)`` s.t. ``A x >= 0``."""
+    if a_cone.shape[0] == 0 or float(np.min(a_cone @ mean)) >= 1e-5:
+        return mean.copy()
+    d_dim = mean.shape[0]
+    chol_prec = np.linalg.cholesky(_psd_clip(precision, floor=1e-12))
+    m_cov = np.linalg.solve(chol_prec, np.eye(d_dim, dtype=np.float64)).T
+    f_raw = a_cone @ m_cov
+    g_raw = a_cone @ mean
+    norms = np.linalg.norm(f_raw, axis=1)
+    keep = norms > 1e-14
+    f_w = f_raw[keep] / norms[keep, None]
+    g_w = g_raw[keep] / norms[keep] - 1e-5  # small strict interior margin
+
+    # Feasible starting point along interior_ray
+    z0 = chol_prec.T @ (interior_ray - mean)
+    s0 = float(np.min(f_w @ z0 + g_w))
+    if s0 < 0.0:
+        ray_z = chol_prec.T @ interior_ray
+        rs = float(np.min(f_w @ ray_z))
+        z0 = z0 + ((-s0 + 1e-3) / max(rs, 1e-12)) * ray_z
+
+    res = sp_optimize.minimize(
+        fun=lambda z: 0.5 * float(np.dot(z, z)),
+        x0=z0,
+        jac=lambda z: z,
+        constraints={"type": "ineq", "fun": lambda z: f_w @ z + g_w, "jac": lambda _z: f_w},
+        method="SLSQP",
+        options={"ftol": 1e-10, "maxiter": 200},
+    )
+    z_opt = np.asarray(res.x, dtype=np.float64) if res.success else z0
+    theta_opt = mean + m_cov @ z_opt
+    min_sl = float(np.min(a_cone @ theta_opt))
+    if min_sl <= 1e-6:
+        rs = float(np.min(a_cone @ interior_ray))
+        theta_opt = theta_opt + ((1e-5 - min_sl) / max(rs, 1e-12)) * interior_ray
+    return theta_opt
+
+
+# ---- 1D slice sampler & exact Huang--Wand Half-t_3 scale updates --------------------------------
+
+
+def _slice_sample_1d(
+    log_prob_fn: Any,
+    x_init: float,
+    rng: np.random.Generator,
+    *,
+    width: float = 0.8,
+    max_steps: int = 32,
+    bounds: tuple[float, float] = (-14.0, 14.0),
+) -> float:
+    """Exact Neal (2003) stepping-out + shrinkage 1-D slice sampler on ``bounds``."""
+    lo_b, hi_b = bounds
+    x0 = float(np.clip(x_init, lo_b + 1e-9, hi_b - 1e-9))
+    fx0 = float(log_prob_fn(x0))
+    log_y = fx0 - float(rng.exponential(1.0))
+
+    u = float(rng.uniform(0.0, width))
+    left = max(lo_b, x0 - u)
+    right = min(hi_b, left + width)
+
+    j_steps = int(rng.integers(0, max_steps))
+    k_steps = (max_steps - 1) - j_steps
+    while j_steps > 0 and left > lo_b and float(log_prob_fn(left)) > log_y:
+        left = max(lo_b, left - width)
+        j_steps -= 1
+    while k_steps > 0 and right < hi_b and float(log_prob_fn(right)) > log_y:
+        right = min(hi_b, right + width)
+        k_steps -= 1
+
+    for _ in range(128):
+        x_prop = float(rng.uniform(left, right))
+        if float(log_prob_fn(x_prop)) >= log_y:
+            return x_prop
+        if x_prop < x0:
+            left = x_prop
+        else:
+            right = x_prop
+        if abs(right - left) < 1e-13:
+            break
+    return x0
+
+
+def _sample_invgamma(shape: float, scale: float, rng: np.random.Generator) -> float:
+    """Sample from ``InvGamma(shape, scale)`` with density ``propto x^{-shape - 1} exp(-scale / x)``."""
+    g = float(rng.gamma(shape=max(shape, 1e-12), scale=1.0))
+    return float(max(scale, 1e-30) / max(g, 1e-300))
+
+
+def _update_scales_outcome(
+    theta_m: np.ndarray,
+    spec: _OutcomeConePriorSpec,
+    sigma_sq: float,
+    kappa_sq: float,
+    a_sigma: float,
+    a_kappa: float,
+    local_scales: np.ndarray,
+    b_local: np.ndarray,
+    s0_scale: float,
+    fixed_sigma: float | None,
+    dynamic_shrinkage: bool,
+    rng: np.random.Generator,
+) -> tuple[float, float, float, float, np.ndarray, np.ndarray]:
+    """Exact collapsed marginal Half-t_3 scale updates for ``(sigma_m^2, kappa_m^2, lambda_m)``.
+
+    Integrates out the Huang--Wand auxiliary variables ``(a_sigma, a_kappa, b_local)``
+    analytically via Liu (1994) Rao--Blackwellization so centered scale updates have zero
+    auxiliary-variable Gibbs lag while targeting the exact Half-t_3 marginal posterior.
+    """
+    h_float = float(spec.horizon)
+    n_nonctrl = spec.n_nonctrl
+    k_dim = spec.k_dim
+    inv_3s0_sq = 1.0 / (3.0 * (s0_scale**2))
+    inv_3_unit = 1.0 / 3.0
+    theta_modes = theta_m.reshape(k_dim, n_nonctrl)
+
+    # 1. Local scales lambda_{m,e} under P2 ("local_halft")
+    lam_cur = local_scales.copy()
+    if spec.scale_prior == "local_halft" and spec.n_edges > 0:
+        u_modes = theta_modes @ spec.c_cover.T  # (K', E_c)
+        if spec.is_tree_poset:
+            coef_we = 1.0 - float(k_dim)
+            for e_idx in range(spec.n_edges):
+                quad_e = float(u_modes[0, e_idx] ** 2) / max(sigma_sq, 1e-24)
+                if k_dim > 1:
+                    quad_e += float(np.sum(u_modes[1:, e_idx] ** 2)) / max(kappa_sq, 1e-24)
+                c_quad = 0.5 * spec.c_scale * quad_e / h_float
+
+                def _logp_we_tree(w_val: float, _cq: float = c_quad) -> float:
+                    e2w = math.exp(2.0 * w_val)
+                    return coef_we * w_val - 2.0 * math.log1p(e2w * inv_3_unit) - _cq / max(e2w, 1e-300)
+
+                w_init = math.log(max(float(lam_cur[e_idx]), 1e-8))
+                w_new = _slice_sample_1d(_logp_we_tree, w_init, rng, bounds=(-9.0, 9.0))
+                lam_cur[e_idx] = math.exp(w_new)
+        else:
+            ratio_cur = math.sqrt(max(kappa_sq, 1e-24) / max(sigma_sq, 1e-24))
+            for e_idx in rng.permutation(spec.n_edges)[:2]:
+                quad_e = float(u_modes[0, e_idx] ** 2) / max(sigma_sq, 1e-24)
+                if k_dim > 1:
+                    quad_e += float(np.sum(u_modes[1:, e_idx] ** 2)) / max(kappa_sq, 1e-24)
+                c_quad = 0.5 * spec.c_scale * quad_e / h_float
+
+                def _logp_we_dag(w_val: float, _idx: int = int(e_idx), _cq: float = c_quad) -> float:
+                    lam_try = lam_cur.copy()
+                    lam_try[_idx] = math.exp(w_val)
+                    _, logdet_l0 = spec.precision_and_logdet(lam_try)
+                    log_z = spec.log_normalizer(ratio_cur, lam_try)
+                    e2w = math.exp(2.0 * w_val)
+                    return (
+                        w_val
+                        - 2.0 * math.log1p(e2w * inv_3_unit)
+                        - _cq / max(e2w, 1e-300)
+                        + 0.5 * float(k_dim) * logdet_l0
+                        - log_z
+                    )
+
+                w_init = math.log(max(float(lam_cur[e_idx]), 1e-8))
+                w_new = _slice_sample_1d(_logp_we_dag, w_init, rng, bounds=(-9.0, 9.0))
+                lam_cur[e_idx] = math.exp(w_new)
+
+        # Exact scale-ridge move (w_s + gamma, w_k + gamma, w_local - gamma) holding Sigma_0 invariant
+        if fixed_sigma is None and (dynamic_shrinkage or k_dim == 1):
+            ws0 = 0.5 * math.log(max(sigma_sq, 1e-28))
+            wk0 = 0.5 * math.log(max(kappa_sq, 1e-28))
+            w_loc0 = np.log(np.maximum(lam_cur, 1e-12))
+            both_gk = bool(k_dim >= 2 and dynamic_shrinkage)
+            lin_g = (2.0 if both_gk else 1.0) - float(spec.n_edges)
+
+            def _logp_gamma(g_val: float) -> float:
+                lp = lin_g * g_val - 2.0 * math.log1p(math.exp(2.0 * (ws0 + g_val)) * inv_3s0_sq)
+                if both_gk:
+                    lp -= 2.0 * math.log1p(math.exp(2.0 * (wk0 + g_val)) * inv_3s0_sq)
+                lp -= 2.0 * float(np.sum(np.log1p(np.exp(2.0 * (w_loc0 - g_val)) * inv_3_unit)))
+                return lp
+
+            g_new = _slice_sample_1d(_logp_gamma, 0.0, rng, bounds=(-8.0, 8.0))
+            sigma_sq = math.exp(2.0 * (ws0 + g_new))
+            if both_gk:
+                kappa_sq = math.exp(2.0 * (wk0 + g_new))
+            lam_cur = np.exp(w_loc0 - g_new)
+
+    prec_l0, _ = spec.precision_and_logdet(lam_cur)
+    q0 = float(theta_modes[0] @ prec_l0 @ theta_modes[0])
+    q_dyn = float(sum(theta_modes[k] @ prec_l0 @ theta_modes[k] for k in range(1, k_dim))) if k_dim > 1 else 0.0
+    c0 = 0.5 * q0 / h_float
+    c_dyn = 0.5 * q_dyn / h_float
+    d0 = float(n_nonctrl)
+    d_dyn = float(n_nonctrl * (k_dim - 1))
+
+    # 2. Global scale sigma_m^2 & dynamic scale kappa_m^2 via exact marginal Half-t_3 conditionals
+    logz_depends_on_ratio = bool(spec.monotone and spec.period_positivity and k_dim >= 2 and spec.n_edges > 0)
+
+    ws_cur = math.log(float(fixed_sigma)) if fixed_sigma is not None else 0.5 * math.log(max(sigma_sq, 1e-28))
+    wk_cur = (
+        math.log(50.0 * s0_scale)
+        if not dynamic_shrinkage
+        else 0.5 * math.log(max(kappa_sq, 1e-28))
+    )
+
+    if fixed_sigma is None:
+        def _logp_ws(ws: float) -> float:
+            e2s = math.exp(2.0 * ws)
+            lp = (1.0 - d0) * ws - 2.0 * math.log1p(e2s * inv_3s0_sq) - c0 / max(e2s, 1e-300)
+            if logz_depends_on_ratio:
+                lp -= spec.log_normalizer(math.exp(wk_cur - ws), lam_cur)
+            return lp
+
+        ws_cur = _slice_sample_1d(_logp_ws, ws_cur, rng, bounds=(-13.0, 13.0))
+
+    if dynamic_shrinkage:
+        if k_dim == 1:
+            def _logp_wk_prior(wk: float) -> float:
+                return wk - 2.0 * math.log1p(math.exp(2.0 * wk) * inv_3s0_sq)
+
+            wk_cur = _slice_sample_1d(_logp_wk_prior, wk_cur, rng, bounds=(-13.0, 13.0))
+        else:
+            def _logp_wk(wk: float) -> float:
+                e2k = math.exp(2.0 * wk)
+                lp = (1.0 - d_dyn) * wk - 2.0 * math.log1p(e2k * inv_3s0_sq) - c_dyn / max(e2k, 1e-300)
+                if logz_depends_on_ratio:
+                    lp -= spec.log_normalizer(math.exp(wk - ws_cur), lam_cur)
+                return lp
+
+            wk_cur = _slice_sample_1d(_logp_wk, wk_cur, rng, bounds=(-13.0, 13.0))
+
+    # Constant-ratio joint radial scale step (ws, wk) = (ws, ws + u) where log Z_m(exp(u)) is constant
+    if fixed_sigma is None and dynamic_shrinkage and k_dim >= 2:
+        u_fixed = wk_cur - ws_cur
+        c_comb = c0 + c_dyn * math.exp(-2.0 * u_fixed)
+        lin_comb = 2.0 - d0 - d_dyn
+
+        def _logp_ws_const_u(ws: float) -> float:
+            e2s = math.exp(2.0 * ws)
+            e2k = math.exp(2.0 * (ws + u_fixed))
+            return (
+                lin_comb * ws
+                - 2.0 * math.log1p(e2s * inv_3s0_sq)
+                - 2.0 * math.log1p(e2k * inv_3s0_sq)
+                - c_comb / max(e2s, 1e-300)
+            )
+
+        ws_cur = _slice_sample_1d(_logp_ws_const_u, ws_cur, rng, bounds=(-13.0, 13.0))
+        wk_cur = ws_cur + u_fixed
+
+    new_sigma_sq = math.exp(2.0 * ws_cur)
+    new_kappa_sq = math.exp(2.0 * wk_cur)
+    return new_sigma_sq, new_kappa_sq, a_sigma, a_kappa, lam_cur, b_local
+
+
+# ---- Collapsed SUR covariance, shared-arm noise draw, omega & R updates -------------------------
+
+
+def _build_sigma_xi(
+    sqrt_v_arms: list[list[np.ndarray]],
+    corr_r: np.ndarray,
+    n_arms: int,
+    n_outcomes: int,
+    k_dim: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build block-diagonal ``Sigma_xi(R)`` and its generative factor ``L_xi`` of shape ``(A*M*K', A*M*K')``."""
+    chol_r = np.linalg.cholesky(_psd_clip(corr_r, floor=1e-10))
+    rk_factor = np.kron(chol_r, np.eye(k_dim, dtype=np.float64))  # (M*K', M*K')
+    amk = n_arms * n_outcomes * k_dim
+    sigma_xi = np.zeros((amk, amk), dtype=np.float64)
+    l_xi = np.zeros((amk, amk), dtype=np.float64)
+    mk = n_outcomes * k_dim
+    for a in range(n_arms):
+        d_a = np.zeros((mk, mk), dtype=np.float64)
+        for m in range(n_outcomes):
+            d_a[m * k_dim : (m + 1) * k_dim, m * k_dim : (m + 1) * k_dim] = sqrt_v_arms[m][a]
+        la = d_a @ rk_factor
+        sl = slice(a * mk, (a + 1) * mk)
+        l_xi[sl, sl] = la
+        sigma_xi[sl, sl] = la @ la.T
+    return sigma_xi, l_xi
+
+
+def _build_omega_cov(
+    g_xi: np.ndarray,
+    sigma_xi: np.ndarray,
+    f_blocks: list[np.ndarray],
+    omega_vec: np.ndarray,
+    k_dim: int,
+) -> np.ndarray:
+    """Collapsed measurement covariance ``Omega(omega, R) = G Sigma_xi(R) G^T + blkdiag(F_q / omega_q)``."""
+    omega_mat = g_xi @ sigma_xi @ g_xi.T
+    for q_idx, fq in enumerate(f_blocks):
+        sl = slice(q_idx * k_dim, (q_idx + 1) * k_dim)
+        omega_mat[sl, sl] += fq / max(float(omega_vec[q_idx]), 1e-12)
+    return _psd_clip(omega_mat, floor=1e-13)
+
+
+def _sample_omega_weights(
+    eta_blocks: np.ndarray,
+    f_inv_blocks: list[np.ndarray],
+    robust_error: str,
+    pi_mix: float,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Update contrast precision weights ``omega_q`` and corruption indicators ``z_q``."""
+    n_q, k_dim = eta_blocks.shape
+    if robust_error == "gaussian":
+        return np.ones(n_q, dtype=np.float64), np.zeros(n_q, dtype=np.float64), 0.0
+
+    d_sq = np.array(
+        [float(eta_blocks[q] @ f_inv_blocks[q] @ eta_blocks[q]) for q in range(n_q)],
         dtype=np.float64,
     )
-    z_vec = np.where(colors == colors[0], 1.0, -1.0).astype(np.float64)
-    v_arr = np.asarray(arm_variances, dtype=np.float64)
-    lo_terms = [floor[a] - v_arr[a] for a in range(n_arms) if z_vec[a] > 0]
-    hi_terms = [v_arr[a] - floor[a] for a in range(n_arms) if z_vec[a] < 0]
-    xi_lo = max(lo_terms) if lo_terms else -np.inf
-    xi_hi = min(hi_terms) if hi_terms else np.inf
-    if xi_lo > xi_hi:
-        xi_lo = xi_hi = 0.0
-    return z_vec, float(min(xi_lo, 0.0)), float(max(xi_hi, 0.0))
+    if robust_error == "t4":
+        # Student-t_4: omega_q ~ Gamma(2, 2) => omega_q | eta_q ~ Gamma(2 + K'/2, 2 + d_q^2 / 2)
+        shape_post = 2.0 + 0.5 * float(k_dim)
+        omega_out = np.empty(n_q, dtype=np.float64)
+        flag_out = np.empty(n_q, dtype=np.float64)
+        for q in range(n_q):
+            rate_q = 2.0 + 0.5 * max(float(d_sq[q]), 0.0)
+            w_q = float(rng.gamma(shape=shape_post, scale=1.0 / rate_q))
+            omega_out[q] = max(w_q, 1e-10)
+            flag_out[q] = 1.0 if omega_out[q] < 0.40 else 0.0
+        return omega_out, flag_out, pi_mix
+
+    # R2 ("mixture"): z_q ~ Bern(pi), log(1/omega_q) | z_q=1 ~ N(mu_infl, sd_infl^2), exact GH16 collapse
+    s_nodes = _R2_LOG_INFL_MU + _R2_LOG_INFL_SD * _GH16_Z  # (16,)
+    log_prior_odds = math.log(max(pi_mix, 1e-12) / max(1.0 - pi_mix, 1e-12))
+    omega_out = np.ones(n_q, dtype=np.float64)
+    z_out = np.zeros(n_q, dtype=np.float64)
+    for q in range(n_q):
+        dq2 = max(float(d_sq[q]), 0.0)
+        log_p0 = -0.5 * dq2
+        log_terms = np.log(_GH16_PROB) - 0.5 * float(k_dim) * s_nodes - 0.5 * dq2 * np.exp(-s_nodes)
+        log_p1 = float(sp_special.logsumexp(log_terms))
+        logit_q = float(np.clip(log_prior_odds + log_p1 - log_p0, -60.0, 60.0))
+        prob_z1 = 1.0 / (1.0 + math.exp(-logit_q))
+        if float(rng.uniform()) < prob_z1:
+            z_out[q] = 1.0
+
+            def _logp_s(s_val: float, _dq2: float = dq2) -> float:
+                return (
+                    -0.5 * float(k_dim) * s_val
+                    - 0.5 * _dq2 * math.exp(-s_val)
+                    - 0.5 * ((s_val - _R2_LOG_INFL_MU) / _R2_LOG_INFL_SD) ** 2
+                )
+
+            s_draw = _slice_sample_1d(_logp_s, _R2_LOG_INFL_MU, rng, bounds=(-4.0, 14.0))
+            omega_out[q] = math.exp(-s_draw)
+        else:
+            z_out[q] = 0.0
+            omega_out[q] = 1.0
+
+    n_z1 = float(np.sum(z_out))
+    pi_new = float(rng.beta(_R2_BETA_ALPHA + n_z1, _R2_BETA_BETA + float(n_q) - n_z1))
+    return omega_out, z_out, pi_new
 
 
-def _sigma_lik_from_arm_variances(v_vec: np.ndarray) -> np.ndarray:
-    """Cut-space likelihood covariance ``diag(v_1, ..., v_{A-1}) + v_0 1 1'``."""
-    v_arr = np.asarray(v_vec, dtype=np.float64)
-    d_dim = v_arr.shape[0] - 1
-    return np.diag(v_arr[1:]) + float(v_arr[0]) * np.ones((d_dim, d_dim), dtype=np.float64)
-
-
-def _direct_arm_variances(
-    arms: tuple[str, ...],
-    pair_indices: Sequence[tuple[int, int]],
-    s_sq: np.ndarray,
-    arm_outcome_variances: Mapping[str, float] | Sequence[float],
-    arm_sample_sizes: np.ndarray,
-) -> tuple[_ArmVarianceArray, float]:
-    """Arm sampling variances from per-arm outcome variances instead of back-solving.
-
-    ``v_a = c * sigma_a^2 / n_a`` where ``sigma_a^2`` is the arm's residual outcome variance
-    (e.g. its within-arm pre-period residual variance), ``n_a`` its unit count, and the single
-    scale ``c = sum_p s_p^2 w_p / sum_p w_p^2`` (``w_p = r_j + r_l``, ``r_a = sigma_a^2 / n_a``)
-    matches the pairwise posterior variances ``s_p^2`` in least squares. The allocation
-    across arms therefore comes from the arms' own data, so a bipartite design no longer
-    leaves the shared-arm covariance unidentified and odd cycles serve only as a diagnostic.
-
-    Args:
-      arms: Arm labels.
-      pair_indices: Fitted contrasts as ``(treated_idx, ref_idx)``.
-      s_sq: ``(P,)`` pairwise posterior Mode-1 variances.
-      arm_outcome_variances: ``{arm: sigma_a^2}`` or length-``A`` sequence.
-      arm_sample_sizes: ``(A,)`` arm unit counts.
-
-    Returns:
-      ``(arm_variances, residual)`` with ``residual = ||A_var v - s^2||_2``.
-    """
-    n_arms = len(arms)
-    if isinstance(arm_outcome_variances, Mapping):
-        sig2 = np.array([float(arm_outcome_variances[a]) for a in arms], dtype=np.float64)
-    else:
-        sig2 = np.asarray(arm_outcome_variances, dtype=np.float64)
-    if sig2.shape != (n_arms,) or np.any(~np.isfinite(sig2)) or np.any(sig2 <= 0.0):
-        raise ValueError(
-            f"arm_outcome_variances must provide {n_arms} finite positive variances; got {arm_outcome_variances!r}"
-        )
-    r_vec = sig2 / np.maximum(np.asarray(arm_sample_sizes, dtype=np.float64), 1e-12)
-    a_var = np.zeros((len(pair_indices), n_arms), dtype=np.float64)
-    for p_idx, (j_idx, l_idx) in enumerate(pair_indices):
-        a_var[p_idx, j_idx] = 1.0
-        a_var[p_idx, l_idx] = 1.0
-    w_pair = a_var @ r_vec
-    c_scale = float(np.dot(s_sq, w_pair) / max(float(np.dot(w_pair, w_pair)), 1e-300))
-    v_vec = c_scale * r_vec
-    residual = float(np.linalg.norm(a_var @ v_vec - s_sq))
-    return _ArmVarianceArray(v_vec, arms), residual
-
-
-def _huber_cut_space_projection(
-    b_cut: np.ndarray,
-    y_hat: np.ndarray,
-    s_pair: np.ndarray,
-    *,
-    huber_k: float = _HUBER_K,
-    max_iter: int = 200,
-    tol: float = 1e-12,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Robust cut-space projection by IRLS with Huber weights on the cycle residual.
-
-    Starts from the Euclidean projection ``mu = (B'B)^{-1} B' y`` and iterates
-    ``mu <- (B' W B)^{-1} B' W y`` with ``w_p = min(1, k / |r_p / scale|)``,
-    ``r = y - B mu``, ``k = 1.345`` and ``scale = 1.4826 * MAD(r)`` (floored at ``1e-6`` times
-    the median pairwise posterior SD). Under the exact shared-arm model ``y`` lies in the
-    column space of ``B``, every residual is zero, all weights are one and the Euclidean
-    projection (Proposition 1) is returned unchanged.
-
-    Args:
-      b_cut: ``(P, A - 1)`` reduced cut matrix.
-      y_hat: ``(P,)`` pairwise Mode-1 posterior means.
-      s_pair: ``(P,)`` pairwise posterior SDs (only for the scale floor).
-      huber_k: Huber tuning constant.
-      max_iter: Maximum IRLS iterations.
-      tol: Convergence tolerance on ``mu``.
-
-    Returns:
-      ``(mu_hat, weights, scale)``.
-    """
-    btb = b_cut.T @ b_cut
-    mu = np.linalg.solve(btb, b_cut.T @ y_hat)
-    weights = np.ones(y_hat.shape[0], dtype=np.float64)
-    floor = 1e-6 * max(float(np.median(s_pair)), 1e-12)
-    scale = floor
-    for _ in range(int(max_iter)):
-        resid = y_hat - b_cut @ mu
-        scale = max(1.4826 * float(np.median(np.abs(resid - np.median(resid)))), floor)
-        u_abs = np.abs(resid) / scale
-        weights = np.where(u_abs <= huber_k, 1.0, huber_k / np.maximum(u_abs, 1e-300))
-        bw = b_cut * weights[:, None]
-        mu_new = np.linalg.solve(b_cut.T @ bw, bw.T @ y_hat)
-        if float(np.max(np.abs(mu_new - mu))) <= tol * max(1.0, float(np.max(np.abs(mu)))):
-            mu = mu_new
-            break
-        mu = mu_new
-    return mu, weights, scale
-
-
-def _build_support_inequalities(
-    n_arms: int,
-    topology: str,
-    prior_mode: str,
-    monotone: bool,
-    tau_clip: tuple[float, float],
-    t_tree: np.ndarray,
-    cover_pairs: Sequence[tuple[int, int]],
-    top_idx: int | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Construct linear inequality matrices ``(A_ineq, b_ineq)`` for ``A_ineq @ mu >= b_ineq``."""
-    d_dim = n_arms - 1
-    low_clip, high_clip = float(tau_clip[0]), float(tau_clip[1])
-    rows_a: list[np.ndarray] = []
-    rows_b: list[float] = []
-
-    def _add_ineq(a_row: np.ndarray, b_val: float) -> None:
-        if math.isfinite(b_val):
-            rows_a.append(np.asarray(a_row, dtype=np.float64))
-            rows_b.append(float(b_val))
-
-    if topology == "chain" and (monotone or prior_mode == "independent_halfnormal"):
-        # Chain increments theta = t_tree @ mu lie in [low_clip, high_clip]
-        eff_low = max(low_clip, 0.0) if (monotone or prior_mode in _BUNDLE_PRIOR_MODES) else low_clip
-        for e_idx in range(d_dim):
-            row = t_tree[e_idx]
-            if math.isfinite(eff_low):
-                _add_ineq(row, eff_low)
-            if math.isfinite(high_clip):
-                _add_ineq(-row, -high_clip)
-    else:
-        eff_low = max(low_clip, 0.0) if prior_mode in _BUNDLE_PRIOR_MODES else low_clip
-        for j_idx in range(d_dim):
-            e_j = np.zeros(d_dim, dtype=np.float64)
-            e_j[j_idx] = 1.0
-            if math.isfinite(eff_low):
-                _add_ineq(e_j, eff_low)
-            if math.isfinite(high_clip):
-                _add_ineq(-e_j, -high_clip)
-
-        if prior_mode in _BUNDLE_PRIOR_MODES and top_idx is not None:
-            top_col = top_idx - 1
-            for j_idx in range(d_dim):
-                if j_idx == top_col:
-                    continue
-                # 0 <= mu_j <= mu_top
-                diff = np.zeros(d_dim, dtype=np.float64)
-                diff[top_col] = 1.0
-                diff[j_idx] = -1.0
-                _add_ineq(diff, 0.0)
-
-        if monotone:
-            for lo_arm, hi_arm in cover_pairs:
-                diff = np.zeros(d_dim, dtype=np.float64)
-                if hi_arm >= 1:
-                    diff[hi_arm - 1] = 1.0
-                if lo_arm >= 1:
-                    diff[lo_arm - 1] = -1.0
-                _add_ineq(diff, max(low_clip, 0.0) if lo_arm == 0 else 0.0)
-
-    if not rows_a:
-        return np.zeros((0, d_dim), dtype=np.float64), np.zeros(0, dtype=np.float64)
-    return np.vstack(rows_a), np.asarray(rows_b, dtype=np.float64)
-
-
-def _inside_polyhedron(
-    pts: np.ndarray, a_ineq: np.ndarray, b_ineq: np.ndarray, tol: float = 0.0
+def _sample_iw_correlation(
+    df_iw: float,
+    scale_iw: np.ndarray,
+    rng: np.random.Generator,
 ) -> np.ndarray:
-    """Return boolean mask of rows in ``pts`` satisfying ``A_ineq @ x >= b_ineq + tol``."""
-    if a_ineq.shape[0] == 0:
-        return np.ones(pts.shape[0], dtype=bool)
-    slacks = pts @ a_ineq.T - b_ineq[None, :]
-    return np.all(slacks >= tol, axis=1)
+    """Draw ``Sigma ~ InvWishart(df_iw, scale_iw)`` and rescale to correlation matrix ``R``."""
+    m_dim = scale_iw.shape[0]
+    if m_dim == 1:
+        return np.ones((1, 1), dtype=np.float64)
+    # Sample W ~ Wishart(df_iw, scale_iw^{-1}) via Bartlett decomposition
+    inv_scale = np.linalg.inv(_psd_clip(scale_iw, floor=1e-12))
+    chol_inv = np.linalg.cholesky(_psd_clip(inv_scale, floor=1e-12))
+    a_bart = np.zeros((m_dim, m_dim), dtype=np.float64)
+    for i in range(m_dim):
+        a_bart[i, i] = math.sqrt(max(float(rng.chisquare(max(df_iw - float(i), 1.0))), 1e-15))
+        for j in range(i):
+            a_bart[i, j] = float(rng.standard_normal())
+    la = chol_inv @ a_bart
+    w_mat = la @ la.T
+    sig_mat = np.linalg.inv(_psd_clip(w_mat, floor=1e-14))
+    d_inv = 1.0 / np.sqrt(np.maximum(np.diag(sig_mat), 1e-24))
+    r_mat = sig_mat * (d_inv[:, None] * d_inv[None, :])
+    r_mat = 0.5 * (r_mat + r_mat.T)
+    np.fill_diagonal(r_mat, 1.0)
+    return _psd_clip(r_mat, floor=1e-8)
 
 
-def _sir_posterior_nd(
+# ---- Posterior predictive checks (cycle, composite, basis) ---------------------------------------
+
+
+def _compute_basis_ppc_pvalue(
+    traj_mean_by_pair: Mapping[tuple[str, str], np.ndarray],
+    traj_cov_by_pair: Mapping[tuple[str, str], np.ndarray],
+    psi: np.ndarray,
+    horizon: int,
+) -> float:
+    """Chi-square posterior predictive p-value for trajectory energy orthogonal to ``col(Psi)``."""
+    k_dim = int(psi.shape[1])
+    if k_dim >= horizon:
+        return 1.0
+    p_orth = np.eye(horizon, dtype=np.float64) - psi @ psi.T
+    u_svd, s_svd, _ = np.linalg.svd(p_orth, full_matrices=False)
+    q_perp = u_svd[:, s_svd > 0.5]  # (H, H - K')
+    d_perp = int(q_perp.shape[1])
+    if d_perp == 0:
+        return 1.0
+
+    stat = 0.0
+    total_df = 0
+    for pair, mean_h in traj_mean_by_pair.items():
+        cov_h = traj_cov_by_pair[pair]
+        r_perp = q_perp.T @ mean_h
+        w_perp = _psd_clip(q_perp.T @ cov_h @ q_perp, floor=1e-12)
+        stat += float(r_perp @ np.linalg.solve(w_perp, r_perp))
+        total_df += d_perp
+    return float(sp_stats.chi2.sf(max(stat, 0.0), df=max(total_df, 1)))
+
+
+def _compute_cycle_ppc_pvalue(
+    y_by_pair: Mapping[tuple[str, str], np.ndarray],
+    f_by_pair: Mapping[tuple[str, str], np.ndarray],
+    omega_draws_pair: Mapping[tuple[str, str], np.ndarray],
+    fitted_pairs: tuple[tuple[str, str], ...],
+    n_cycle: np.ndarray,
+    k_dim: int,
     rng: np.random.Generator,
+) -> float | None:
+    """Posterior predictive p-value on cycle discrepancy ``(N_cycle^T otimes I_K') y_hat``."""
+    n_cyc = int(n_cycle.shape[1])
+    if n_cyc == 0:
+        return None
+    p_len = len(fitted_pairs)
+    y_stack = np.concatenate([y_by_pair[p] for p in fitted_pairs], axis=0)  # (P * K',)
+    nk_op = np.kron(n_cycle.T, np.eye(k_dim, dtype=np.float64))  # (C * K', P * K')
+    d_obs = nk_op @ y_stack
+
+    # Reference metric under nominal forest covariances F_{m,p}
+    m0_cov = np.zeros((n_cyc * k_dim, n_cyc * k_dim), dtype=np.float64)
+    chol_f_list = []
+    for p_i, pair in enumerate(fitted_pairs):
+        fp = f_by_pair[pair]
+        chol_f_list.append(np.linalg.cholesky(_psd_clip(fp, floor=1e-14)))
+        np_row = n_cycle[p_i : p_i + 1, :]  # (1, C)
+        m0_cov += np.kron(np_row.T @ np_row, fp)
+    m0_inv = np.linalg.inv(_psd_clip(m0_cov, floor=1e-13))
+    t_obs = float(d_obs @ m0_inv @ d_obs)
+
+    n_draws = next(iter(omega_draws_pair.values())).shape[0]
+    eta_rep = np.zeros((n_draws, p_len * k_dim), dtype=np.float64)
+    for p_i, pair in enumerate(fitted_pairs):
+        w_s = np.maximum(omega_draws_pair[pair], 1e-10)
+        z_rep = rng.standard_normal((n_draws, k_dim)) @ chol_f_list[p_i].T
+        eta_rep[:, p_i * k_dim : (p_i + 1) * k_dim] = z_rep / np.sqrt(w_s)[:, None]
+    d_rep = eta_rep @ nk_op.T  # (S, C * K')
+    t_rep = np.einsum("si,ij,sj->s", d_rep, m0_inv, d_rep)
+    return float(np.mean(t_rep >= t_obs))
+
+
+def _compute_composite_ppc_pvalue(
+    comp_y_by_pair: Mapping[tuple[str, str], np.ndarray],
+    comp_f_by_pair: Mapping[tuple[str, str], np.ndarray],
+    comp_omega_draws: Mapping[tuple[str, str], np.ndarray],
+    struct_y_list: Sequence[Mapping[tuple[str, str], np.ndarray]],
+    struct_f_list: Sequence[Mapping[tuple[str, str], np.ndarray]],
+    struct_omega_list: Sequence[Mapping[tuple[str, str], np.ndarray]],
+    comp_pairs: Sequence[tuple[str, str]],
+    k_dim: int,
+    rng: np.random.Generator,
+) -> float | None:
+    """Posterior predictive p-value for composite-vs-sum measurement discrepancy."""
+    if not comp_pairs:
+        return None
+    n_draws = next(iter(comp_omega_draws.values())).shape[0]
+    t_obs = 0.0
+    t_rep = np.zeros(n_draws, dtype=np.float64)
+    for pair in comp_pairs:
+        delta_obs = comp_y_by_pair[pair] - sum(sy[pair] for sy in struct_y_list)
+        m0_p = comp_f_by_pair[pair].copy()
+        for sf in struct_f_list:
+            m0_p = m0_p + sf[pair]
+        m0_p_inv = np.linalg.inv(_psd_clip(m0_p, floor=1e-13))
+        t_obs += float(delta_obs @ m0_p_inv @ delta_obs)
+
+        chol_c = np.linalg.cholesky(_psd_clip(comp_f_by_pair[pair], floor=1e-14))
+        wc = np.maximum(comp_omega_draws[pair], 1e-10)
+        delta_rep = (rng.standard_normal((n_draws, k_dim)) @ chol_c.T) / np.sqrt(wc)[:, None]
+        for sf, sw in zip(struct_f_list, struct_omega_list, strict=True):
+            chol_m = np.linalg.cholesky(_psd_clip(sf[pair], floor=1e-14))
+            wm = np.maximum(sw[pair], 1e-10)
+            delta_rep = delta_rep - (rng.standard_normal((n_draws, k_dim)) @ chol_m.T) / np.sqrt(wm)[:, None]
+        t_rep += np.einsum("si,ij,sj->s", delta_rep, m0_p_inv, delta_rep)
+    return float(np.mean(t_rep >= t_obs))
+
+
+# ---- Joint Bayesian multi-chain reconciliation core ---------------------------------------------
+
+
+def _asis_interweave_outcome_scales(
     *,
-    prior_draw: Any,
-    prior_logpdf: Any,
-    is_flat_prior: bool = False,
-    mu_lik: np.ndarray | None = None,
-    mu_hat: np.ndarray | None = None,
-    sigma_lik: np.ndarray,
-    a_ineq: np.ndarray | None = None,
-    b_ineq: np.ndarray | None = None,
-    n_draws: int,
-    n_prop: int,
-    lik_logpdf: Any = None,
-    return_log_evidence: bool = False,
-) -> Any:
-    """Defensive-mixture SIR in ``d = A - 1`` dimensions on the linear polyhedron support.
+    m_idx: int,
+    theta: np.ndarray,
+    w_res: np.ndarray,
+    wx: np.ndarray,
+    spec: _OutcomeConePriorSpec,
+    sigma_sq_m: float,
+    kappa_sq_m: float,
+    a_sigma_m: float,
+    a_kappa_m: float,
+    local_scales_m: np.ndarray,
+    s0_scale_m: float,
+    fixed_sigma_m: float | None,
+    dynamic_shrinkage: bool,
+    rng: np.random.Generator,
+) -> tuple[float, float, float, float, np.ndarray]:
+    """Yu & Meng (2011) Ancillary Augmentation interweaving step for ``(sigma_m, kappa_m)``.
 
-    ``lik_logpdf`` optionally replaces the Gaussian ``N(mu_lik, sigma_lik)`` target likelihood
-    (for example by a scale mixture); ``N(mu_lik, sigma_lik)`` remains the proposal. With
-    ``return_log_evidence=True`` a fourth element is returned: the deterministic-mixture
-    importance-sampling estimate of ``log int p(mu) L(mu) dmu`` (both densities normalized),
-    ``-inf`` when no proposal has positive weight.
+    Eliminates centered-Gibbs funnel slow-mixing when dynamic modes ``theta_{m,1..K'-1}`` or
+    the global level ``theta_{m,0}`` concentrate near zero, while preserving exact detailed
+    balance of the marginal Half-t_3 cone prior + collapsed likelihood.
     """
-    if mu_lik is None:
-        if mu_hat is None:
-            raise ValueError("Provide mu_lik or mu_hat")
-        mu_lik = mu_hat
-    d_dim = int(mu_lik.shape[0])
-    if a_ineq is None or b_ineq is None:
-        a_ineq = np.zeros((0, d_dim), dtype=np.float64)
-        b_ineq = np.zeros(0, dtype=np.float64)
-    n_half = max(n_prop // 2, 1000)
-    lik_dist = sp_stats.multivariate_normal(mean=mu_lik, cov=sigma_lik, allow_singular=True)
+    n_nonctrl = spec.n_nonctrl
+    k_dim = spec.k_dim
+    d_per_m = n_nonctrl * k_dim
+    base_m = m_idx * d_per_m
+    sl_m = slice(base_m, base_m + d_per_m)
+    inv_3s0_sq = 1.0 / (3.0 * (s0_scale_m**2))
+    logz_dep = bool(spec.monotone and spec.period_positivity and k_dim >= 2 and spec.n_edges > 0)
 
-    def _valid_support(cand_pts: np.ndarray) -> np.ndarray:
-        mask = _inside_polyhedron(cand_pts, a_ineq, b_ineq)
-        if a_ineq.shape[0] == 0:
-            mask &= np.isfinite(prior_logpdf(cand_pts))
-        return mask
+    skip_expensive_ratio_aa = bool(spec.scale_prior == "local_halft" and not spec.is_tree_poset)
 
-    if is_flat_prior:
-        wide_cov = 4.0 * sigma_lik
-        wide_dist = sp_stats.multivariate_normal(mean=mu_lik, cov=wide_cov, allow_singular=True)
-        pri_pts_list = []
-        n_tried_a = 0
-        n_kept_a = 0
-        for _ in range(30):
-            cand = rng.multivariate_normal(mu_lik, wide_cov, size=n_half)
-            if cand.ndim == 1:
-                cand = cand[:, None]
-            keep = _valid_support(cand)
-            n_tried_a += cand.shape[0]
-            n_kept_a += int(np.sum(keep))
-            pri_pts_list.append(cand[keep])
-            if n_kept_a >= n_half:
-                break
-        pri = (
-            np.concatenate(pri_pts_list, axis=0)[:n_half]
-            if pri_pts_list
-            else np.zeros((0, d_dim), dtype=np.float64)
-        )
-        z_a = max(n_kept_a / max(n_tried_a, 1), 1e-12)
-    else:
-        pri_all = prior_draw(n_half)
-        keep_a = _valid_support(pri_all)
-        z_a = max(float(np.mean(keep_a)), 1e-12)
-        pri = pri_all[keep_a]
+    # AA-0: Non-centered Mode-1 scale interweaving holding eta_0 = theta_0 / sigma_m fixed
+    if fixed_sigma_m is None and k_dim >= 2 and dynamic_shrinkage and not skip_expensive_ratio_aa:
+        sl_0 = slice(base_m, base_m + n_nonctrl)
+        sig_0 = math.sqrt(max(sigma_sq_m, 1e-28))
+        kap_0 = math.sqrt(max(kappa_sq_m, 1e-28))
+        eta_0 = theta[sl_0] / sig_0
+        if float(np.dot(eta_0, eta_0)) > 1e-50:
+            ws_lo, ws_hi = -13.0, 13.0
+            if spec.a_cone.shape[0] > 0:
+                th_base_0 = np.zeros(d_per_m, dtype=np.float64)
+                th_base_0[n_nonctrl:] = theta[base_m + n_nonctrl : base_m + d_per_m]
+                th_dir_0 = np.zeros(d_per_m, dtype=np.float64)
+                th_dir_0[:n_nonctrl] = eta_0
+                a0 = spec.a_cone @ th_base_0
+                a1 = spec.a_cone @ th_dir_0
+                neg_mask = a1 < -1e-15
+                if np.any(neg_mask):
+                    sig_max = float(np.min(-a0[neg_mask] / a1[neg_mask]))
+                    ws_hi = min(ws_hi, math.log(max(sig_max, 1e-28)) - 1e-12)
+                pos_neg = (a1 > 1e-15) & (a0 < 0.0)
+                if np.any(pos_neg):
+                    sig_min = float(np.max(-a0[pos_neg] / a1[pos_neg]))
+                    ws_lo = max(ws_lo, math.log(max(sig_min, 1e-28)) + 1e-12)
 
-    lik_pts_list = []
-    n_tried_b = 0
-    n_kept_b = 0
-    for _ in range(40):
-        cand = rng.multivariate_normal(mu_lik, sigma_lik, size=n_half)
-        if cand.ndim == 1:
-            cand = cand[:, None]
-        keep = _valid_support(cand)
-        n_tried_b += cand.shape[0]
-        n_kept_b += int(np.sum(keep))
-        lik_pts_list.append(cand[keep])
-        if n_kept_b >= n_half:
-            break
-    lik = (
-        np.concatenate(lik_pts_list, axis=0)[:n_half]
-        if lik_pts_list
-        else np.zeros((0, d_dim), dtype=np.float64)
-    )
-    z_b = max(n_kept_b / max(n_tried_b, 1), 1e-12)
+            ws_cur = math.log(sig_0)
+            if ws_hi - ws_lo > 1e-9 and (ws_lo < ws_cur < ws_hi):
+                v_wx0 = wx[:, sl_0] @ eta_0
+                r0_wy0 = w_res + sig_0 * v_wx0
+                c1_0 = float(np.dot(r0_wy0, v_wx0))
+                c2_0 = float(np.dot(v_wx0, v_wx0))
 
-    pts = np.concatenate([pri, lik], axis=0)
-    if pts.shape[0] < 10:
-        if return_log_evidence:
-            return np.zeros((0, d_dim), dtype=np.float64), pri, 0.0, -np.inf
-        return np.zeros((0, d_dim), dtype=np.float64), pri, 0.0
+                def _logp_aa_ws(ws: float) -> float:
+                    sig = math.exp(ws)
+                    sig2 = sig * sig
+                    lp = ws - 2.0 * math.log1p(sig2 * inv_3s0_sq) + sig * c1_0 - 0.5 * sig2 * c2_0
+                    if logz_dep:
+                        lp -= spec.log_normalizer(kap_0 / sig, local_scales_m)
+                    return lp
 
-    log_prior = prior_logpdf(pts)
-    log_lik = np.asarray(lik_dist.logpdf(pts), dtype=np.float64).reshape(-1)
-    log_target_lik = (
-        log_lik
-        if lik_logpdf is None
-        else np.asarray(lik_logpdf(pts), dtype=np.float64).reshape(-1)
-    )
-    w_a = pri.shape[0] / float(pts.shape[0])
-    w_b = 1.0 - w_a
+                ws_new = _slice_sample_1d(_logp_aa_ws, ws_cur, rng, bounds=(ws_lo, ws_hi))
+                sig_new = math.exp(ws_new)
+                theta[sl_0] = sig_new * eta_0
+                w_res = r0_wy0 - sig_new * v_wx0
+                sigma_sq_m = sig_new * sig_new
 
-    if is_flat_prior:
-        log_q_a = np.asarray(wide_dist.logpdf(pts), dtype=np.float64).reshape(-1)
-    else:
-        log_q_a = log_prior
+    # AA-1: Non-centered dynamic-scale interweaving holding eta_dyn = theta_dyn / kappa_m fixed
+    if dynamic_shrinkage and k_dim >= 2 and not skip_expensive_ratio_aa:
+        sl_dyn = slice(base_m + n_nonctrl, base_m + d_per_m)
+        kap_0 = math.sqrt(max(kappa_sq_m, 1e-28))
+        sig_0 = math.sqrt(max(sigma_sq_m, 1e-28))
+        eta_dyn = theta[sl_dyn] / kap_0
+        if float(np.dot(eta_dyn, eta_dyn)) > 1e-50:
+            w_lo, w_hi = -13.0, 13.0
+            if spec.a_cone.shape[0] > 0:
+                th_base_m = np.zeros(d_per_m, dtype=np.float64)
+                th_base_m[:n_nonctrl] = theta[base_m : base_m + n_nonctrl]
+                th_dir_m = np.zeros(d_per_m, dtype=np.float64)
+                th_dir_m[n_nonctrl:] = eta_dyn
+                a0 = spec.a_cone @ th_base_m
+                a1 = spec.a_cone @ th_dir_m
+                neg_mask = a1 < -1e-15
+                if np.any(neg_mask):
+                    kap_max = float(np.min(-a0[neg_mask] / a1[neg_mask]))
+                    w_hi = min(w_hi, math.log(max(kap_max, 1e-28)) - 1e-12)
+                pos_neg = (a1 > 1e-15) & (a0 < 0.0)
+                if np.any(pos_neg):
+                    kap_min = float(np.max(-a0[pos_neg] / a1[pos_neg]))
+                    w_lo = max(w_lo, math.log(max(kap_min, 1e-28)) + 1e-12)
 
-    if w_b <= 1e-12:
-        log_q = log_q_a - math.log(z_a)
-    elif w_a <= 1e-12:
-        log_q = log_lik - math.log(z_b)
-    else:
-        log_q = np.logaddexp(
-            math.log(w_a) + log_q_a - math.log(z_a),
-            math.log(w_b) + log_lik - math.log(z_b),
-        )
-    log_w = log_prior + log_target_lik - log_q
-    log_w = np.where(np.isfinite(log_w), log_w, -np.inf)
-    max_log_w = float(np.max(log_w))
-    if not math.isfinite(max_log_w):
-        if return_log_evidence:
-            return np.zeros((0, d_dim), dtype=np.float64), pri, 0.0, -np.inf
-        return np.zeros((0, d_dim), dtype=np.float64), pri, 0.0
-    log_w -= max_log_w
-    weights = np.exp(log_w)
-    sum_w = float(np.sum(weights))
-    weights /= sum_w
-    ess = float(1.0 / np.sum(weights**2))
-    idx = rng.choice(pts.shape[0], size=n_draws, replace=True, p=weights)
-    if return_log_evidence:
-        log_z = max_log_w + math.log(sum_w) - math.log(float(pts.shape[0]))
-        return pts[idx], pri, ess, log_z
-    return pts[idx], pri, ess
+            wk_cur = math.log(kap_0)
+            if w_hi - w_lo > 1e-9 and (w_lo < wk_cur < w_hi):
+                v_wx = wx[:, sl_dyn] @ eta_dyn
+                r0_wy = w_res + kap_0 * v_wx
+                c1 = float(np.dot(r0_wy, v_wx))
+                c2 = float(np.dot(v_wx, v_wx))
+
+                def _logp_aa_wk(wk: float) -> float:
+                    kap = math.exp(wk)
+                    kap2 = kap * kap
+                    lp = wk - 2.0 * math.log1p(kap2 * inv_3s0_sq) + kap * c1 - 0.5 * kap2 * c2
+                    if logz_dep:
+                        lp -= spec.log_normalizer(kap / sig_0, local_scales_m)
+                    return lp
+
+                wk_new = _slice_sample_1d(_logp_aa_wk, wk_cur, rng, bounds=(w_lo, w_hi))
+                kap_new = math.exp(wk_new)
+                theta[sl_dyn] = kap_new * eta_dyn
+                w_res = r0_wy - kap_new * v_wx
+                kappa_sq_m = kap_new * kap_new
+
+    # AA-2: Joint radial cone-scale interweaving holding theta_m / sigma_m and kappa_m / sigma_m fixed
+    if fixed_sigma_m is None and (dynamic_shrinkage or k_dim == 1 or not logz_dep):
+        th_m_cur = theta[sl_m].copy()
+        if float(np.dot(th_m_cur, th_m_cur)) > 1e-50:
+            if k_dim >= 2 and not dynamic_shrinkage:
+                # Only scale Mode-1 (theta_{m,0}, sigma_m) when log Z_m does not depend on ratio
+                sl_0 = slice(base_m, base_m + n_nonctrl)
+                th0_cur = theta[sl_0].copy()
+                u_wx = wx[:, sl_0] @ th0_cur
+                r_base = w_res + u_wx
+                d1 = float(np.dot(r_base, u_wx))
+                d2 = float(np.dot(u_wx, u_wx))
+                sig0_sq = max(sigma_sq_m, 1e-28)
+
+                def _logp_aa_d0(delta: float) -> float:
+                    s = math.exp(delta)
+                    s2 = s * s
+                    return delta - 2.0 * math.log1p(s2 * sig0_sq * inv_3s0_sq) + s * d1 - 0.5 * s2 * d2
+
+                d_new = _slice_sample_1d(_logp_aa_d0, 0.0, rng, bounds=(-12.0, 12.0))
+                s_new = math.exp(d_new)
+                theta[sl_0] = s_new * th0_cur
+                w_res = r_base - s_new * u_wx
+                sigma_sq_m = (s_new * s_new) * sig0_sq
+            else:
+                # Scale entire outcome vector theta_m -> s * theta_m (cone-invariant & ratio-invariant!)
+                u_wx = wx[:, sl_m] @ th_m_cur
+                r_base = w_res + u_wx
+                d1 = float(np.dot(r_base, u_wx))
+                d2 = float(np.dot(u_wx, u_wx))
+                sig0_sq = max(sigma_sq_m, 1e-28)
+                kap0_sq = max(kappa_sq_m, 1e-28)
+                both_scales = bool(k_dim >= 2 and dynamic_shrinkage)
+
+                def _logp_aa_joint(delta: float) -> float:
+                    s = math.exp(delta)
+                    s2 = s * s
+                    lp = delta - 2.0 * math.log1p(s2 * sig0_sq * inv_3s0_sq) + s * d1 - 0.5 * s2 * d2
+                    if both_scales:
+                        lp += delta - 2.0 * math.log1p(s2 * kap0_sq * inv_3s0_sq)
+                    return lp
+
+                d_new = _slice_sample_1d(_logp_aa_joint, 0.0, rng, bounds=(-12.0, 12.0))
+                s_new = math.exp(d_new)
+                s2_new = s_new * s_new
+                theta[sl_m] = s_new * th_m_cur
+                w_res = r_base - s_new * u_wx
+                sigma_sq_m = s2_new * sig0_sq
+                if both_scales:
+                    kappa_sq_m = s2_new * kap0_sq
+
+    # AA-3: Per-edge non-centered scale interweaving on tree posets under P2 ("local_halft")
+    if spec.scale_prior == "local_halft" and spec.is_tree_poset and spec.c_cover_inv is not None:
+        c_inv = spec.c_cover_inv
+        inv_3_unit = 1.0 / 3.0
+        for e_idx in range(spec.n_edges):
+            th_modes = theta[sl_m].reshape(k_dim, n_nonctrl)
+            u_e = th_modes @ spec.c_cover[e_idx]  # (K',)
+            if float(np.dot(u_e, u_e)) <= 1e-50:
+                continue
+            col_e = c_inv[:, e_idx]  # (A - 1,)
+            d_th_e = np.concatenate([u_e[k] * col_e for k in range(k_dim)])
+            u_wx_e = wx[:, sl_m] @ d_th_e
+            r_base_e = w_res + u_wx_e
+            d1_e = float(np.dot(r_base_e, u_wx_e))
+            d2_e = float(np.dot(u_wx_e, u_wx_e))
+            lam_e0 = max(float(local_scales_m[e_idx]), 1e-14)
+            lam_e0_sq = lam_e0 * lam_e0
+
+            def _logp_aa_edge(
+                delta: float, _l2: float = lam_e0_sq, _d1: float = d1_e, _d2: float = d2_e
+            ) -> float:
+                s = math.exp(delta)
+                s2 = s * s
+                return delta - 2.0 * math.log1p(s2 * _l2 * inv_3_unit) + s * _d1 - 0.5 * s2 * _d2
+
+            de_new = _slice_sample_1d(_logp_aa_edge, 0.0, rng, bounds=(-9.0, 9.0))
+            se_new = math.exp(de_new)
+            theta[sl_m] = theta[sl_m] + (se_new - 1.0) * d_th_e
+            w_res = r_base_e - se_new * u_wx_e
+            local_scales_m[e_idx] = se_new * lam_e0
+
+    return sigma_sq_m, kappa_sq_m, a_sigma_m, a_kappa_m, w_res
 
 
-def _find_interior_starting_points(
-    rng: np.random.Generator,
-    prior_draw: Any,
-    prior_logpdf: Any,
-    mu_lik: np.ndarray,
-    sigma_lik: np.ndarray,
-    a_ineq: np.ndarray,
-    b_ineq: np.ndarray,
-    num_chains: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Find ``num_chains`` strictly interior starting points and a preconditioning Cholesky factor."""
-    d_dim = int(mu_lik.shape[0])
-    lik_dist = sp_stats.multivariate_normal(mean=mu_lik, cov=sigma_lik, allow_singular=True)
-    candidates: list[np.ndarray] = []
-
-    for _ in range(10):
-        c_pri = prior_draw(2000)
-        ok_pri = _inside_polyhedron(c_pri, a_ineq, b_ineq, tol=1e-7)
-        if np.any(ok_pri):
-            candidates.append(c_pri[ok_pri])
-        c_lik = rng.multivariate_normal(mu_lik, sigma_lik, size=2000)
-        if c_lik.ndim == 1:
-            c_lik = c_lik[:, None]
-        ok_lik = _inside_polyhedron(c_lik, a_ineq, b_ineq, tol=1e-7)
-        if np.any(ok_lik):
-            candidates.append(c_lik[ok_lik])
-        if sum(arr.shape[0] for arr in candidates) >= 500:
-            break
-
-    if not candidates:
-        # Solve a linear program to find a strictly interior point maximizing minimum slack
-        c_lp = np.zeros(d_dim + 1, dtype=np.float64)
-        c_lp[-1] = -1.0
-        a_ub = np.column_stack([-a_ineq, np.ones(a_ineq.shape[0], dtype=np.float64)])
-        b_ub = -b_ineq
-        bounds = [(None, None)] * d_dim + [(1e-6, 1.0)]
-        res_lp = sp_optimize.linprog(c_lp, A_ub=a_ub, b_ub=b_ub, bounds=bounds, method="highs")
-        if not res_lp.success or not _inside_polyhedron(res_lp.x[:d_dim][None, :], a_ineq, b_ineq, tol=1e-9)[0]:
-            raise ValueError(
-                "The prior and tau_clip support contain no feasible interior points; widen tau_clip"
-            )
-        center = res_lp.x[:d_dim]
-        chol = np.linalg.cholesky(sigma_lik + 1e-6 * np.eye(d_dim))
-        starts = np.repeat(center[None, :], num_chains, axis=0)
-        return starts, chol
-
-    pool = np.concatenate(candidates, axis=0)
-    log_p = prior_logpdf(pool) + np.asarray(lik_dist.logpdf(pool), dtype=np.float64).reshape(-1)
-    finite_mask = np.isfinite(log_p)
-    if not np.any(finite_mask):
-        raise ValueError(
-            "The prior and the likelihood put no finite density inside tau_clip; widen tau_clip or prior_scale"
-        )
-    pool = pool[finite_mask]
-    log_p = log_p[finite_mask]
-    log_p -= float(np.max(log_p))
-    w = np.exp(log_p)
-    w /= float(np.sum(w))
-
-    chosen_idx = rng.choice(pool.shape[0], size=num_chains, replace=pool.shape[0] < num_chains, p=w)
-    starts = pool[chosen_idx].copy()
-
-    if pool.shape[0] >= d_dim + 2 and float(1.0 / np.sum(w**2)) >= d_dim + 2:
-        emp_cov = np.cov(pool, rowvar=False, aweights=w)
-        emp_cov = np.atleast_2d(emp_cov) + 1e-5 * sigma_lik + 1e-8 * np.eye(d_dim)
-    else:
-        emp_cov = sigma_lik + 1e-6 * np.eye(d_dim)
-    chol = np.linalg.cholesky(0.5 * (emp_cov + emp_cov.T))
-    return starts, chol
-
-
-def _slice_posterior_nd(
-    rng: np.random.Generator,
+def _run_single_gibbs_chain(
     *,
-    prior_draw: Any,
-    prior_logpdf: Any,
-    mu_lik: np.ndarray,
-    sigma_lik: np.ndarray,
-    a_ineq: np.ndarray,
-    b_ineq: np.ndarray,
-    n_draws: int,
-    num_chains: int = 4,
-    num_burnin: int = 200,
-    thin: int = 2,
-    lik_logpdf: Any = None,
-    auto_continue: bool = False,
-    target_rhat: float = 1.01,
-    target_ess: float = 400.0,
-    max_iter_multiplier: float = 8.0,
-    return_info: bool = False,
-) -> Any:
-    """Vectorized multi-chain analytical-polyhedron hit-and-run slice sampler in ``R^d``.
+    n_steps: int,
+    thin: int = 1,
+    state: dict[str, Any],
+    record: bool,
+    y_vec: np.ndarray,
+    x_des: np.ndarray,
+    g_xi: np.ndarray,
+    f_blocks: list[np.ndarray],
+    chol_f_blocks: list[np.ndarray],
+    f_inv_blocks: list[np.ndarray],
+    sqrt_v_arms: list[list[np.ndarray]],
+    prior_specs: list[_OutcomeConePriorSpec],
+    a_cone_joint: np.ndarray,
+    interior_ray_joint: np.ndarray,
+    s0_scales: list[float],
+    fixed_sigmas: list[float | None],
+    n_arms: int,
+    n_outcomes: int,
+    k_dim: int,
+    horizon: int,
+    robust_error: str,
+    dynamic_shrinkage: bool,
+    sample_corr: bool,
+    iw_df: float,
+    iw_scale: np.ndarray,
+    rng: np.random.Generator,
+) -> tuple[dict[str, Any], dict[str, np.ndarray] | None]:
+    """Execute ``n_steps * thin`` iterations of the collapsed blocked Gibbs + Pakman--Paninski HMC sampler."""
+    n_nonctrl = n_arms - 1
+    d_per_m = n_nonctrl * k_dim
+    d_total = n_outcomes * d_per_m
+    n_q = len(f_blocks)
+    h_float = float(horizon)
+    thin_eff = max(int(thin), 1)
+    total_iters = int(n_steps) * thin_eff
 
-    With ``auto_continue=False`` (the 0.9.0 behavior) the chains run ``num_burnin`` sweeps
-    plus ``ceil(n_draws / num_chains) * thin`` recorded sweeps. With ``auto_continue=True``
-    the same first block is run (so a run that is already converged is bit-identical to
-    0.9.0) and further blocks of the same length are appended until the returned draws
-    reach split R-hat ``<= target_rhat`` and bulk ESS ``>= min(target_ess, 0.75 * n_draws)``
-    on every coordinate, or the total number of sweeps reaches ``max_iter_multiplier`` times
-    the default, in which case a :class:`RankKConfigWarning` is emitted. After ``k >= 2``
-    blocks the first ``floor(k / 2)`` blocks are discarded as extra warm-up and the
-    remaining draws are thinned evenly back to ``ceil(n_draws / num_chains)`` per chain.
+    theta = state["theta"].copy()
+    sigma_sq = state["sigma_sq"].copy()
+    kappa_sq = state["kappa_sq"].copy()
+    a_sigma = state["a_sigma"].copy()
+    a_kappa = state["a_kappa"].copy()
+    local_scales = [ls.copy() for ls in state["local_scales"]]
+    b_local = [bl.copy() for bl in state["b_local"]]
+    omega_vec = state["omega_vec"].copy()
+    flag_vec = state["flag_vec"].copy()
+    pi_mix = float(state["pi_mix"])
+    corr_r = state["corr_r"].copy()
 
-    Args:
-      rng: Random generator.
-      prior_draw: Callable ``n -> (n, d)`` prior draws.
-      prior_logpdf: Callable ``(N, d) -> (N,)`` prior log density.
-      mu_lik: ``(d,)`` Gaussian likelihood mean.
-      sigma_lik: ``(d, d)`` Gaussian likelihood covariance.
-      a_ineq: ``(R, d)`` support inequalities ``a_ineq @ mu >= b_ineq``.
-      b_ineq: ``(R,)`` inequality offsets.
-      n_draws: Number of pooled posterior draws to return.
-      num_chains: Number of parallel chains.
-      num_burnin: Burn-in sweeps per chain.
-      thin: Thinning interval of the first block.
-      lik_logpdf: Optional replacement of the Gaussian ``N(mu_lik, sigma_lik)`` log likelihood
-        in the target; the Gaussian is still used to initialize and precondition the chains.
-      auto_continue: Continue in blocks until the convergence targets are met.
-      target_rhat: Maximum split R-hat target for ``auto_continue``.
-      target_ess: Minimum bulk ESS target for ``auto_continue``.
-      max_iter_multiplier: Cap on total sweeps as a multiple of the default sweeps.
-      return_info: Also return a dict with ``n_iterations`` (sweeps per chain),
-        ``n_blocks`` and ``converged``.
-
-    Returns:
-      ``(pooled, prior_inside, ess_per_param, rhat_per_param, n_evals)`` and, when
-      ``return_info`` is set, the info dict as a sixth element.
-    """
-    d_dim = int(mu_lik.shape[0])
-    n_chains = max(int(num_chains), 2)
-    draws_per_chain = max(int(math.ceil(n_draws / float(n_chains))), 4)
-    total_sweeps = int(num_burnin) + draws_per_chain * max(int(thin), 1)
-    prec_lik = np.linalg.inv(sigma_lik)
-
-    # Probe prior draws to check if the prior lives on a radial order-polytope cone
-    # {mu : 0 <= mu_j <= mu_{top_col}} (where Cartesian density has a tot^{-(d-1)} singularity at 0).
-    probe_pri = prior_draw(2048)
-    if a_ineq.shape[0] > 0:
-        probe_ok = _inside_polyhedron(probe_pri, a_ineq, b_ineq, tol=0.0)
-        probe_valid = probe_pri[probe_ok] if np.any(probe_ok) else probe_pri
+    if record:
+        tr_theta = np.empty((n_steps, d_total), dtype=np.float64)
+        tr_sigma = np.empty((n_steps, n_outcomes), dtype=np.float64)
+        tr_kappa = np.empty((n_steps, n_outcomes), dtype=np.float64)
+        tr_local = [np.empty((n_steps, spec.n_edges), dtype=np.float64) for spec in prior_specs]
+        tr_omega = np.empty((n_steps, n_q), dtype=np.float64)
+        tr_flag = np.empty((n_steps, n_q), dtype=np.float64)
+        tr_corr = np.empty((n_steps, n_outcomes, n_outcomes), dtype=np.float64)
     else:
-        probe_ok = np.isfinite(prior_logpdf(probe_pri))
-        probe_valid = probe_pri[probe_ok] if np.any(probe_ok) else probe_pri
+        tr_theta = tr_sigma = tr_kappa = tr_omega = tr_flag = tr_corr = None  # type: ignore[assignment]
+        tr_local = []
 
-    use_radial_cone = False
-    top_col = d_dim - 1
-    interior_cols: list[int] = []
-    if d_dim >= 2 and probe_valid.shape[0] >= 16 and np.all(probe_valid > 0.0):
-        cand_top = int(np.argmax(np.mean(probe_valid, axis=0)))
-        cand_int = [c for c in range(d_dim) if c != cand_top]
-        if np.all(probe_valid[:, cand_int] <= probe_valid[:, [cand_top]] * (1.0 + 1e-11)):
-            test_pt = np.mean(probe_valid, axis=0, keepdims=True).copy()
-            test_pt[0, cand_int[0]] = 2.0 * test_pt[0, cand_top] + 1.0
-            outside_ineq = a_ineq.shape[0] > 0 and not _inside_polyhedron(test_pt, a_ineq, b_ineq)[0]
-            outside_logp = not np.isfinite(float(prior_logpdf(test_pt)[0]))
-            if outside_ineq or outside_logp:
-                use_radial_cone = True
-                top_col = cand_top
-                interior_cols = cand_int
+    sigma_xi, l_xi = _build_sigma_xi(sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim)
 
-    def _mu_to_z(mu_pts: np.ndarray) -> np.ndarray:
-        if not use_radial_cone:
-            return mu_pts
-        tot = np.maximum(mu_pts[:, top_col], 1e-15)
-        w = np.clip(mu_pts[:, interior_cols] / tot[:, None], 1e-12, 1.0 - 1e-12)
-        return np.column_stack([w, tot])
+    for it_idx in range(total_iters):
+        # 1. Collapsed likelihood precision & mean marginalizing shared arm noise xi
+        omega_cov = _build_omega_cov(g_xi, sigma_xi, f_blocks, omega_vec, k_dim)
+        chol_omega = np.linalg.cholesky(omega_cov)
+        wx = np.linalg.solve(chol_omega, x_des)
+        wy = np.linalg.solve(chol_omega, y_vec)
+        prec_lik = wx.T @ wx
+        h_lik = wx.T @ wy
 
-    def _z_to_mu(z_pts: np.ndarray) -> np.ndarray:
-        if not use_radial_cone:
-            return z_pts
-        tot = z_pts[:, -1]
-        mu_out = np.empty((z_pts.shape[0], d_dim), dtype=np.float64)
-        mu_out[:, top_col] = tot
-        mu_out[:, interior_cols] = z_pts[:, :-1] * tot[:, None]
-        return mu_out
+        # 2. Prior precision across outcomes m = 0..M-1
+        prec_prior = np.zeros((d_total, d_total), dtype=np.float64)
+        for m in range(n_outcomes):
+            l0_m, _ = prior_specs[m].precision_and_logdet(local_scales[m])
+            base_m = m * d_per_m
+            sl0 = slice(base_m, base_m + n_nonctrl)
+            prec_prior[sl0, sl0] = l0_m / max(h_float * float(sigma_sq[m]), 1e-24)
+            for k in range(1, k_dim):
+                slk = slice(base_m + k * n_nonctrl, base_m + (k + 1) * n_nonctrl)
+                prec_prior[slk, slk] = l0_m / max(h_float * float(kappa_sq[m]), 1e-24)
 
-    if use_radial_cone:
-        m_int = d_dim - 1
-        rows_az: list[np.ndarray] = []
-        rows_bz: list[float] = []
-        for k in range(m_int):
-            ek = np.zeros(d_dim, dtype=np.float64)
-            ek[k] = 1.0
-            rows_az.append(ek)
-            rows_bz.append(0.0)
-            rows_az.append(-ek)
-            rows_bz.append(-1.0)
-        etot = np.zeros(d_dim, dtype=np.float64)
-        etot[-1] = 1.0
-        rows_az.append(etot)
-        rows_bz.append(0.0)
+        prec_post = _psd_clip(prec_lik + prec_prior, floor=1e-12)
+        mean_post = np.linalg.solve(prec_post, h_lik)
 
-        # Include any pairwise ordering w_k1 <= w_k2 enforced by the prior
-        mean_z = _mu_to_z(np.mean(probe_valid, axis=0, keepdims=True))[0]
-        for k1 in range(m_int):
-            for k2 in range(m_int):
-                if k1 == k2:
-                    continue
-                if np.all(probe_valid[:, interior_cols[k1]] <= probe_valid[:, interior_cols[k2]] + 1e-12):
-                    z_test = mean_z.copy()
-                    z_test[k1] = min(0.8, max(mean_z[k2] + 0.1, 0.6))
-                    z_test[k2] = max(0.2, min(mean_z[k1] - 0.1, 0.4))
-                    mu_test = _z_to_mu(z_test[None, :])
-                    viol_ineq = a_ineq.shape[0] > 0 and not _inside_polyhedron(mu_test, a_ineq, b_ineq)[0]
-                    viol_logp = not np.isfinite(float(prior_logpdf(mu_test)[0]))
-                    if viol_ineq or viol_logp:
-                        diff_row = np.zeros(d_dim, dtype=np.float64)
-                        diff_row[k2] = 1.0
-                        diff_row[k1] = -1.0
-                        rows_az.append(diff_row)
-                        rows_bz.append(0.0)
-
-        for r_idx in range(a_ineq.shape[0]):
-            a_r = a_ineq[r_idx]
-            b_r = float(b_ineq[r_idx])
-            if abs(b_r) <= 1e-12:
-                z_row = np.zeros(d_dim, dtype=np.float64)
-                for k, col_idx in enumerate(interior_cols):
-                    z_row[k] = a_r[col_idx]
-                rows_az.append(z_row)
-                rows_bz.append(-float(a_r[top_col]))
-            elif np.all(np.abs(a_r[interior_cols]) <= 1e-12) and abs(a_r[top_col]) > 1e-12:
-                z_row = np.zeros(d_dim, dtype=np.float64)
-                z_row[-1] = a_r[top_col]
-                rows_az.append(z_row)
-                rows_bz.append(b_r)
-
-        a_work = np.vstack(rows_az)
-        b_work = np.asarray(rows_bz, dtype=np.float64)
-    else:
-        a_work = a_ineq
-        b_work = b_ineq
-
-    def _log_target(z_pts: np.ndarray) -> np.ndarray:
-        inside = _inside_polyhedron(z_pts, a_work, b_work, tol=0.0)
-        if use_radial_cone:
-            inside &= z_pts[:, -1] > 0.0
-        out = np.full(z_pts.shape[0], -np.inf, dtype=np.float64)
-        if not np.any(inside):
-            return out
-        z_valid = z_pts[inside]
-        mu_valid = _z_to_mu(z_valid)
-        if a_ineq.shape[0] > 0 and not use_radial_cone:
-            pass
-        elif a_ineq.shape[0] > 0:
-            in_mu = _inside_polyhedron(mu_valid, a_ineq, b_ineq, tol=0.0)
-            if not np.all(in_mu):
-                idx_in = np.nonzero(inside)[0]
-                inside[idx_in[~in_mu]] = False
-                if not np.any(inside):
-                    return out
-                z_valid = z_pts[inside]
-                mu_valid = _z_to_mu(z_valid)
-        lp = prior_logpdf(mu_valid)
-        if use_radial_cone:
-            lp = lp + float(d_dim - 1) * np.log(np.maximum(z_valid[:, -1], 1e-300))
-        if lik_logpdf is not None:
-            ll = np.asarray(lik_logpdf(mu_valid), dtype=np.float64).reshape(-1)
-        else:
-            diff = mu_valid - mu_lik[None, :]
-            ll = -0.5 * np.sum((diff @ prec_lik) * diff, axis=1)
-        out[inside] = lp + ll
-        return out
-
-    # Initialize chains via importance resampling of prior draws weighted by the likelihood
-    if probe_valid.shape[0] >= n_chains:
-        z_cand = _mu_to_z(probe_valid)
-        ok_z = _inside_polyhedron(z_cand, a_work, b_work, tol=1e-9)
-        if np.any(ok_z):
-            z_pool = z_cand[ok_z]
-            mu_pool = probe_valid[ok_z]
-            diff_pool = mu_pool - mu_lik[None, :]
-            ll_pool = -0.5 * np.sum((diff_pool @ prec_lik) * diff_pool, axis=1)
-            lp_pool = _log_target(z_pool)
-            fin = np.isfinite(ll_pool) & np.isfinite(lp_pool)
-            if np.any(fin):
-                z_pool = z_pool[fin]
-                ll_pool = ll_pool[fin]
-                ll_pool -= float(np.max(ll_pool))
-                w_pool = np.exp(ll_pool)
-                w_pool /= float(np.sum(w_pool))
-                chosen = rng.choice(
-                    z_pool.shape[0], size=n_chains, replace=z_pool.shape[0] < n_chains, p=w_pool
-                )
-                x_cur = z_pool[chosen].copy()
-                if z_pool.shape[0] >= d_dim + 2 and float(1.0 / np.sum(w_pool**2)) >= d_dim + 2:
-                    emp_cov = np.atleast_2d(np.cov(z_pool, rowvar=False, aweights=w_pool))
-                else:
-                    emp_cov = np.atleast_2d(np.cov(z_pool, rowvar=False))
-                emp_cov = 0.5 * (emp_cov + emp_cov.T) + 1e-4 * np.eye(d_dim)
-                chol = np.linalg.cholesky(emp_cov)
-            else:
-                x_cur, chol = _find_interior_starting_points(
-                    rng, prior_draw, prior_logpdf, mu_lik, sigma_lik, a_ineq, b_ineq, n_chains
-                )
-                x_cur = _mu_to_z(x_cur)
-        else:
-            x_cur, chol = _find_interior_starting_points(
-                rng, prior_draw, prior_logpdf, mu_lik, sigma_lik, a_ineq, b_ineq, n_chains
-            )
-            x_cur = _mu_to_z(x_cur)
-    else:
-        x_cur, chol = _find_interior_starting_points(
-            rng, prior_draw, prior_logpdf, mu_lik, sigma_lik, a_ineq, b_ineq, n_chains
+        # 3. Exact Pakman--Paninski wall-reflecting HMC on cone K
+        theta = _sample_truncated_mvn(
+            mean_post,
+            prec_post,
+            a_cone_joint,
+            theta,
+            interior_ray_joint,
+            rng,
+            n_hmc_steps=1,
         )
-        x_cur = _mu_to_z(x_cur)
 
-    log_cur = _log_target(x_cur)
-    base_scale = float(np.sqrt(np.mean(np.diag(chol @ chol.T))))
-    n_evals = int(n_chains)
-
-    chain_traces = np.zeros((n_chains, draws_per_chain, d_dim), dtype=np.float64)
-    kept_idx = 0
-
-    # Auto-continuation state: extra blocks of ``draws_per_chain * thin`` sweeps are appended
-    # lazily by ``_sweep_schedule`` until the selected draws meet the convergence targets.
-    n_thin = max(int(thin), 1)
-    block_sweeps = draws_per_chain * n_thin
-    max_sweeps = max(int(math.floor(float(max_iter_multiplier) * total_sweeps)), total_sweeps)
-    ess_goal = min(float(target_ess), 0.75 * float(n_draws))
-    extra_traces: list[np.ndarray] = []
-    auto_state: dict[str, Any] = {"converged": None, "n_sweeps": total_sweeps}
-    compute_rhat, compute_ess = _get_rhat_ess()
-
-    def _select_traces() -> np.ndarray:
-        blocks = [chain_traces, *extra_traces]
-        if len(blocks) == 1:
-            return chain_traces
-        pool = np.concatenate(blocks[len(blocks) // 2 :], axis=1)
-        sel = np.round(np.linspace(0.0, pool.shape[1] - 1.0, draws_per_chain)).astype(np.int64)
-        return pool[:, sel, :]
-
-    def _targets_met() -> bool:
-        sel_traces = _select_traces()
-        rh = [float(compute_rhat(sel_traces[:, :, j])) for j in range(d_dim)]
-        es = [float(compute_ess(sel_traces[:, :, j])) for j in range(d_dim)]
-        ok = all(math.isfinite(r) and r <= float(target_rhat) for r in rh) and all(
-            math.isfinite(e) and e >= ess_goal for e in es
-        )
-        auto_state["converged"] = bool(ok)
-        return bool(ok)
-
-    def _sweep_schedule() -> Iterator[int]:
-        yield from range(total_sweeps)
-        if not auto_continue:
-            return
-        s_idx = total_sweeps
-        while not _targets_met() and s_idx + block_sweeps <= max_sweeps:
-            extra_traces.append(np.zeros((n_chains, draws_per_chain, d_dim), dtype=np.float64))
-            for _ in range(block_sweeps):
-                yield s_idx
-                s_idx += 1
-            auto_state["n_sweeps"] = s_idx
-
-    for sweep in _sweep_schedule():
-        for dir_step in range(d_dim + 1):
-            if dir_step < d_dim:
-                raw_z = rng.standard_normal((n_chains, d_dim))
-                dirs = raw_z @ chol.T
-            else:
-                axis = sweep % d_dim
-                dirs = np.zeros((n_chains, d_dim), dtype=np.float64)
-                dirs[:, axis] = 1.0
-            norms = np.linalg.norm(dirs, axis=1, keepdims=True)
-            dirs = dirs / np.maximum(norms, 1e-12)
-
-            if a_work.shape[0] > 0:
-                slacks = x_cur @ a_work.T - b_work[None, :]
-                rates = dirs @ a_work.T
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    ratios = -slacks / rates
-                upper_candidates = np.where(rates < -1e-14, ratios, np.inf)
-                lower_candidates = np.where(rates > 1e-14, ratios, -np.inf)
-                t_max = np.min(upper_candidates, axis=1)
-                t_min = np.max(lower_candidates, axis=1)
-                chord = np.maximum(t_max - t_min, 0.0)
-                pad = np.minimum(1e-11, 0.001 * chord)
-                t_min = t_min + pad
-                t_max = t_max - pad
-            else:
-                t_min = np.full(n_chains, -np.inf, dtype=np.float64)
-                t_max = np.full(n_chains, np.inf, dtype=np.float64)
-
-            log_y = log_cur - rng.exponential(1.0, size=n_chains)
-            finite_chord = np.isfinite(t_min) & np.isfinite(t_max)
-            w_step = np.where(
-                finite_chord,
-                np.maximum(0.5 * (t_max - t_min), 1e-8),
-                2.0 * base_scale,
+        # 4. Exact collapsed Half-t_3 SA + Yu & Meng (2011) ASIS scale updates per outcome
+        w_res = wy - wx @ theta
+        for m in range(n_outcomes):
+            theta_m = theta[m * d_per_m : (m + 1) * d_per_m]
+            s_sq_m, k_sq_m, as_m, ak_m, lam_m, bl_m = _update_scales_outcome(
+                theta_m=theta_m,
+                spec=prior_specs[m],
+                sigma_sq=float(sigma_sq[m]),
+                kappa_sq=float(kappa_sq[m]),
+                a_sigma=float(a_sigma[m]),
+                a_kappa=float(a_kappa[m]),
+                local_scales=local_scales[m],
+                b_local=b_local[m],
+                s0_scale=s0_scales[m],
+                fixed_sigma=fixed_sigmas[m],
+                dynamic_shrinkage=dynamic_shrinkage,
+                rng=rng,
             )
-            u_init = rng.uniform(0.0, 1.0, size=n_chains)
-            left = np.maximum(-u_init * w_step, t_min)
-            right = np.minimum(left + w_step, t_max)
+            s_sq_m, k_sq_m, as_m, ak_m, w_res = _asis_interweave_outcome_scales(
+                m_idx=m,
+                theta=theta,
+                w_res=w_res,
+                wx=wx,
+                spec=prior_specs[m],
+                sigma_sq_m=s_sq_m,
+                kappa_sq_m=k_sq_m,
+                a_sigma_m=as_m,
+                a_kappa_m=ak_m,
+                local_scales_m=lam_m,
+                s0_scale_m=s0_scales[m],
+                fixed_sigma_m=fixed_sigmas[m],
+                dynamic_shrinkage=dynamic_shrinkage,
+                rng=rng,
+            )
+            sigma_sq[m] = s_sq_m
+            kappa_sq[m] = k_sq_m
+            a_sigma[m] = as_m
+            a_kappa[m] = ak_m
+            local_scales[m] = lam_m
+            b_local[m] = bl_m
 
-            stepping_l = left > t_min + 1e-12
-            for _ in range(12):
-                if not np.any(stepping_l):
-                    break
-                act_l = np.nonzero(stepping_l)[0]
-                pts_l = x_cur[act_l] + left[act_l, None] * dirs[act_l]
-                log_l = _log_target(pts_l)
-                n_evals += int(pts_l.shape[0])
-                expand_l = log_l > log_y[act_l]
-                still_l = act_l[expand_l]
-                stepping_l[:] = False
-                if still_l.size == 0:
-                    break
-                left[still_l] = np.maximum(left[still_l] - w_step[still_l], t_min[still_l])
-                stepping_l[still_l] = left[still_l] > t_min[still_l] + 1e-12
+        # 5. Exact conditional draw of shared arm noise xi | theta, omega, R, y via Matheron's identity
+        res_vec = y_vec - x_des @ theta
+        if robust_error != "gaussian":
+            for sub_o in range(2):
+                if sub_o > 0:
+                    omega_cov = _build_omega_cov(g_xi, sigma_xi, f_blocks, omega_vec, k_dim)
+                    chol_omega = np.linalg.cholesky(omega_cov)
+                xi_0 = l_xi @ rng.standard_normal(l_xi.shape[0])
+                eta_0 = np.concatenate(
+                    [
+                        (chol_f_blocks[q] @ rng.standard_normal(k_dim))
+                        / math.sqrt(max(float(omega_vec[q]), 1e-12))
+                        for q in range(n_q)
+                    ],
+                    axis=0,
+                )
+                r_0 = g_xi @ xi_0 + eta_0
+                delta_r = res_vec - r_0
+                alpha_sol = np.linalg.solve(chol_omega.T, np.linalg.solve(chol_omega, delta_r))
+                xi_draw = xi_0 + sigma_xi @ (g_xi.T @ alpha_sol)
+                eta_vec = res_vec - g_xi @ xi_draw
+                eta_blocks = eta_vec.reshape(n_q, k_dim)
+                omega_vec, flag_vec, pi_mix = _sample_omega_weights(
+                    eta_blocks, f_inv_blocks, robust_error, pi_mix, rng
+                )
 
-            stepping_r = right < t_max - 1e-12
-            for _ in range(12):
-                if not np.any(stepping_r):
-                    break
-                act_r = np.nonzero(stepping_r)[0]
-                pts_r = x_cur[act_r] + right[act_r, None] * dirs[act_r]
-                log_r = _log_target(pts_r)
-                n_evals += int(pts_r.shape[0])
-                expand_r = log_r > log_y[act_r]
-                still_r = act_r[expand_r]
-                stepping_r[:] = False
-                if still_r.size == 0:
-                    break
-                right[still_r] = np.minimum(right[still_r] + w_step[still_r], t_max[still_r])
-                stepping_r[still_r] = right[still_r] < t_max[still_r] - 1e-12
+        # 6. Pre-period IW independence-MH update for cross-outcome correlation R
+        if sample_corr and n_outcomes >= 2:
+            r_prop = _sample_iw_correlation(iw_df, iw_scale, rng)
+            sigma_xi_prop, l_xi_prop = _build_sigma_xi(sqrt_v_arms, r_prop, n_arms, n_outcomes, k_dim)
+            omega_cov_cur = _build_omega_cov(g_xi, sigma_xi, f_blocks, omega_vec, k_dim)
+            omega_cov_prop = _build_omega_cov(g_xi, sigma_xi_prop, f_blocks, omega_vec, k_dim)
 
-            active = np.ones(n_chains, dtype=bool)
-            for _ in range(60):
-                if not np.any(active):
-                    break
-                act_idx = np.nonzero(active)[0]
-                t_prop = rng.uniform(left[act_idx], right[act_idx])
-                x_prop = x_cur[act_idx] + t_prop[:, None] * dirs[act_idx]
-                log_prop = _log_target(x_prop)
-                n_evals += int(act_idx.size)
-                accepted = log_prop >= log_y[act_idx]
-                if np.any(accepted):
-                    acc_chains = act_idx[accepted]
-                    x_cur[acc_chains] = x_prop[accepted]
-                    log_cur[acc_chains] = log_prop[accepted]
-                    active[acc_chains] = False
-                if np.any(~accepted):
-                    rej_chains = act_idx[~accepted]
-                    t_rej = t_prop[~accepted]
-                    neg_mask = t_rej < 0.0
-                    left[rej_chains[neg_mask]] = t_rej[neg_mask]
-                    right[rej_chains[~neg_mask]] = t_rej[~neg_mask]
-                    collapsed = (right[rej_chains] - left[rej_chains]) < 1e-13
-                    if np.any(collapsed):
-                        active[rej_chains[collapsed]] = False
+            chol_cur = np.linalg.cholesky(omega_cov_cur)
+            chol_prop = np.linalg.cholesky(omega_cov_prop)
+            v_cur = np.linalg.solve(chol_cur, res_vec)
+            v_prop = np.linalg.solve(chol_prop, res_vec)
+            loglik_cur = -float(np.sum(np.log(np.diag(chol_cur)))) - 0.5 * float(np.dot(v_cur, v_cur))
+            loglik_prop = -float(np.sum(np.log(np.diag(chol_prop)))) - 0.5 * float(np.dot(v_prop, v_prop))
+            if math.log(float(rng.uniform(1e-15, 1.0))) < (loglik_prop - loglik_cur):
+                corr_r = r_prop
+                sigma_xi = sigma_xi_prop
+                l_xi = l_xi_prop
 
-        if sweep >= total_sweeps:
-            off_blk, off_pos = divmod(sweep - total_sweeps, block_sweeps)
-            if off_pos % n_thin == 0:
-                extra_traces[off_blk][:, off_pos // n_thin, :] = _z_to_mu(x_cur)
-        elif sweep >= int(num_burnin) and (sweep - int(num_burnin)) % max(int(thin), 1) == 0:
-            if kept_idx < draws_per_chain:
-                chain_traces[:, kept_idx, :] = _z_to_mu(x_cur)
-                kept_idx += 1
+        if record and ((it_idx + 1) % thin_eff == 0):
+            rec_idx = it_idx // thin_eff
+            tr_theta[rec_idx] = theta
+            tr_sigma[rec_idx] = np.sqrt(np.maximum(sigma_sq, 1e-30))
+            tr_kappa[rec_idx] = np.sqrt(np.maximum(kappa_sq, 1e-30))
+            for m in range(n_outcomes):
+                tr_local[m][rec_idx] = local_scales[m]
+            tr_omega[rec_idx] = omega_vec
+            tr_flag[rec_idx] = flag_vec
+            tr_corr[rec_idx] = corr_r
 
-    info = {
-        "n_iterations": int(auto_state["n_sweeps"]),
-        "n_blocks": 1 + len(extra_traces),
-        "converged": auto_state["converged"],
+    new_state = {
+        "theta": theta,
+        "sigma_sq": sigma_sq,
+        "kappa_sq": kappa_sq,
+        "a_sigma": a_sigma,
+        "a_kappa": a_kappa,
+        "local_scales": local_scales,
+        "b_local": b_local,
+        "omega_vec": omega_vec,
+        "flag_vec": flag_vec,
+        "pi_mix": pi_mix,
+        "corr_r": corr_r,
     }
-    if auto_continue:
-        chain_traces = _select_traces()
-        if not auto_state["converged"]:
-            _warn_rank_k(
-                f"hit-and-run slice sampler did not reach split R-hat <= {float(target_rhat):g} and "
-                f"bulk ESS >= {ess_goal:.0f} on every coordinate within {info['n_iterations']} sweeps "
-                f"per chain ({float(max_iter_multiplier):g}x the default); increase num_burnin, thin "
-                "or max_iter_multiplier and check sampler_diagnostics."
+    if not record:
+        return new_state, None
+    traces: dict[str, Any] = {
+        "theta": tr_theta,
+        "sigma": tr_sigma,
+        "kappa": tr_kappa,
+        "local": tr_local,
+        "omega": tr_omega,
+        "flag": tr_flag,
+        "corr": tr_corr,
+    }
+    return new_state, traces
+
+
+def _reconcile_joint_bayesian_core(
+    *,
+    structural_outcomes: tuple[str, ...],
+    results_by_outcome: Mapping[str, Mapping[tuple[str, str], RankKLongBetResult]],
+    composite_outcomes: Mapping[str, tuple[str, ...]],
+    composite_results: Mapping[str, Mapping[tuple[str, str], RankKLongBetResult]],
+    arms: Sequence[str] | None,
+    order: Sequence[str] | None,
+    poset: Sequence[tuple[str, str]] | None,
+    monotone_by_outcome: Mapping[str, bool],
+    prior_scale_by_outcome: Mapping[str, float | None],
+    iw_spec: dict[str, Any] | None,
+    horizon: int | None,
+    n_modes: int,
+    seed: int,
+    model_options: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Unified Bayesian reconciliation engine for ``M >= 1`` outcomes + optional composites."""
+    opts = _parse_model_options(model_options)
+    k_req = int(n_modes)
+    if k_req < 1:
+        raise ValueError(f"n_modes must be >= 1; got {n_modes!r}")
+
+    first_m = structural_outcomes[0]
+    base_pairs = list(results_by_outcome[first_m].keys())
+    for m_name in structural_outcomes[1:]:
+        if set(results_by_outcome[m_name].keys()) != set(base_pairs):
+            raise ValueError(
+                f"All structural outcomes must share identical fitted contrast pairs; "
+                f"{first_m!r} has {base_pairs} vs {m_name!r} has {list(results_by_outcome[m_name].keys())}"
             )
 
-    rhats: list[float] = []
-    esses: list[float] = []
-    for j_idx in range(d_dim):
-        coord_chains = chain_traces[:, :, j_idx]
-        rhats.append(float(compute_rhat(coord_chains)))
-        esses.append(float(compute_ess(coord_chains)))
+    topo = _resolve_arms_and_poset(base_pairs, arms=arms, order=order, poset=poset)
+    arms_tuple: tuple[str, ...] = topo["arms"]
+    arm_to_idx: dict[str, int] = topo["arm_to_idx"]
+    fitted_pairs: tuple[tuple[str, str], ...] = topo["fitted_pairs"]
+    n_arms = len(arms_tuple)
+    n_nonctrl = n_arms - 1
+    n_outcomes = len(structural_outcomes)
 
-    pooled = chain_traces.reshape(-1, d_dim)[:n_draws]
-    pri_samples = prior_draw(max(n_draws, 1000))
-    pri_inside = pri_samples[_inside_polyhedron(pri_samples, a_ineq, b_ineq)]
-    if return_info:
-        return pooled, pri_inside, tuple(esses), tuple(rhats), n_evals, info
-    return pooled, pri_inside, tuple(esses), tuple(rhats), n_evals
+    if topo["is_bipartite"] and n_arms >= 3 and topo["suggested_odd_pair"] is not None:
+        sug_u, sug_v = topo["suggested_odd_pair"]
+        warnings.warn(
+            f"Contrast graph on arms {arms_tuple} is bipartite (no odd cycles). "
+            f"Shared-arm variances V_{{m,a}} are identified from Stage-1 arm_metadata; "
+            f"fitting ({sug_u!r}, {sug_v!r}) would close an odd cycle for cycle model checking.",
+            RankKDesignWarning,
+            stacklevel=3,
+        )
 
-
-def _hit_and_run_slice_sampler(
-    rng: np.random.Generator,
-    *,
-    prior_draw: Any,
-    prior_logpdf: Any,
-    mu_hat: np.ndarray,
-    sigma_lik: np.ndarray,
-    n_draws: int,
-    num_chains: int = 4,
-    num_warmup: int = 200,
-    thin: int = 2,
-    a_ineq: np.ndarray | None = None,
-    b_ineq: np.ndarray | None = None,
-    auto_continue: bool = False,
-    target_rhat: float = 1.01,
-    target_ess: float = 400.0,
-    max_iter_multiplier: float = 8.0,
-    return_info: bool = False,
-) -> Any:
-    """Convenience wrapper around :func:`_slice_posterior_nd` returning ``(draws, min_ess, max_rhat)``.
-
-    With ``auto_continue=True`` the chains run in blocks until split R-hat ``<= target_rhat``
-    and bulk ESS ``>= target_ess`` (capped at ``0.75 * n_draws``), up to
-    ``max_iter_multiplier`` times the default sweeps; ``return_info=True`` appends the
-    ``{"n_iterations", "n_blocks", "converged"}`` dict to the returned tuple.
-    """
-    d_dim = int(mu_hat.shape[0])
-    if a_ineq is None or b_ineq is None:
-        a_ineq = np.zeros((0, d_dim), dtype=np.float64)
-        b_ineq = np.zeros(0, dtype=np.float64)
-    pooled, _, esses, rhats, _, info = _slice_posterior_nd(
-        rng,
-        prior_draw=prior_draw,
-        prior_logpdf=prior_logpdf,
-        mu_lik=mu_hat,
-        sigma_lik=sigma_lik,
-        a_ineq=a_ineq,
-        b_ineq=b_ineq,
-        n_draws=n_draws,
-        num_chains=num_chains,
-        num_burnin=num_warmup,
-        thin=thin,
-        auto_continue=auto_continue,
-        target_rhat=target_rhat,
-        target_ess=target_ess,
-        max_iter_multiplier=max_iter_multiplier,
-        return_info=True,
+    # Infer or validate common window H across all fitted pairs & outcomes
+    min_avail = min(
+        _extract_raw_trt_trajectory(results_by_outcome[m][p]).shape[1]
+        for m in structural_outcomes
+        for p in fitted_pairs
     )
-    if return_info:
-        return pooled, float(min(esses)), float(max(rhats)), info
-    return pooled, float(min(esses)), float(max(rhats))
+    for c_name, c_res_map in composite_results.items():
+        for p, r_obj in c_res_map.items():
+            min_avail = min(min_avail, _extract_raw_trt_trajectory(r_obj).shape[1])
+
+    if horizon is None:
+        h_eff = int(min_avail)
+    else:
+        h_eff = int(horizon)
+        if h_eff < 1 or h_eff > min_avail:
+            raise ValueError(
+                f"horizon={horizon!r} must lie in [1, {min_avail}] (available post-adoption periods)"
+            )
+
+    psi = _euclidean_exposure_basis(h_eff, k_req)
+    k_dim = int(psi.shape[1])
+    d_per_m = n_nonctrl * k_dim
+    d_total = n_outcomes * d_per_m
+
+    # Extract summaries for every structural outcome
+    struct_summaries = {
+        m: _extract_outcome_summaries(
+            results_by_outcome[m], arms_tuple, arm_to_idx, fitted_pairs, psi, h_eff
+        )
+        for m in structural_outcomes
+    }
+    # Extract summaries for fitted composite outcomes (if composite_results supplied)
+    comp_summaries: dict[str, dict[str, Any]] = {}
+    for c_name, c_map in composite_results.items():
+        c_pairs = tuple(p for p in fitted_pairs if p in c_map)
+        if not c_pairs:
+            continue
+        comp_summaries[c_name] = _extract_outcome_summaries(
+            c_map, arms_tuple, arm_to_idx, c_pairs, psi, h_eff
+        )
+        comp_summaries[c_name]["pairs"] = c_pairs
+
+    # Assemble stacked measurement system (y_vec, X_des, G_xi, F_blocks)
+    y_blocks: list[np.ndarray] = []
+    x_rows: list[np.ndarray] = []
+    g_rows: list[np.ndarray] = []
+    f_blocks: list[np.ndarray] = []
+    meas_index: dict[tuple[str, str, tuple[str, str]], int] = {}
+
+    amk = n_arms * n_outcomes * k_dim
+    mk = n_outcomes * k_dim
+    eye_k = np.eye(k_dim, dtype=np.float64)
+
+    def _add_measurement(
+        kind: str,
+        out_name: str,
+        pair: tuple[str, str],
+        member_indices: Sequence[int],
+        y_q: np.ndarray,
+        f_q: np.ndarray,
+    ) -> None:
+        q_idx = len(f_blocks)
+        meas_index[(kind, out_name, pair)] = q_idx
+        y_blocks.append(y_q)
+        f_blocks.append(f_q)
+
+        ia, ib = arm_to_idx[pair[0]], arm_to_idx[pair[1]]
+        x_q = np.zeros((k_dim, d_total), dtype=np.float64)
+        g_q = np.zeros((k_dim, amk), dtype=np.float64)
+        for m_i in member_indices:
+            base_m = m_i * d_per_m
+            for k in range(k_dim):
+                if ia > 0:
+                    x_q[k, base_m + k * n_nonctrl + (ia - 1)] += 1.0
+                if ib > 0:
+                    x_q[k, base_m + k * n_nonctrl + (ib - 1)] -= 1.0
+            g_q[:, ia * mk + m_i * k_dim : ia * mk + (m_i + 1) * k_dim] += eye_k
+            g_q[:, ib * mk + m_i * k_dim : ib * mk + (m_i + 1) * k_dim] -= eye_k
+        x_rows.append(x_q)
+        g_rows.append(g_q)
+
+    for m_i, m_name in enumerate(structural_outcomes):
+        summ_m = struct_summaries[m_name]
+        for pair in fitted_pairs:
+            _add_measurement("struct", m_name, pair, (m_i,), summ_m["y_by_pair"][pair], summ_m["f_by_pair"][pair])
+
+    m_name_to_idx = {m: idx for idx, m in enumerate(structural_outcomes)}
+    for c_name, c_summ in comp_summaries.items():
+        members = tuple(m_name_to_idx[m] for m in composite_outcomes[c_name])
+        for pair in c_summ["pairs"]:
+            _add_measurement("comp", c_name, pair, members, c_summ["y_by_pair"][pair], c_summ["f_by_pair"][pair])
+
+    y_vec = np.concatenate(y_blocks, axis=0)
+    x_des = np.vstack(x_rows)
+    g_xi = np.vstack(g_rows)
+    chol_f_blocks = [np.linalg.cholesky(_psd_clip(fq, floor=1e-14)) for fq in f_blocks]
+    f_inv_blocks = [np.linalg.inv(_psd_clip(fq, floor=1e-13)) for fq in f_blocks]
+    sqrt_v_arms = [[_psd_sqrt(va) for va in struct_summaries[m]["v_arms"]] for m in structural_outcomes]
+
+    # Build per-outcome cone prior specs and joint cone matrix
+    prior_specs: list[_OutcomeConePriorSpec] = []
+    s0_scales: list[float] = []
+    fixed_sigmas: list[float | None] = []
+    cone_blocks: list[np.ndarray] = []
+    ray_parts: list[np.ndarray] = []
+
+    for m_name in structural_outcomes:
+        spec_m = _OutcomeConePriorSpec(
+            c_cover=topo["c_cover"],
+            psi=psi,
+            horizon=h_eff,
+            monotone=bool(monotone_by_outcome[m_name]),
+            period_positivity=bool(opts["period_positivity"]),
+            scale_prior=str(opts["scale_prior"]),
+        )
+        prior_specs.append(spec_m)
+        s0_m = float(struct_summaries[m_name]["s0_scale"])
+        s0_scales.append(s0_m)
+        fixed_sigmas.append(prior_scale_by_outcome[m_name])
+        cone_blocks.append(spec_m.a_cone)
+
+        ray_m = np.zeros(d_per_m, dtype=np.float64)
+        ray_m[:n_nonctrl] = math.sqrt(float(h_eff)) * s0_m * topo["interior_heights"]
+        ray_parts.append(ray_m)
+
+    total_walls = sum(cb.shape[0] for cb in cone_blocks)
+    a_cone_joint = np.zeros((total_walls, d_total), dtype=np.float64)
+    w_off = 0
+    for m_i, cb in enumerate(cone_blocks):
+        if cb.shape[0] > 0:
+            a_cone_joint[w_off : w_off + cb.shape[0], m_i * d_per_m : (m_i + 1) * d_per_m] = cb
+            w_off += cb.shape[0]
+    interior_ray_joint = np.concatenate(ray_parts, axis=0)
+
+    # Resolve cross-outcome correlation Inverse-Wishart parameters
+    sample_corr = bool(opts["use_sur"] and n_outcomes >= 2 and iw_spec is not None)
+    if sample_corr and iw_spec is not None:
+        iw_df = float(iw_spec["df_post"])
+        iw_scale = np.asarray(iw_spec["scale_post"], dtype=np.float64)
+        r_init_mean = np.asarray(iw_spec["r_init"], dtype=np.float64)
+    else:
+        iw_df = float(n_outcomes + 1)
+        iw_scale = np.eye(n_outcomes, dtype=np.float64)
+        r_init_mean = np.eye(n_outcomes, dtype=np.float64)
+
+    # Compute cone-constrained posterior mode at nominal hyperparameters for chain initialization
+    sigma_xi_0, _ = _build_sigma_xi(sqrt_v_arms, r_init_mean, n_arms, n_outcomes, k_dim)
+    omega_cov_0 = _build_omega_cov(g_xi, sigma_xi_0, f_blocks, np.ones(len(f_blocks)), k_dim)
+    chol_w0 = np.linalg.cholesky(omega_cov_0)
+    wx0 = np.linalg.solve(chol_w0, x_des)
+    wy0 = np.linalg.solve(chol_w0, y_vec)
+    prec_init = wx0.T @ wx0
+    for m_i in range(n_outcomes):
+        l0_m, _ = prior_specs[m_i].precision_and_logdet(np.ones(prior_specs[m_i].n_edges))
+        s_init = fixed_sigmas[m_i] if fixed_sigmas[m_i] is not None else s0_scales[m_i]
+        k_init = (50.0 * s0_scales[m_i]) if not opts["dynamic_shrinkage"] else s0_scales[m_i]
+        base_m = m_i * d_per_m
+        prec_init[base_m : base_m + n_nonctrl, base_m : base_m + n_nonctrl] += l0_m / (float(h_eff) * s_init**2)
+        for k in range(1, k_dim):
+            slk = slice(base_m + k * n_nonctrl, base_m + (k + 1) * n_nonctrl)
+            prec_init[slk, slk] += l0_m / (float(h_eff) * k_init**2)
+    prec_init = _psd_clip(prec_init, floor=1e-12)
+    mean_init = np.linalg.solve(prec_init, wx0.T @ wy0)
+    theta_mode = _cone_qp_mode(mean_init, prec_init, a_cone_joint, interior_ray_joint)
+
+    # Spawn 4 deterministic independent RNG streams from seed
+    n_chains = int(opts["n_chains"])
+    n_warmup = int(opts["n_warmup"])
+    n_draws_chain = int(opts["n_draws_per_chain"])
+    max_rounds = int(opts["max_continuation_rounds"])
+
+    ss = np.random.SeedSequence(int(seed))
+    chain_rngs = [np.random.default_rng(child) for child in ss.spawn(n_chains + 1)]
+    ppc_rng = chain_rngs[-1]
+
+    chain_states: list[dict[str, Any]] = []
+    for c_i in range(n_chains):
+        rng_c = chain_rngs[c_i]
+        jitter = float(rng_c.uniform(0.8, 1.25))
+        theta_c = theta_mode + 0.05 * jitter * interior_ray_joint
+        if a_cone_joint.shape[0] > 0 and float(np.min(a_cone_joint @ theta_c)) <= 1e-6:
+            theta_c = theta_mode + 0.1 * interior_ray_joint
+        sig_sq_c = np.array(
+            [
+                (fixed_sigmas[m] ** 2)
+                if fixed_sigmas[m] is not None
+                else ((s0_scales[m] * float(rng_c.uniform(0.6, 1.6))) ** 2)
+                for m in range(n_outcomes)
+            ],
+            dtype=np.float64,
+        )
+        kap_sq_c = np.array(
+            [
+                ((50.0 * s0_scales[m]) ** 2)
+                if not opts["dynamic_shrinkage"]
+                else ((s0_scales[m] * float(rng_c.uniform(0.6, 1.6))) ** 2)
+                for m in range(n_outcomes)
+            ],
+            dtype=np.float64,
+        )
+        st_c = {
+            "theta": theta_c,
+            "sigma_sq": sig_sq_c,
+            "kappa_sq": kap_sq_c,
+            "a_sigma": np.array([s0_scales[m] ** 2 for m in range(n_outcomes)], dtype=np.float64),
+            "a_kappa": np.array([s0_scales[m] ** 2 for m in range(n_outcomes)], dtype=np.float64),
+            "local_scales": [np.ones(spec.n_edges, dtype=np.float64) for spec in prior_specs],
+            "b_local": [np.ones(spec.n_edges, dtype=np.float64) for spec in prior_specs],
+            "omega_vec": np.ones(len(f_blocks), dtype=np.float64),
+            "flag_vec": np.zeros(len(f_blocks), dtype=np.float64),
+            "pi_mix": 0.10,
+            "corr_r": r_init_mean.copy(),
+        }
+        st_c, _ = _run_single_gibbs_chain(
+            n_steps=n_warmup,
+            state=st_c,
+            record=False,
+            y_vec=y_vec,
+            x_des=x_des,
+            g_xi=g_xi,
+            f_blocks=f_blocks,
+            chol_f_blocks=chol_f_blocks,
+            f_inv_blocks=f_inv_blocks,
+            sqrt_v_arms=sqrt_v_arms,
+            prior_specs=prior_specs,
+            a_cone_joint=a_cone_joint,
+            interior_ray_joint=interior_ray_joint,
+            s0_scales=s0_scales,
+            fixed_sigmas=fixed_sigmas,
+            n_arms=n_arms,
+            n_outcomes=n_outcomes,
+            k_dim=k_dim,
+            horizon=h_eff,
+            robust_error=str(opts["robust_error"]),
+            dynamic_shrinkage=bool(opts["dynamic_shrinkage"]),
+            sample_corr=sample_corr,
+            iw_df=iw_df,
+            iw_scale=iw_scale,
+            rng=rng_c,
+        )
+        chain_states.append(st_c)
+
+    # Post-warmup sampling + unconditional auto-continuation until Rhat <= 1.01 and ESS >= 400
+    chain_traces: list[dict[str, Any]] = []
+    for c_i in range(n_chains):
+        chain_states[c_i], tr_c = _run_single_gibbs_chain(
+            n_steps=n_draws_chain,
+            state=chain_states[c_i],
+            record=True,
+            y_vec=y_vec,
+            x_des=x_des,
+            g_xi=g_xi,
+            f_blocks=f_blocks,
+            chol_f_blocks=chol_f_blocks,
+            f_inv_blocks=f_inv_blocks,
+            sqrt_v_arms=sqrt_v_arms,
+            prior_specs=prior_specs,
+            a_cone_joint=a_cone_joint,
+            interior_ray_joint=interior_ray_joint,
+            s0_scales=s0_scales,
+            fixed_sigmas=fixed_sigmas,
+            n_arms=n_arms,
+            n_outcomes=n_outcomes,
+            k_dim=k_dim,
+            horizon=h_eff,
+            robust_error=str(opts["robust_error"]),
+            dynamic_shrinkage=bool(opts["dynamic_shrinkage"]),
+            sample_corr=sample_corr,
+            iw_df=iw_df,
+            iw_scale=iw_scale,
+            rng=chain_rngs[c_i],
+        )
+        assert tr_c is not None
+        chain_traces.append(tr_c)
+
+    def _evaluate_convergence(traces_list: list[dict[str, Any]]) -> tuple[bool, float, float, float, dict[str, float], dict[str, float]]:
+        rhat_blocks: dict[str, float] = {}
+        ess_blocks: dict[str, float] = {}
+
+        theta_stack = np.stack([t["theta"] for t in traces_list], axis=0)  # (C, N, D)
+        th_stats = [_split_rhat_and_ess_1d(theta_stack[:, :, d]) for d in range(d_total)]
+        rhat_blocks["theta"] = max(s[0] for s in th_stats)
+        ess_blocks["theta"] = min(s[1] for s in th_stats)
+        ess_tail_min = min(s[2] for s in th_stats)
+
+        if any(fs is None for fs in fixed_sigmas):
+            sig_stack = np.stack([t["sigma"] for t in traces_list], axis=0)
+            s_stats = [
+                _split_rhat_and_ess_1d(sig_stack[:, :, m])
+                for m in range(n_outcomes)
+                if fixed_sigmas[m] is None
+            ]
+            rhat_blocks["sigma"] = max(s[0] for s in s_stats)
+            ess_blocks["sigma"] = min(s[1] for s in s_stats)
+
+        if opts["dynamic_shrinkage"]:
+            kap_stack = np.stack([t["kappa"] for t in traces_list], axis=0)
+            k_stats = [_split_rhat_and_ess_1d(kap_stack[:, :, m]) for m in range(n_outcomes)]
+            rhat_blocks["kappa"] = max(s[0] for s in k_stats)
+            ess_blocks["kappa"] = min(s[1] for s in k_stats)
+
+        if opts["scale_prior"] == "local_halft" and prior_specs[0].n_edges > 0:
+            l_stats = []
+            for m in range(n_outcomes):
+                loc_m = np.stack([t["local"][m] for t in traces_list], axis=0)
+                for e_i in range(prior_specs[m].n_edges):
+                    l_stats.append(_split_rhat_and_ess_1d(loc_m[:, :, e_i]))
+            rhat_blocks["lambda"] = max(s[0] for s in l_stats)
+            ess_blocks["lambda"] = min(s[1] for s in l_stats)
+
+        if opts["robust_error"] == "t4":
+            om_stack = np.stack([t["omega"] for t in traces_list], axis=0)
+            o_stats = [_split_rhat_and_ess_1d(om_stack[:, :, q]) for q in range(om_stack.shape[2])]
+            rhat_blocks["omega"] = max(s[0] for s in o_stats)
+            ess_blocks["omega"] = min(s[1] for s in o_stats)
+
+        if sample_corr and n_outcomes >= 2:
+            c_stack = np.stack([t["corr"] for t in traces_list], axis=0)
+            c_stats = [
+                _split_rhat_and_ess_1d(c_stack[:, :, i, j])
+                for i in range(n_outcomes)
+                for j in range(i)
+            ]
+            rhat_blocks["corr"] = max(s[0] for s in c_stats)
+            ess_blocks["corr"] = min(s[1] for s in c_stats)
+
+        overall_rhat = max(rhat_blocks.values())
+        overall_ess = min(ess_blocks.values())
+        ok = (overall_rhat <= 1.01) and (overall_ess >= 400.0)
+        return ok, overall_rhat, overall_ess, ess_tail_min, rhat_blocks, ess_blocks
+
+    converged, max_rhat, min_ess, min_ess_tail, rhat_by_block, ess_by_block = _evaluate_convergence(chain_traces)
+    cont_round = 0
+    thin_stride = 1
+    eff_max_rounds = (
+        0
+        if (opts["scale_prior"] == "local_halft" and not prior_specs[0].is_tree_poset)
+        else max_rounds
+    )
+    while not converged and cont_round < eff_max_rounds:
+        cont_round += 1
+        for c_i in range(n_chains):
+            chain_states[c_i], extra_tr = _run_single_gibbs_chain(
+                n_steps=n_draws_chain,
+                thin=thin_stride,
+                state=chain_states[c_i],
+                record=True,
+                y_vec=y_vec,
+                x_des=x_des,
+                g_xi=g_xi,
+                f_blocks=f_blocks,
+                chol_f_blocks=chol_f_blocks,
+                f_inv_blocks=f_inv_blocks,
+                sqrt_v_arms=sqrt_v_arms,
+                prior_specs=prior_specs,
+                a_cone_joint=a_cone_joint,
+                interior_ray_joint=interior_ray_joint,
+                s0_scales=s0_scales,
+                fixed_sigmas=fixed_sigmas,
+                n_arms=n_arms,
+                n_outcomes=n_outcomes,
+                k_dim=k_dim,
+                horizon=h_eff,
+                robust_error=str(opts["robust_error"]),
+                dynamic_shrinkage=bool(opts["dynamic_shrinkage"]),
+                sample_corr=sample_corr,
+                iw_df=iw_df,
+                iw_scale=iw_scale,
+                rng=chain_rngs[c_i],
+            )
+            assert extra_tr is not None
+            # Concatenate n_draws_chain + n_draws_chain at thin_stride and thin by 2 -> spacing 2 * thin_stride
+            merged_c: dict[str, Any] = {}
+            for key in ("theta", "sigma", "kappa", "omega", "flag", "corr"):
+                cat = np.concatenate([chain_traces[c_i][key], extra_tr[key]], axis=0)
+                merged_c[key] = cat[1::2][:n_draws_chain]
+            merged_local = []
+            for m in range(n_outcomes):
+                cat_l = np.concatenate([chain_traces[c_i]["local"][m], extra_tr["local"][m]], axis=0)
+                merged_local.append(cat_l[1::2][:n_draws_chain])
+            merged_c["local"] = merged_local
+            chain_traces[c_i] = merged_c
+        thin_stride *= 2
+        converged, max_rhat, min_ess, min_ess_tail, rhat_by_block, ess_by_block = _evaluate_convergence(chain_traces)
+
+    diagnostics = SamplerDiagnostics(
+        sampler="pakman_paninski_hmc_gibbs",
+        r_hat=float(max_rhat),
+        ess=float(min_ess),
+        ess_tail=float(min_ess_tail),
+        n_chains=n_chains,
+        n_draws_per_chain=int(chain_traces[0]["theta"].shape[0]),
+        n_warmup=n_warmup,
+        n_continuation_rounds=cont_round,
+        converged=bool(converged),
+        max_rhat_by_block=rhat_by_block,
+        min_ess_by_block=ess_by_block,
+    )
+
+    # Pool chains into (S, ...) posterior arrays
+    theta_all = np.concatenate([t["theta"] for t in chain_traces], axis=0)  # (S, M * (A-1) * K')
+    sigma_all = np.concatenate([t["sigma"] for t in chain_traces], axis=0)  # (S, M)
+    kappa_all = np.concatenate([t["kappa"] for t in chain_traces], axis=0)  # (S, M)
+    omega_all = np.concatenate([t["omega"] for t in chain_traces], axis=0)  # (S, Q)
+    flag_all = np.concatenate([t["flag"] for t in chain_traces], axis=0)  # (S, Q)
+    corr_all = np.concatenate([t["corr"] for t in chain_traces], axis=0)  # (S, M, M)
+    local_all = [
+        np.concatenate([t["local"][m] for t in chain_traces], axis=0)
+        for m in range(n_outcomes)
+    ]
+    n_total_draws = int(theta_all.shape[0])
+
+    # Build per-outcome MultiArmReconciliationResult objects (structural + composite)
+    theta_by_m: dict[str, np.ndarray] = {}
+    for m_i, m_name in enumerate(structural_outcomes):
+        raw_m = theta_all[:, m_i * d_per_m : (m_i + 1) * d_per_m]  # (S, K' * (A - 1))
+        # Reshape (S, K', A - 1) -> transpose to (S, A - 1, K')
+        theta_by_m[m_name] = np.swapaxes(raw_m.reshape(n_total_draws, k_dim, n_nonctrl), 1, 2).copy()
+
+    for c_name, members_names in composite_outcomes.items():
+        theta_by_m[c_name] = sum(theta_by_m[m] for m in members_names)  # exact linear sum!
+
+    # Compute composite PPC p-values where composite_results were provided
+    comp_ppc_by_name: dict[str, float | None] = {}
+    for c_name in composite_outcomes:
+        if c_name in comp_summaries:
+            c_pairs = comp_summaries[c_name]["pairs"]
+            c_om = {p: omega_all[:, meas_index[("comp", c_name, p)]] for p in c_pairs}
+            mem_names = composite_outcomes[c_name]
+            comp_ppc_by_name[c_name] = _compute_composite_ppc_pvalue(
+                comp_y_by_pair=comp_summaries[c_name]["y_by_pair"],
+                comp_f_by_pair=comp_summaries[c_name]["f_by_pair"],
+                comp_omega_draws=c_om,
+                struct_y_list=[struct_summaries[m]["y_by_pair"] for m in mem_names],
+                struct_f_list=[struct_summaries[m]["f_by_pair"] for m in mem_names],
+                struct_omega_list=[
+                    {p: omega_all[:, meas_index[("struct", m, p)]] for p in c_pairs}
+                    for m in mem_names
+                ],
+                comp_pairs=c_pairs,
+                k_dim=k_dim,
+                rng=ppc_rng,
+            )
+        else:
+            comp_ppc_by_name[c_name] = None
+
+    shared_comp_ppc = next((v for v in comp_ppc_by_name.values() if v is not None), None)
+
+    by_outcome_results: dict[str, MultiArmReconciliationResult] = {}
+    all_outcome_names = (*structural_outcomes, *tuple(composite_outcomes.keys()))
+    for out_name in all_outcome_names:
+        is_struct = out_name in m_name_to_idx
+        th_out = theta_by_m[out_name]  # (S, A - 1, K')
+
+        # Full arm trajectories (S, A, H) with arm 0 identically zero
+        arm_trajs_arr = np.zeros((n_total_draws, n_arms, h_eff), dtype=np.float64)
+        arm_trajs_arr[:, 1:, :] = np.einsum("sak,hk->sah", th_out, psi)
+        arm_traj_dict = {arms_tuple[a]: arm_trajs_arr[:, a, :] for a in range(n_arms)}
+        tau_mu_arr = np.zeros((n_total_draws, n_arms), dtype=np.float64)
+        tau_mu_arr[:, 1:] = th_out[:, :, 0] / math.sqrt(float(h_eff))
+
+        # Contrasts for all_pairs AND any fitted_pairs with reversed orientation
+        pair_set_to_store = list(topo["all_pairs"])
+        for fp in fitted_pairs:
+            if fp not in pair_set_to_store:
+                pair_set_to_store.append(fp)
+
+        c_traj: dict[tuple[str, str], np.ndarray] = {}
+        c_mode1: dict[tuple[str, str], np.ndarray] = {}
+        c_cum: dict[tuple[str, str], np.ndarray] = {}
+        for u, v in pair_set_to_store:
+            iu, iv = arm_to_idx[u], arm_to_idx[v]
+            tr_uv = arm_trajs_arr[:, iu, :] - arm_trajs_arr[:, iv, :]
+            c_traj[(u, v)] = tr_uv
+            c_mode1[(u, v)] = tau_mu_arr[:, iu] - tau_mu_arr[:, iv]
+            c_cum[(u, v)] = np.sum(tr_uv, axis=1)
+
+        tau_inc = np.column_stack(
+            [tau_mu_arr[:, arm_to_idx[ch]] - tau_mu_arr[:, arm_to_idx[pa]] for ch, pa in topo["tree_edges"]]
+        )
+
+        # Max cycle discrepancy across all 3-cycles (machine zero ~ 1e-16)
+        max_cyc = 0.0
+        for c_i in range(n_arms):
+            for b_i in range(c_i + 1, n_arms):
+                for a_i in range(b_i + 1, n_arms):
+                    pa, pb, pc = arms_tuple[a_i], arms_tuple[b_i], arms_tuple[c_i]
+                    gap = float(np.max(np.abs(c_traj[(pa, pc)] - c_traj[(pa, pb)] - c_traj[(pb, pc)])))
+                    max_cyc = max(max_cyc, gap)
+
+        if is_struct:
+            m_i = m_name_to_idx[out_name]
+            summ_o = struct_summaries[out_name]
+            om_dict = {p: omega_all[:, meas_index[("struct", out_name, p)]] for p in fitted_pairs}
+            fl_dict = {p: flag_all[:, meas_index[("struct", out_name, p)]] for p in fitted_pairs}
+            infl_dict = {p: float(np.mean(1.0 / np.maximum(om_dict[p], 1e-12))) for p in fitted_pairs}
+            prob_dict = {p: float(np.mean(fl_dict[p])) for p in fitted_pairs}
+            ppc_cyc = _compute_cycle_ppc_pvalue(
+                summ_o["y_by_pair"],
+                summ_o["f_by_pair"],
+                om_dict,
+                fitted_pairs,
+                topo["n_cycle"],
+                k_dim,
+                ppc_rng,
+            )
+            ppc_bas = _compute_basis_ppc_pvalue(
+                summ_o["traj_mean_by_pair"], summ_o["traj_cov_by_pair"], psi, h_eff
+            )
+            ppc_comp = shared_comp_ppc
+            sig_draws_o = sigma_all[:, m_i]
+            kap_draws_o = kappa_all[:, m_i]
+            loc_draws_o = local_all[m_i]
+            mono_o = bool(monotone_by_outcome[out_name])
+            ps_o = prior_scale_by_outcome[out_name]
+            s0_o = s0_scales[m_i]
+        else:
+            mem_names = composite_outcomes[out_name]
+            if out_name in comp_summaries:
+                c_summ = comp_summaries[out_name]
+                c_pairs = c_summ["pairs"]
+                om_dict = {p: omega_all[:, meas_index[("comp", out_name, p)]] for p in c_pairs}
+                fl_dict = {p: flag_all[:, meas_index[("comp", out_name, p)]] for p in c_pairs}
+                infl_dict = {p: float(np.mean(1.0 / np.maximum(om_dict[p], 1e-12))) for p in c_pairs}
+                prob_dict = {p: float(np.mean(fl_dict[p])) for p in c_pairs}
+                ppc_cyc = (
+                    _compute_cycle_ppc_pvalue(
+                        c_summ["y_by_pair"],
+                        c_summ["f_by_pair"],
+                        om_dict,
+                        fitted_pairs,
+                        topo["n_cycle"],
+                        k_dim,
+                        ppc_rng,
+                    )
+                    if set(c_pairs) == set(fitted_pairs)
+                    else None
+                )
+                ppc_bas = _compute_basis_ppc_pvalue(
+                    c_summ["traj_mean_by_pair"], c_summ["traj_cov_by_pair"], psi, h_eff
+                )
+                s0_o = float(c_summ["s0_scale"])
+            else:
+                om_dict = {p: np.ones(n_total_draws, dtype=np.float64) for p in fitted_pairs}
+                infl_dict = {p: 1.0 for p in fitted_pairs}
+                prob_dict = {p: 0.0 for p in fitted_pairs}
+                ppc_cyc = None
+                ppc_bas = None
+                s0_o = math.sqrt(sum(s0_scales[m_name_to_idx[m]] ** 2 for m in mem_names))
+            ppc_comp = comp_ppc_by_name[out_name]
+            sig_draws_o = np.sqrt(sum(sigma_all[:, m_name_to_idx[m]] ** 2 for m in mem_names))
+            kap_draws_o = np.sqrt(sum(kappa_all[:, m_name_to_idx[m]] ** 2 for m in mem_names))
+            loc_draws_o = np.ones((n_total_draws, len(topo["cover_edges"])), dtype=np.float64)
+            mono_o = all(bool(monotone_by_outcome[m]) for m in mem_names)
+            ps_o = None
+
+        by_outcome_results[out_name] = MultiArmReconciliationResult(
+            arms=arms_tuple,
+            order=topo["order"],
+            cover_edges=topo["cover_edges"],
+            topology=topo["topology"],
+            tree_edges=topo["tree_edges"],
+            fitted_pairs=fitted_pairs,
+            redundant_pairs=topo["redundant_pairs"],
+            all_pairs=topo["all_pairs"],
+            horizon=h_eff,
+            n_modes=k_dim,
+            basis=psi,
+            monotone=mono_o,
+            prior_scale=ps_o,
+            s0_scale=s0_o,
+            theta_draws=th_out,
+            sigma_draws=sig_draws_o,
+            kappa_draws=kap_draws_o,
+            local_scale_draws=loc_draws_o,
+            omega_draws=om_dict,
+            tau_mu_draws=tau_mu_arr,
+            tau_increment_draws=tau_inc,
+            arm_trajectory_draws=arm_traj_dict,
+            contrast_mode1_draws=c_mode1,
+            contrast_trajectory_draws=c_traj,
+            contrast_cumulative_draws=c_cum,
+            contrast_catt_draws=c_traj,
+            contrast_scale_inflation=infl_dict,
+            posterior_corruption_prob=prob_dict,
+            ppc_cycle_pvalue=ppc_cyc,
+            ppc_composite_pvalue=ppc_comp,
+            ppc_basis_pvalue=ppc_bas,
+            max_cycle_discrepancy=max_cyc,
+            sampler_diagnostics=diagnostics,
+        )
+
+    return {
+        "by_outcome": by_outcome_results,
+        "corr_draws": corr_all,
+        "diagnostics": diagnostics,
+        "topology": topo,
+    }
 
 
 def reconcile_multi_arm_draws(
     results: Mapping[tuple[str, str], RankKLongBetResult],
-    arms: Sequence[str] = (),
     *,
-    topology: str = "chain",
-    edges: Sequence[tuple[str, str]] | None = None,
-    prior_mode: str | None = None,
-    prior_scale: float | str | Sequence[float] | Mapping[str, float] | None = (
-        "empirical_bayes"
-    ),
-    prior_mean: float | Sequence[float] | Mapping[str, float] = 0.0,
-    split_alpha: Sequence[float] | float | None = None,
+    arms: Sequence[str] | None = None,
+    order: Sequence[str] | None = None,
+    poset: Sequence[tuple[str, str]] | None = None,
     monotone: bool = True,
-    tau_clip: tuple[float, float] | None = (0.0, float("inf")),
-    catt_floor: float | None = 0.0,
-    cohorts: Mapping[tuple[str, str], np.ndarray] | np.ndarray | None = None,
-    ever: Mapping[tuple[str, str], np.ndarray] | np.ndarray | None = None,
-    att_w: Mapping[tuple[str, str], np.ndarray] | np.ndarray | None = None,
-    arm_sample_sizes: Mapping[str, float] | Sequence[float] | None = None,
-    sample_sizes: Mapping[str, float] | Sequence[float] | None = None,
-    min_group_var_share: float = 0.15,
-    min_arm_var_share: float | None = None,
-    bipartite_ridge_weight: float = 1e-2,
-    bipartite_ridge: float | None = None,
-    bipartite_policy: str = "allocation",
-    key_contrast: tuple[str, str] | None = None,
+    prior_scale: float | None = None,
     horizon: int | None = None,
-    n_proposals: int | None = None,
-    sampler: str = "auto",
-    num_chains: int = 4,
-    num_burnin: int = 200,
-    num_warmup: int | None = None,
-    thin: int = 2,
-    auto_continue: bool = True,
-    target_rhat: float = 1.01,
-    target_ess: float = 400.0,
-    max_iter_multiplier: float = 8.0,
+    n_modes: int = 2,
     seed: int = 2026,
-    return_prior_draws: bool = False,
-    spike_prob: float = 0.5,
-    prior_scale_floor: float | None = None,
-    projection: str = "ols",
-    arm_variance_source: str = "backsolve",
-    arm_outcome_variances: Mapping[str, float] | Sequence[float] | None = None,
-    _force_general: bool = False,
+    _model_options: Mapping[str, Any] | None = None,
 ) -> MultiArmReconciliationResult:
-    """Reconcile ``P >= A - 1`` pairwise Rank-K BCF posteriors across ``A >= 2`` arms.
-
-    Implements the general multi-arm Mode-1 and trajectory reconciliation of Section 3.1:
-    1. Validates that the contrast graph on ``arms`` is connected and that every spanning-tree
-       edge has a fitted contrast in ``results``.
-    2. Projects the ``P`` pairwise Mode-1 posterior means onto the ``(A - 1)``-dimensional cut
-       space ``mu_hat = (B' B)^{-1} B' y_hat``, recovers arm variances ``v in R_+^A`` via
-       bounded NNLS (or sample-size-informed ridge-NNLS with a ``UserWarning`` when the contrast
-       graph is bipartite), and forms ``Sigma_lik = diag(v_1, ..., v_{A-1}) + v_0 1 1'``.
-    3. Combines the Gaussian cut-space likelihood with the specified prior family (chain
-       ``Dirichlet(alpha)`` bundle prior, unique-top poset order-polytope prior via uniform
-       linear extensions, independent truncated Gaussian/half-normal prior, or flat prior).
-    4. Samples the posterior via defensive-mixture SIR for ``d = A - 1 <= 3`` (with automatic
-       fallback to hit-and-run slice sampling if ``ess < max(100, 0.02 * n_proposals)``) or
-       multi-chain analytical-polyhedron hit-and-run slice sampling for ``d >= 4``.
-    5. Projects each spanning-tree edge increment draw through that edge's fit via
-       :func:`_project_cohort_damped_trajectory` and computes every contrast trajectory as the
-       exact signed path sum on the spanning tree so cycle identities hold to ``< 1e-12``.
-
-    When ``len(arms) == 3``, ``topology == "chain"``, ``split_alpha`` is ``None`` (or all ``1.0``),
-    ``monotone=True``, ``sampler in ("auto", "sir")``, and ``_force_general=False`` with all 3
-    pairs present, delegates directly to :func:`reconcile_nested_3arm_draws` for bit-for-bit
-    backward compatibility.
+    """Reconcile pairwise Stage-1 Rank-K posterior fits across a multi-arm poset.
 
     Args:
-      results: Mapping ``{(treated_arm, reference_arm): RankKLongBetResult}`` of ``P >= A - 1``
-        pairwise fits.
-      arms: Sequence of ``A >= 2`` arm names, with ``arms[0]`` as the control arm.
-      topology: ``"chain"`` (nested sequence ``arms[0] < arms[1] < ... < arms[A-1]``) or
-        ``"poset"`` (partial order specified by ``edges``).
-      edges: Cover edges of the Hasse diagram when ``topology="poset"``.
-      prior_mode: ``None`` (default: ``"bundle_halfnormal"``; on a bipartite contrast graph the
-        bipartite default family), ``"bundle_halfnormal"``, ``"bundle_halfstudentt"``,
-        ``"bundle_gamma_spike"``, ``"bundle_spike_halfnormal"`` (spike-and-slab: point mass at
-        ``mu = 0`` with probability ``spike_prob``, else the half-normal bundle prior),
-        ``"independent"``, ``"independent_halfnormal"``, ``"independent_normal"``, or ``"flat"``.
-      prior_scale: Positive float in outcome units, ``"empirical_bayes"`` (default since 0.10.0;
-        Type-II maximum likelihood of the scale under the Gaussian cut-space likelihood of the top
-        contrast, or of each coordinate for the ``independent`` family: closed form for half-normal
-        / normal priors, quadrature otherwise, maximized over ``sigma >= prior_scale_floor``),
-        ``"in_sample"`` (0.9.0 behavior: sets the scale to the in-sample posterior SD of the
-        scale-defining contrast), or per-arm sequence/mapping for the ``independent`` prior family.
-      prior_mean: Prior mean(s) for the ``independent`` prior family (default ``0.0``).
-      split_alpha: Optional ``(A - 1,)`` concentration parameters for the chain Dirichlet split
-        (default ``None``, which uses ``(1.0, ..., 1.0)``).
-      monotone: Enforce poset monotonicity ``mu_j >= mu_l`` for ``l <= j`` (default ``True``).
-      tau_clip: ``(low, high)`` Mode-1 truncation bounds (default ``(0.0, inf)``; ``None`` for
-        ``(-inf, inf)``).
-      catt_floor: Optional per-period floor for zero-sum dynamic damping (default ``0.0``).
-      cohorts: Optional adoption cohorts array or ``{pair: array}`` mapping.
-      ever: Optional ever-treated mask array or ``{pair: array}`` mapping.
-      att_w: Optional unit ATT weights array or ``{pair: array}`` mapping.
-      arm_sample_sizes: Optional ``{arm: n_a}`` or length-``A`` sequence of arm unit counts used
-        in bipartite ridge regularization.
-      min_group_var_share: Floor share ``eta`` of the minimum incident pairwise variance per arm
-        (default ``0.15``).
-      bipartite_ridge_weight: Ridge penalty weight for bipartite variance recovery (default ``1e-2``).
-      bipartite_policy: How a bipartite contrast graph (no odd cycle, so the arm variances are
-        identified only up to the alternating null direction ``v + xi z``) resolves ``xi``:
-        ``"allocation"`` (default; 0.9.0 behavior) ridge-shrinks toward the sample-size
-        allocation ``v_a ~ sigma^2 / n_a``; ``"conservative"`` picks the ``xi`` in the feasible
-        interval (every ``v_a`` above its floor) that maximizes the Gaussian-approximate
-        posterior variance of the top contrast; ``"marginalize"`` integrates ``xi`` under a
-        flat prior on the feasible interval (a scale-mixture likelihood on a 9-point grid).
-        A :class:`RankKDesignWarning` names the extra fit that would close an odd cycle.
-      key_contrast: Optional primary contrast ``(treated, ref)`` (defaults to ``(arms[-1], arms[0])``).
-      horizon: Optional number of post-adoption periods summed into ``contrast_cumulative_draws``.
-      n_proposals: Number of SIR importance proposals (default ``max(n_draws * 500, 100_000)``).
-      sampler: ``"auto"`` (SIR for ``d <= 3`` with slice fallback; slice for ``d >= 4``),
-        ``"sir"``, or ``"slice"``.
-      num_chains: Number of parallel chains for the slice sampler (default ``4``).
-      num_burnin: Burn-in sweeps per chain for the slice sampler (default ``200``).
-      auto_continue: Slice sampler only (``d >= 4`` or SIR fallback): continue the chains in
-        blocks until split R-hat ``<= target_rhat`` and bulk ESS ``>= target_ess`` (capped at
-        ``0.75 * S``) on every coordinate, up to ``max_iter_multiplier`` times the default
-        sweeps, then warn (default ``True`` since 0.10.0; ``False`` is bit-identical to 0.9.0).
-        Sweeps used are reported in ``sampler_diagnostics.n_iterations``.
-      target_rhat: Split R-hat target for ``auto_continue`` (default ``1.01``).
-      target_ess: Bulk ESS target for ``auto_continue`` (default ``400``).
-      max_iter_multiplier: Cap on slice sweeps relative to the default (default ``8``).
-      seed: Random seed.
-      return_prior_draws: Attach prior Mode-1 and trajectory draws to the result.
-      projection: ``"ols"`` (default; Euclidean cut-space projection, 0.9.0) or ``"huber"``
-        (IRLS with Huber weights, ``k = 1.345``, scale ``1.4826 * MAD`` of the cycle residual,
-        so one biased pairwise fit cannot drag the whole reconciliation; the down-weighted
-        fits are reported in ``flagged_pairs`` / ``projection_weights``). Identical to
-        ``"ols"`` under the exact shared-arm model.
-      arm_variance_source: ``"backsolve"`` (default, 0.9.0: arm variances back-solved from the
-        pairwise posterior variances, with ``bipartite_policy`` on bipartite graphs) or
-        ``"direct"`` (``v_a = c * sigma_a^2 / n_a`` from ``arm_outcome_variances`` and the arm
-        sample sizes, with one scale ``c`` matched to the pairwise variances; no bipartite
-        under-identification and no design warning).
-      arm_outcome_variances: ``{arm: sigma_a^2}`` (or length-``A`` sequence) of per-arm residual
-        outcome variances, required by ``arm_variance_source="direct"``.
-      prior_scale_floor: Lower bound of the ``"empirical_bayes"`` scale (default: the in-sample
-        posterior SD of the scale-defining contrast, i.e. its noise scale).
-      spike_prob: Prior spike probability ``pi`` of ``prior_mode="bundle_spike_halfnormal"``
-        (``tau_top ~ pi delta_0 + (1 - pi) HalfNormal(prior_scale)``; default ``0.5``, which is
-        also what a ``Beta(1, 1)`` prior on ``pi`` integrates to for one reconciliation). The
-        posterior spike weight is exact given the slab evidence and is reported as
-        ``spike_posterior_prob``; spike draws are exactly zero on every contrast and period.
-      _force_general: Bypass the ``A = 3`` legacy delegation path (for testing equivalence).
+      results: Mapping ``{(arm_high, arm_low): RankKLongBetResult}`` forming a
+        connected contrast graph over the arms.
+      arms: Optional explicit sequence of arm labels (``arms[0]`` is control).
+      order: Optional total order ``(control, ..., top)`` for chain designs
+        (mutually exclusive with ``poset``).
+      poset: Optional sequence of ``(arm_high, arm_low)`` cover relations
+        (transitive reduction computed automatically; mutually exclusive with ``order``).
+      monotone: Enforce poset-cone monotonicity and per-period positivity in
+        prior support (default ``True``).
+      prior_scale: ``None`` (default) places a hierarchical ``Half-t_3(s_0)``
+        scale prior on the top-arm level; a positive ``float`` fixes an
+        externally calibrated prior scale.
+      horizon: Estimand window ``1..H`` (default: full post-adoption window).
+      n_modes: Exposure basis dimension ``K'`` (default ``2``: level + decay).
+      seed: Deterministic PRNG seed for the 4-chain sampler.
+      _model_options: Private internal options mapping for ablation testing.
 
     Returns:
       :class:`MultiArmReconciliationResult`.
     """
-    _ = key_contrast
-    if sample_sizes is not None and arm_sample_sizes is None:
-        arm_sample_sizes = sample_sizes
-    if min_arm_var_share is not None:
-        min_group_var_share = float(min_arm_var_share)
-    if bipartite_ridge is not None:
-        bipartite_ridge_weight = float(bipartite_ridge)
-    if num_warmup is not None:
-        num_burnin = int(num_warmup)
+    if not isinstance(results, Mapping) or not results:
+        raise ValueError("`results` must be a non-empty mapping of {(arm_high, arm_low): RankKLongBetResult}")
+    if not isinstance(monotone, (bool, np.bool_)):
+        raise ValueError(f"`monotone` must be a bool; got {monotone!r}")
+    ps_val = _validate_prior_scale_scalar(prior_scale, "prior_scale")
 
-    arms_tuple = tuple(str(a) for a in arms)
-    n_arms = len(arms_tuple)
-    if n_arms < 2 or len(set(arms_tuple)) != n_arms:
-        raise ValueError(f"arms must contain at least 2 distinct arm names; got {arms!r}")
-    if topology not in _TOPOLOGIES:
-        raise ValueError(f"topology must be one of {_TOPOLOGIES}; got {topology!r}")
-    if prior_mode is not None and prior_mode not in _ALL_PRIOR_MODES:
-        raise ValueError(f"prior_mode must be one of {_ALL_PRIOR_MODES}; got {prior_mode!r}")
-    if sampler not in _SAMPLERS:
-        raise ValueError(f"sampler must be one of {_SAMPLERS}; got {sampler!r}")
-    if arm_variance_source not in _ARM_VARIANCE_SOURCES:
-        raise ValueError(
-            f"arm_variance_source must be one of {_ARM_VARIANCE_SOURCES}; got {arm_variance_source!r}"
-        )
-    if arm_variance_source == "direct" and arm_outcome_variances is None:
-        raise ValueError("arm_variance_source='direct' requires arm_outcome_variances")
-    if projection not in _PROJECTIONS:
-        raise ValueError(f"projection must be one of {_PROJECTIONS}; got {projection!r}")
-    if bipartite_policy not in _BIPARTITE_POLICIES:
-        raise ValueError(
-            f"bipartite_policy must be one of {_BIPARTITE_POLICIES}; got {bipartite_policy!r}"
-        )
-
-    resolved_tau_clip = (
-        (-float("inf"), float("inf"))
-        if tau_clip is None
-        else (float(tau_clip[0]), float(tau_clip[1]))
+    core = _reconcile_joint_bayesian_core(
+        structural_outcomes=("_single",),
+        results_by_outcome={"_single": results},
+        composite_outcomes={},
+        composite_results={},
+        arms=arms,
+        order=order,
+        poset=poset,
+        monotone_by_outcome={"_single": bool(monotone)},
+        prior_scale_by_outcome={"_single": ps_val},
+        iw_spec=None,
+        horizon=horizon,
+        n_modes=n_modes,
+        seed=seed,
+        model_options=_model_options,
     )
-    if not resolved_tau_clip[0] < resolved_tau_clip[1]:
-        raise ValueError(f"tau_clip must satisfy low < high; got {tau_clip!r}")
-
-    results_map = _normalize_results_mapping(results, arms_tuple)
-    arm_to_idx = {arm: idx for idx, arm in enumerate(arms_tuple)}
-    fitted_pairs = tuple(results_map.keys())
-    n_pairs = len(fitted_pairs)
-    topology_requested = topology
-    topology, edges = _chain_order_as_poset(arms_tuple, topology, edges, fitted_pairs, split_alpha)
-
-    # Validate draw counts across all fitted contrasts
-    draw_counts: set[int] = set()
-    for pair, fit in results_map.items():
-        att_arr = np.asarray(fit.att_draws, dtype=np.float64)
-        if att_arr.ndim != 1 or att_arr.size < 2 or not np.all(np.isfinite(att_arr)):
-            raise ValueError(f"results[{pair!r}].att_draws must be a finite 1-D array with >= 2 draws")
-        draw_counts.add(int(att_arr.size))
-    if len(draw_counts) != 1:
-        raise ValueError(
-            f"Inconsistent draw counts across fitted contrasts: {sorted(draw_counts)}"
-        )
-    (n_draws,) = draw_counts
-
-    pair_indices = [(arm_to_idx[t_arm], arm_to_idx[r_arm]) for t_arm, r_arm in fitted_pairs]
-    is_connected, is_bipartite, colors = _check_connected_and_bipartite(n_arms, pair_indices)
-    if not is_connected:
-        raise ValueError(
-            f"Contrast graph on arms {arms_tuple} is disconnected (not connected); fitted pairs are {fitted_pairs}"
-        )
-    if prior_mode is None:
-        prior_mode = _BIPARTITE_DEFAULT_PRIOR_MODE if is_bipartite else _DEFAULT_PRIOR_MODE
-    prior_mode_requested = prior_mode
-    spike_mode = prior_mode in _SPIKE_PRIOR_MODES
-    if spike_mode:
-        if not 0.0 < float(spike_prob) < 1.0:
-            raise ValueError(f"spike_prob must lie in (0, 1); got {spike_prob!r}")
-        if resolved_tau_clip[0] > 0.0:
-            raise ValueError(
-                f"prior_mode={prior_mode!r} puts a spike at zero, which needs tau_clip[0] <= 0; "
-                f"got tau_clip={tau_clip!r}"
-            )
-        prior_mode = _SPIKE_SLAB_MODE[prior_mode]
-
-    tree_edges, redundant_pairs, cover_pairs, reachability, maximal_arms = _validate_and_orient_poset(
-        arms_tuple, topology, edges, results_map
-    )
-
-    # Bundle priors require a unique top arm in the poset
-    if prior_mode in _BUNDLE_PRIOR_MODES and len(maximal_arms) != 1:
-        max_names = [arms_tuple[i] for i in maximal_arms]
-        raise ValueError(
-            f"Non-unique top arm in poset (maximal arms: {max_names}): bundle prior mode "
-            f"{prior_mode!r} requires a unique top arm; use prior_mode='independent' instead"
-        )
-    top_idx = maximal_arms[0] if len(maximal_arms) == 1 else None
-
-    d_dim = n_arms - 1
-    if split_alpha is not None:
-        if topology_requested != "chain":
-            raise ValueError("split_alpha is only supported when topology='chain'")
-        if np.ndim(split_alpha) == 0:
-            alpha_vec = np.full(d_dim, float(split_alpha), dtype=np.float64)
-        else:
-            alpha_vec = np.asarray(split_alpha, dtype=np.float64)
-        if alpha_vec.shape != (d_dim,) or np.any(~np.isfinite(alpha_vec)) or np.any(alpha_vec <= 0.0):
-            raise ValueError(
-                f"split_alpha must be a sequence of {d_dim} positive finite floats; got {split_alpha!r}"
-            )
-    else:
-        alpha_vec = np.ones(d_dim, dtype=np.float64)
-
-    # Step 2: Mode-1 cut-space projection and arm variance recovery
-    e_inc = np.zeros((n_pairs, n_arms), dtype=np.float64)
-    y_hat = np.zeros(n_pairs, dtype=np.float64)
-    s_sq = np.zeros(n_pairs, dtype=np.float64)
-    for p_idx, ((t_arm, r_arm), (j_idx, l_idx)) in enumerate(zip(fitted_pairs, pair_indices, strict=True)):
-        fit = results_map[(t_arm, r_arm)]
-        d_arr = np.asarray(fit.att_draws, dtype=np.float64)
-        e_inc[p_idx, j_idx] = 1.0
-        e_inc[p_idx, l_idx] = -1.0
-        y_hat[p_idx] = float(np.mean(d_arr))
-        s_sq[p_idx] = max(float(np.var(d_arr, ddof=1)), 1e-12)
-
-    b_cut = e_inc[:, 1:]  # (P, A - 1)
-    btb = b_cut.T @ b_cut
-    mu_hat = np.linalg.solve(btb, b_cut.T @ y_hat)
-    y_proj = b_cut @ mu_hat
-    cycle_discrepancy_ratio = float(
-        np.linalg.norm(y_hat - y_proj) / max(float(np.linalg.norm(y_hat)), 1e-12)
-    )
-    projection_weights: dict[tuple[str, str], float] | None = None
-    flagged_pairs: tuple[tuple[str, str], ...] = ()
-    if projection == "huber":
-        mu_hat, w_proj, _ = _huber_cut_space_projection(b_cut, y_hat, np.sqrt(s_sq))
-        projection_weights = {pair: float(w) for pair, w in zip(fitted_pairs, w_proj, strict=True)}
-        order = np.argsort(w_proj, kind="stable")
-        flagged_pairs = tuple(fitted_pairs[i] for i in order if w_proj[i] < 1.0 - 1e-12)
-
-    sample_sizes_vec = _infer_arm_sample_sizes(arms_tuple, results_map, arm_sample_sizes)
-    if arm_variance_source == "direct":
-        arm_variances, nnls_residual = _direct_arm_variances(
-            arms_tuple, pair_indices, s_sq, arm_outcome_variances, sample_sizes_vec
-        )
-    else:
-        arm_variances, nnls_residual = _recover_arm_variances(
-            arms_tuple,
-            pair_indices,
-            s_sq,
-            is_bipartite=is_bipartite,
-            colors=colors,
-            arm_sample_sizes=sample_sizes_vec,
-            min_group_var_share=min_group_var_share,
-            bipartite_ridge_weight=bipartite_ridge_weight,
-            bipartite_policy=bipartite_policy,
-        )
-    sigma_lik = np.diag(np.asarray(arm_variances[1:], dtype=np.float64)) + float(
-        arm_variances[0]
-    ) * np.ones((d_dim, d_dim), dtype=np.float64)
-
-    # Helper to look up oriented fit and sign for any pair (t_arm, r_arm)
-    undir_to_oriented: dict[frozenset[str], tuple[tuple[str, str], RankKLongBetResult, float]] = {}
-    for (t_arm, r_arm), fit in results_map.items():
-        undir_to_oriented[frozenset((t_arm, r_arm))] = ((t_arm, r_arm), fit, 1.0)
-
-    def _get_pair_arg(arg_map: Any, pair: tuple[str, str]) -> Any:
-        if isinstance(arg_map, Mapping):
-            if pair in arg_map:
-                return arg_map[pair]
-            rev = (pair[1], pair[0])
-            if rev in arg_map:
-                return arg_map[rev]
-            return None
-        return arg_map
-
-    # Check exact delegation to legacy reconcile_nested_3arm_draws at A = 3 chain
-    can_delegate_3arm = (
-        not _force_general
-        and n_arms == 3
-        and n_pairs == 3
-        and topology == "chain"
-        and bool(monotone)
-        and np.allclose(alpha_vec, 1.0)
-        and sampler in ("auto", "sir")
-        and prior_mode in (*_BUNDLE_PRIOR_MODES, "independent_halfnormal")
-        and not spike_mode
-        and (arms_tuple[1], arms_tuple[0]) in results_map
-        and (arms_tuple[2], arms_tuple[1]) in results_map
-        and (arms_tuple[2], arms_tuple[0]) in results_map
-        and isinstance(prior_scale, (int, float, str, type(None)))
-        and prior_scale != "empirical_bayes"
-        and projection == "ols"
-        and arm_variance_source == "backsolve"
-        and isinstance(prior_mean, (int, float))
-    )
-    if can_delegate_3arm:
-        c_arm, b_arm, a_arm = arms_tuple
-        pair_bc = (b_arm, c_arm)
-        pair_ab = (a_arm, b_arm)
-        pair_ac = (a_arm, c_arm)
-        leg_scale: float | str | None = (
-            prior_scale if isinstance(prior_scale, (int, float, str)) else None
-        )
-        leg = reconcile_nested_3arm_draws(
-            results_map[pair_bc],
-            results_map[pair_ab],
-            results_map[pair_ac],
-            prior_scale=leg_scale,
-            prior_mode=prior_mode,
-            cohorts_bc=_get_pair_arg(cohorts, pair_bc),
-            ever_bc=_get_pair_arg(ever, pair_bc),
-            att_w_bc=_get_pair_arg(att_w, pair_bc),
-            cohorts_ab=_get_pair_arg(cohorts, pair_ab),
-            ever_ab=_get_pair_arg(ever, pair_ab),
-            att_w_ab=_get_pair_arg(att_w, pair_ab),
-            prior_mean_bc=float(prior_mean),
-            prior_mean_ab=float(prior_mean),
-            tau_clip=resolved_tau_clip,
-            catt_floor=catt_floor,
-            min_group_var_share=min_group_var_share,
-            n_proposals=n_proposals,
-            seed=seed,
-            return_prior_draws=return_prior_draws,
-        )
-        t_post = int(leg.trt_catt_ac.shape[1])
-        h_eff = t_post if horizon is None else int(horizon)
-        if not (1 <= h_eff <= t_post):
-            raise ValueError(f"horizon must lie in [1, {t_post}]; got {horizon!r}")
-
-        cohorts_ac, ever_ac, _ = _infer_panel_masks_from_result(
-            results_map[pair_ac],
-            _get_pair_arg(cohorts, pair_ac),
-            _get_pair_arg(ever, pair_ac),
-            _get_pair_arg(att_w, pair_ac),
-        )
-        own_traj_ac = _project_cohort_damped_trajectory(
-            leg.post_att_ac,
-            results_map[pair_ac],
-            ever_ac,
-            cohorts_ac,
-            resolved_tau_clip,
-            catt_floor,
-        )
-        gap_ac = float(np.max(np.abs(own_traj_ac - leg.trt_catt_ac)))
-        add_gaps = {pair_ac: gap_ac}
-
-        tau_inc = np.column_stack([leg.post_att_bc, leg.post_att_ab])
-        tau_mu = np.column_stack([leg.post_att_bc, leg.post_att_ac])
-        c_m1 = {
-            pair_bc: leg.post_att_bc,
-            pair_ab: leg.post_att_ab,
-            pair_ac: leg.post_att_ac,
-        }
-        c_traj = {
-            pair_bc: leg.trt_catt_bc,
-            pair_ab: leg.trt_catt_ab,
-            pair_ac: leg.trt_catt_ac,
-        }
-        c_cum = {
-            pair: traj[:, :h_eff].sum(axis=1) for pair, traj in c_traj.items()
-        }
-        compute_rhat, _ = _get_rhat_ess()
-        rhat_bc = float(compute_rhat(leg.post_att_bc.reshape(2, -1))) if n_draws >= 8 and n_draws % 2 == 0 else 1.0
-        rhat_ac = float(compute_rhat(leg.post_att_ac.reshape(2, -1))) if n_draws >= 8 and n_draws % 2 == 0 else 1.0
-        diag = SamplerDiagnostics(
-            method="sir",
-            ess=float(leg.sir_ess),
-            r_hat=max(rhat_bc, rhat_ac),
-            ess_per_param=(float(leg.sir_ess), float(leg.sir_ess)),
-            r_hat_per_param=(rhat_bc, rhat_ac),
-            n_proposals=int(n_proposals) if n_proposals is not None else max(n_draws * 500, 250_000),
-            fallback_triggered=False,
-        )
-        pri_mu = (
-            np.column_stack([leg.prior_att_bc, leg.prior_att_ac])
-            if leg.prior_att_bc is not None and leg.prior_att_ac is not None
-            else None
-        )
-        pri_inc = (
-            np.column_stack([leg.prior_att_bc, leg.prior_att_ab])
-            if leg.prior_att_bc is not None and leg.prior_att_ab is not None
-            else None
-        )
-        pri_m1_map = (
-            {
-                pair_bc: leg.prior_att_bc,
-                pair_ab: leg.prior_att_ab,
-                pair_ac: leg.prior_att_ac,
-            }
-            if leg.prior_att_bc is not None
-            and leg.prior_att_ab is not None
-            and leg.prior_att_ac is not None
-            else None
-        )
-        pri_traj_map = (
-            {
-                pair_bc: leg.prior_catt_bc,
-                pair_ab: leg.prior_catt_ab,
-                pair_ac: leg.prior_catt_ac,
-            }
-            if leg.prior_catt_bc is not None
-            and leg.prior_catt_ab is not None
-            and leg.prior_catt_ac is not None
-            else None
-        )
-        cycle_traj_gap = float(
-            np.max(np.abs(leg.trt_catt_ac - (leg.trt_catt_bc + leg.trt_catt_ab)))
-        )
-        return MultiArmReconciliationResult(
-            arms=arms_tuple,
-            topology=topology,
-            tree_edges=tree_edges,
-            fitted_pairs=fitted_pairs,
-            redundant_pairs=redundant_pairs,
-            tau_mu_draws=tau_mu,
-            tau_increment_draws=tau_inc,
-            contrast_mode1_draws=c_m1,
-            contrast_trajectory_draws=c_traj,
-            contrast_catt_draws=dict(c_traj),
-            contrast_cumulative_draws=c_cum,
-            mu_hat=mu_hat,
-            sigma_lik=sigma_lik,
-            arm_variances=arm_variances,
-            nnls_residual=nnls_residual,
-            is_bipartite=is_bipartite,
-            cycle_discrepancy_ratio=cycle_discrepancy_ratio,
-            trajectory_additivity_max_gap=cycle_traj_gap,
-            sampler_diagnostics=diag,
-            trajectory_additivity_gaps=add_gaps,
-            prior_mode=prior_mode,
-            prior_scale=leg.prior_scale,
-            horizon=h_eff,
-            own_vs_implied_trajectory_max_gap=gap_ac,
-            prior_mu_draws=pri_mu,
-            prior_increment_draws=pri_inc,
-            prior_contrast_mode1_draws=pri_m1_map,
-            prior_contrast_trajectory_draws=pri_traj_map,
-            legacy_3arm_result=leg,
-        )
-
-    # Build spanning-tree incidence T_tree: theta = T_tree @ mu and mu = M_tree @ theta
-    t_tree = np.zeros((d_dim, d_dim), dtype=np.float64)
-    for e_idx, (t_arm, r_arm) in enumerate(tree_edges):
-        j_idx = arm_to_idx[t_arm]
-        l_idx = arm_to_idx[r_arm]
-        if j_idx >= 1:
-            t_tree[e_idx, j_idx - 1] = 1.0
-        if l_idx >= 1:
-            t_tree[e_idx, l_idx - 1] = -1.0
-    m_tree = np.linalg.inv(t_tree)
-
-    # Step 3: Prior construction on mu in R^{A - 1}
-    rng = np.random.default_rng(int(seed))
-    a_ineq, b_ineq = _build_support_inequalities(
-        n_arms=n_arms,
-        topology=topology,
-        prior_mode=prior_mode,
-        monotone=bool(monotone),
-        tau_clip=resolved_tau_clip,
-        t_tree=t_tree,
-        cover_pairs=cover_pairs,
-        top_idx=top_idx,
-    )
-
-    def _resolve_scalar_scale(
-        scale_arg: Any, fallback_sd: float, label: str, eb: Mapping[str, Any] | None = None
-    ) -> float:
-        if isinstance(scale_arg, str):
-            if scale_arg == "empirical_bayes":
-                if eb is None:
-                    raise ValueError(f"prior_scale='empirical_bayes' is not supported for {prior_mode!r}")
-                floor = float(prior_scale_floor) if prior_scale_floor is not None else float(fallback_sd)
-                return _empirical_bayes_scale(floor=floor, **eb)
-            if scale_arg != "in_sample":
-                raise ValueError(
-                    "prior_scale must be a positive float, 'in_sample' or 'empirical_bayes'; "
-                    f"got {scale_arg!r}"
-                )
-            _warn_rank_k(
-                f"prior_scale='in_sample' sets the {label} to the in-sample posterior SD ({fallback_sd:.4g}), "
-                "which shrinks effects that are several posterior SDs from zero toward zero. Report it "
-                "next to an out-of-sample calibrated scale, or use prior_scale='empirical_bayes'."
-            )
-            return float(fallback_sd)
-        if scale_arg is None:
-            raise ValueError(
-                f"reconcile_multi_arm_draws requires a positive prior_scale or 'in_sample' for {prior_mode!r}"
-            )
-        val = float(scale_arg)
-        if not (math.isfinite(val) and val > 0.0):
-            raise ValueError(f"prior_scale must be > 0; got {scale_arg!r}")
-        return val
-
-    is_flat_prior = prior_mode == "flat"
-    scale_used: float | tuple[float, ...] | None = None
-
-    if prior_mode in _BUNDLE_PRIOR_MODES:
-        assert top_idx is not None
-        top_arm = arms_tuple[top_idx]
-        ctrl_arm = arms_tuple[0]
-        top_key = frozenset((top_arm, ctrl_arm))
-        if top_key in undir_to_oriented:
-            _, fit_top, _ = undir_to_oriented[top_key]
-            in_sample_sd_top = float(np.std(np.asarray(fit_top.att_draws, dtype=np.float64), ddof=1))
-        else:
-            in_sample_sd_top = float(
-                math.sqrt(max(float(sigma_lik[top_idx - 1, top_idx - 1]), 1e-12))
-            )
-        sd_top = _resolve_scalar_scale(
-            prior_scale,
-            max(in_sample_sd_top, 1e-12),
-            "bundle prior scale",
-            eb={
-                "t_hat": float(mu_hat[top_idx - 1]),
-                "s_lik": math.sqrt(max(float(sigma_lik[top_idx - 1, top_idx - 1]), 1e-24)),
-                "family": prior_mode,
-                "spike_prob": float(spike_prob) if spike_mode else None,
-            },
-        )
-        scale_used = sd_top
-
-        if topology == "chain" and monotone:
-            log_dir_norm = float(
-                sp_special.gammaln(np.sum(alpha_vec)) - np.sum(sp_special.gammaln(alpha_vec))
-            )
-
-            def _prior_draw(n: int) -> np.ndarray:
-                tot = _draw_bundle_prior(rng, prior_mode, sd_top, n)
-                u_mat = rng.dirichlet(alpha_vec, size=n)
-                theta_mat = u_mat * tot[:, None]
-                return theta_mat @ m_tree.T
-
-            def _prior_logpdf(pts: np.ndarray) -> np.ndarray:
-                theta_mat = pts @ t_tree.T
-                valid = np.all(theta_mat > 0.0, axis=1)
-                out = np.full(pts.shape[0], -np.inf, dtype=np.float64)
-                if not np.any(valid):
-                    return out
-                th_v = theta_mat[valid]
-                tot_v = np.sum(th_v, axis=1)
-                u_v = th_v / np.maximum(tot_v[:, None], 1e-300)
-                dir_log = log_dir_norm + np.sum(
-                    (alpha_vec[None, :] - 1.0) * np.log(np.maximum(u_v, 1e-300)),
-                    axis=1,
-                )
-                out[valid] = (
-                    _fast_bundle_prior_logpdf(prior_mode, sd_top, tot_v)
-                    - float(n_arms - 2) * np.log(np.maximum(tot_v, 1e-300))
-                    + dir_log
-                )
-                return out
-
-        else:
-            # Unique-top poset order-polytope prior (or chain with monotone=False)
-            top_col = top_idx - 1
-            interior_cols = [c for c in range(d_dim) if c != top_col]
-            interior_arms = [c + 1 for c in interior_cols]
-            m_int = len(interior_cols)
-            if monotone and m_int > 0:
-                reach_int = reachability[np.ix_(interior_arms, interior_arms)]
-                lin_exts = _enumerate_linear_extensions(reach_int)
-                n_exts = int(lin_exts.shape[0])
-                log_inv_vol = float(sp_special.gammaln(m_int + 1) - math.log(max(n_exts, 1)))
-            else:
-                lin_exts = np.zeros((1, m_int), dtype=np.int32)
-                n_exts = 1
-                log_inv_vol = 0.0
-
-            def _prior_draw(n: int) -> np.ndarray:
-                tot = _draw_bundle_prior(rng, prior_mode, sd_top, n)
-                pts = np.zeros((n, d_dim), dtype=np.float64)
-                pts[:, top_col] = tot
-                if m_int > 0:
-                    if monotone:
-                        ext_idx = rng.integers(0, n_exts, size=n)
-                        chosen_exts = lin_exts[ext_idx]  # (n, m_int)
-                        u_sorted = np.sort(rng.uniform(0.0, 1.0, size=(n, m_int)), axis=1)
-                        w_mat = np.empty((n, m_int), dtype=np.float64)
-                        rows = np.arange(n)[:, None]
-                        w_mat[rows, chosen_exts] = u_sorted
-                    else:
-                        w_mat = rng.uniform(0.0, 1.0, size=(n, m_int))
-                    pts[:, interior_cols] = tot[:, None] * w_mat
-                return pts
-
-            def _prior_logpdf(pts: np.ndarray) -> np.ndarray:
-                tot = pts[:, top_col]
-                valid = tot > 0.0
-                if m_int > 0:
-                    w_int = pts[:, interior_cols]
-                    valid &= np.all((w_int >= 0.0) & (w_int <= tot[:, None]), axis=1)
-                    if monotone:
-                        for lo_arm, hi_arm in cover_pairs:
-                            if lo_arm >= 1 and hi_arm >= 1:
-                                valid &= pts[:, hi_arm - 1] >= pts[:, lo_arm - 1]
-                out = np.full(pts.shape[0], -np.inf, dtype=np.float64)
-                if not np.any(valid):
-                    return out
-                tot_v = tot[valid]
-                out[valid] = (
-                    _fast_bundle_prior_logpdf(prior_mode, sd_top, tot_v)
-                    - float(m_int) * np.log(np.maximum(tot_v, 1e-300))
-                    + log_inv_vol
-                )
-                return out
-
-    elif prior_mode in _INDEPENDENT_PRIOR_MODES:
-        use_increment_coords = prior_mode == "independent_halfnormal" and topology == "chain"
-        if isinstance(prior_scale, Mapping):
-            sds = []
-            for a_idx in range(1, n_arms):
-                arm_name = arms_tuple[a_idx]
-                sds.append(float(prior_scale[arm_name]))
-            s_pri = np.asarray(sds, dtype=np.float64)
-        elif isinstance(prior_scale, Sequence) and not isinstance(prior_scale, str):
-            s_pri = np.asarray(prior_scale, dtype=np.float64)
-            if s_pri.shape != (d_dim,):
-                raise ValueError(f"prior_scale sequence must have length {d_dim}; got {s_pri.shape}")
-        else:
-            if use_increment_coords:
-                fallback_sds = []
-                for e_edge in tree_edges:
-                    _, fit_e, _ = undir_to_oriented[frozenset(e_edge)]
-                    fallback_sds.append(
-                        max(float(np.std(np.asarray(fit_e.att_draws, dtype=np.float64), ddof=1)), 1e-12)
-                    )
-            else:
-                fallback_sds = [
-                    max(math.sqrt(float(sigma_lik[j, j])), 1e-12) for j in range(d_dim)
-                ]
-            coord_mat = t_tree if use_increment_coords else np.eye(d_dim, dtype=np.float64)
-            if isinstance(prior_mean, Mapping):
-                mean_eb = [float(prior_mean.get(arms_tuple[a], 0.0)) for a in range(1, n_arms)]
-            elif isinstance(prior_mean, Sequence) and not isinstance(prior_mean, str):
-                mean_eb = [float(x) for x in prior_mean]
-            else:
-                mean_eb = [float(prior_mean)] * d_dim
-            low_eb = (
-                max(resolved_tau_clip[0], 0.0)
-                if prior_mode == "independent_halfnormal"
-                else resolved_tau_clip[0]
-            )
-            s_pri = np.array(
-                [
-                    _resolve_scalar_scale(
-                        prior_scale,
-                        fb,
-                        f"prior SD of coord {j}",
-                        eb={
-                            "t_hat": float(coord_mat[j] @ mu_hat),
-                            "s_lik": math.sqrt(max(float(coord_mat[j] @ sigma_lik @ coord_mat[j]), 1e-24)),
-                            "family": "normal",
-                            "low": float(low_eb),
-                            "high": float(resolved_tau_clip[1]),
-                            "mean": mean_eb[j],
-                        },
-                    )
-                    for j, fb in enumerate(fallback_sds)
-                ],
-                dtype=np.float64,
-            )
-        if np.any(~np.isfinite(s_pri)) or np.any(s_pri <= 0.0):
-            raise ValueError(f"prior_scale entries must be positive and finite; got {s_pri}")
-        scale_used = tuple(float(v) for v in s_pri)
-
-        if isinstance(prior_mean, Mapping):
-            m_pri = np.array([float(prior_mean.get(arms_tuple[a], 0.0)) for a in range(1, n_arms)])
-        elif isinstance(prior_mean, Sequence) and not isinstance(prior_mean, str):
-            m_pri = np.asarray(prior_mean, dtype=np.float64)
-        else:
-            m_pri = np.full(d_dim, float(prior_mean), dtype=np.float64)
-
-        low_c = max(resolved_tau_clip[0], 0.0) if prior_mode == "independent_halfnormal" else resolved_tau_clip[0]
-        high_c = resolved_tau_clip[1]
-        a_std_vec = np.array(
-            [(low_c - m_pri[j]) / s_pri[j] if math.isfinite(low_c) else -np.inf for j in range(d_dim)],
-            dtype=np.float64,
-        )
-        b_std_vec = np.array(
-            [(high_c - m_pri[j]) / s_pri[j] if math.isfinite(high_c) else np.inf for j in range(d_dim)],
-            dtype=np.float64,
-        )
-        trunc_mass_vec = np.maximum(
-            sp_special.ndtr(b_std_vec) - sp_special.ndtr(a_std_vec), 1e-300
-        )
-        log_norm_total = float(
-            -0.5 * d_dim * math.log(2.0 * math.pi)
-            - np.sum(np.log(s_pri))
-            - np.sum(np.log(trunc_mass_vec))
-        )
-
-        def _prior_draw(n: int) -> np.ndarray:
-            coords = np.zeros((n, d_dim), dtype=np.float64)
-            for j in range(d_dim):
-                a_std = float(a_std_vec[j])
-                b_std = float(b_std_vec[j])
-                if math.isfinite(a_std) or math.isfinite(b_std):
-                    coords[:, j] = sp_stats.truncnorm.rvs(
-                        a_std, b_std, loc=m_pri[j], scale=s_pri[j], size=n, random_state=rng
-                    )
-                else:
-                    coords[:, j] = m_pri[j] + s_pri[j] * rng.standard_normal(n)
-            return coords @ m_tree.T if use_increment_coords else coords
-
-        def _prior_logpdf(pts: np.ndarray) -> np.ndarray:
-            coords = pts @ t_tree.T if use_increment_coords else pts
-            valid = np.all((coords >= low_c) & (coords <= high_c), axis=1)
-            valid &= _inside_polyhedron(pts, a_ineq, b_ineq)
-            out = np.full(pts.shape[0], -np.inf, dtype=np.float64)
-            if not np.any(valid):
-                return out
-            zsc = (coords[valid] - m_pri[None, :]) / s_pri[None, :]
-            out[valid] = -0.5 * np.sum(zsc**2, axis=1) + log_norm_total
-            return out
-
-    else:
-        # prior_mode == "flat"
-        scale_used = None
-        chol_lik = np.linalg.cholesky(sigma_lik + 1e-9 * np.eye(d_dim))
-
-        def _prior_draw(n: int) -> np.ndarray:
-            return mu_hat[None, :] + 2.0 * (rng.standard_normal((n, d_dim)) @ chol_lik.T)
-
-        def _prior_logpdf(pts: np.ndarray) -> np.ndarray:
-            valid = _inside_polyhedron(pts, a_ineq, b_ineq)
-            return np.where(valid, 0.0, -np.inf)
-
-    # Step 3b: resolve the unidentified arm-variance direction on a bipartite contrast graph
-    lik_logpdf_override: Any = None
-    null_interval: tuple[float, float] | None = None
-    null_shift: float | None = None
-    if is_bipartite and arm_variance_source == "backsolve":
-        z_null, xi_lo, xi_hi = _bipartite_null_interval(
-            np.asarray(arm_variances, dtype=np.float64),
-            pair_indices,
-            s_sq,
-            colors,
-            min_group_var_share,
-        )
-        null_interval = (xi_lo, xi_hi)
-        v_alloc = np.asarray(arm_variances, dtype=np.float64).copy()
-        null_shift = 0.0
-        if bipartite_policy != "allocation" and xi_hi > xi_lo:
-            xi_grid = np.linspace(xi_lo, xi_hi, 41 if bipartite_policy == "conservative" else _N_NULL_GRID)
-            if bipartite_policy == "conservative":
-                top_vec = np.zeros(d_dim, dtype=np.float64)
-                top_vec[(top_idx if top_idx is not None else d_dim) - 1] = 1.0
-                if is_flat_prior:
-                    prior_prec = np.zeros((d_dim, d_dim), dtype=np.float64)
-                else:
-                    pri_probe = _prior_draw(4000)
-                    pri_probe = pri_probe[np.isfinite(_prior_logpdf(pri_probe))]
-                    prior_cov = np.atleast_2d(np.cov(pri_probe, rowvar=False))
-                    prior_prec = np.linalg.pinv(prior_cov + 1e-12 * np.eye(d_dim))
-                post_vars = []
-                for xi_val in xi_grid:
-                    sig_xi = _sigma_lik_from_arm_variances(v_alloc + xi_val * z_null)
-                    post_cov = np.linalg.inv(np.linalg.inv(sig_xi) + prior_prec)
-                    post_vars.append(float(top_vec @ post_cov @ top_vec))
-                null_shift = float(xi_grid[int(np.argmax(post_vars))])
-                arm_variances = _ArmVarianceArray(v_alloc + null_shift * z_null, arms_tuple)
-                sigma_lik = _sigma_lik_from_arm_variances(np.asarray(arm_variances))
-            else:
-                sig_grid = [_sigma_lik_from_arm_variances(v_alloc + xi_val * z_null) for xi_val in xi_grid]
-                comp_dists = [
-                    sp_stats.multivariate_normal(mean=mu_hat, cov=sig_k, allow_singular=True)
-                    for sig_k in sig_grid
-                ]
-                log_k = math.log(float(len(comp_dists)))
-
-                def lik_logpdf_override(pts: np.ndarray) -> np.ndarray:
-                    stack = np.vstack(
-                        [np.asarray(dist.logpdf(pts), dtype=np.float64).reshape(-1) for dist in comp_dists]
-                    )
-                    return sp_special.logsumexp(stack, axis=0) - log_k
-
-                null_shift = None
-                sigma_lik = np.mean(np.stack(sig_grid), axis=0)
-                arm_variances = _ArmVarianceArray(v_alloc + 0.5 * (xi_lo + xi_hi) * z_null, arms_tuple)
-
-    # Step 4: Dimension-adaptive posterior sampling
-    n_prop = int(n_proposals) if n_proposals is not None else max(n_draws * 400, 100_000)
-    ess_gate = max(100.0, 0.02 * float(n_prop))
-    use_sir = sampler == "sir" or (sampler == "auto" and d_dim <= 3)
-    fallback_triggered = False
-
-    log_z_slab: float | None = None
-    if use_sir:
-        post_mu, pri_mu_pool, sir_ess, log_z_slab = _sir_posterior_nd(
-            rng,
-            prior_draw=_prior_draw,
-            prior_logpdf=_prior_logpdf,
-            is_flat_prior=is_flat_prior,
-            mu_lik=mu_hat,
-            sigma_lik=sigma_lik,
-            a_ineq=a_ineq,
-            b_ineq=b_ineq,
-            n_draws=n_draws,
-            n_prop=n_prop,
-            lik_logpdf=lik_logpdf_override,
-            return_log_evidence=True,
-        )
-        if sampler == "auto" and (post_mu.shape[0] < n_draws or sir_ess < ess_gate):
-            fallback_triggered = True
-            use_sir = False
-        elif sampler == "sir" and post_mu.shape[0] < n_draws:
-            raise ValueError(
-                "The prior and the likelihood put no mass inside tau_clip; widen tau_clip or prior_scale"
-            )
-        else:
-            compute_rhat, _ = _get_rhat_ess()
-            rhats_sir = []
-            for j_idx in range(d_dim):
-                col = post_mu[:, j_idx]
-                if n_draws >= 8 and n_draws % 2 == 0:
-                    rhats_sir.append(float(compute_rhat(col.reshape(2, -1))))
-                else:
-                    rhats_sir.append(1.0)
-            diag = SamplerDiagnostics(
-                method="sir",
-                ess=float(sir_ess),
-                r_hat=float(max(rhats_sir)),
-                ess_per_param=tuple(float(sir_ess) for _ in range(d_dim)),
-                r_hat_per_param=tuple(rhats_sir),
-                n_proposals=n_prop,
-                fallback_triggered=False,
-            )
-
-    if not use_sir:
-        post_mu, pri_mu_pool, ess_per_param, rhat_per_param, n_evals, slice_info = _slice_posterior_nd(
-            rng,
-            prior_draw=_prior_draw,
-            prior_logpdf=_prior_logpdf,
-            mu_lik=mu_hat,
-            sigma_lik=sigma_lik,
-            a_ineq=a_ineq,
-            b_ineq=b_ineq,
-            n_draws=n_draws,
-            num_chains=num_chains,
-            num_burnin=num_burnin,
-            thin=thin,
-            lik_logpdf=lik_logpdf_override,
-            auto_continue=bool(auto_continue),
-            target_rhat=target_rhat,
-            target_ess=target_ess,
-            max_iter_multiplier=max_iter_multiplier,
-            return_info=True,
-        )
-        diag = SamplerDiagnostics(
-            method="slice",
-            ess=float(min(ess_per_param)),
-            r_hat=float(max(rhat_per_param)),
-            ess_per_param=ess_per_param,
-            r_hat_per_param=rhat_per_param,
-            n_proposals=n_evals,
-            fallback_triggered=fallback_triggered,
-            n_iterations=int(slice_info["n_iterations"]),
-            converged=slice_info["converged"],
-        )
-
-    spike_weight: float | None = None
-    if spike_mode:
-        if log_z_slab is None:
-            _, _, _, log_z_slab = _sir_posterior_nd(
-                rng,
-                prior_draw=_prior_draw,
-                prior_logpdf=_prior_logpdf,
-                mu_lik=mu_hat,
-                sigma_lik=sigma_lik,
-                a_ineq=a_ineq,
-                b_ineq=b_ineq,
-                n_draws=1,
-                n_prop=n_prop,
-                lik_logpdf=lik_logpdf_override,
-                return_log_evidence=True,
-            )
-        post_mu, spike_weight = _spike_slab_mix(
-            rng, post_mu, float(log_z_slab), mu_hat, sigma_lik, float(spike_prob), lik_logpdf_override
-        )
-
-    tau_increment_draws = post_mu @ t_tree.T
-
-    # Step 5: Project spanning-tree edge increments and synthesize all contrast trajectories
-    tree_edge_trajs: list[np.ndarray] = []
-    t_post_set: set[int] = set()
-    for e_idx, edge_pair in enumerate(tree_edges):
-        orig_pair, fit_e, _ = undir_to_oriented[frozenset(edge_pair)]
-        sign_e = 1.0 if orig_pair == edge_pair else -1.0
-        cohorts_e, ever_e, _ = _infer_panel_masks_from_result(
-            fit_e,
-            _get_pair_arg(cohorts, orig_pair),
-            _get_pair_arg(ever, orig_pair),
-            _get_pair_arg(att_w, orig_pair),
-        )
-        inc_draws = tau_increment_draws[:, e_idx]
-        fit_e_oriented = (
-            replace(
-                fit_e,
-                mode_tau_draws=tuple(
-                    -np.asarray(m, dtype=np.float64) for m in fit_e.mode_tau_draws
-                ),
-            )
-            if sign_e < 0.0
-            else fit_e
-        )
-        traj_e = _project_cohort_damped_trajectory(
-            inc_draws, fit_e_oriented, ever_e, cohorts_e, resolved_tau_clip, catt_floor
-        )
-        tree_edge_trajs.append(traj_e)
-        t_post_set.add(int(traj_e.shape[1]))
-
-    if len(t_post_set) != 1:
-        raise ValueError(f"Spanning-tree fits have inconsistent T_post lengths: {sorted(t_post_set)}")
-    (t_post,) = t_post_set
-    h_eff = t_post if horizon is None else int(horizon)
-    if not (1 <= h_eff <= t_post):
-        raise ValueError(f"horizon must lie in [1, {t_post}]; got {horizon!r}")
-
-    # Arm trajectories vs control 0: mu_traj[j] = sum_e M_tree[j - 1, e] * tree_edge_trajs[e]
-    arm_trajs: list[np.ndarray] = [np.zeros((n_draws, t_post), dtype=np.float64)]
-    for j_idx in range(1, n_arms):
-        traj_j = np.zeros((n_draws, t_post), dtype=np.float64)
-        for e_idx in range(d_dim):
-            coeff = float(m_tree[j_idx - 1, e_idx])
-            if coeff != 0.0:
-                traj_j = traj_j + coeff * tree_edge_trajs[e_idx]
-        arm_trajs.append(traj_j)
-
-    arm_mode1: list[np.ndarray] = [np.zeros(n_draws, dtype=np.float64)] + [
-        post_mu[:, j_idx] for j_idx in range(d_dim)
-    ]
-
-    # Populate all canonical pairs (arms[j], arms[l]) for j > l, plus any reverse fitted pairs
-    canonical_pairs: list[tuple[str, str]] = []
-    for l_idx in range(n_arms):
-        for j_idx in range(l_idx + 1, n_arms):
-            canonical_pairs.append((arms_tuple[j_idx], arms_tuple[l_idx]))
-    for pair in fitted_pairs:
-        if pair not in canonical_pairs:
-            canonical_pairs.append(pair)
-
-    contrast_mode1_draws: dict[tuple[str, str], np.ndarray] = {}
-    contrast_trajectory_draws: dict[tuple[str, str], np.ndarray] = {}
-    contrast_cumulative_draws: dict[tuple[str, str], np.ndarray] = {}
-    for t_arm, r_arm in canonical_pairs:
-        j_idx = arm_to_idx[t_arm]
-        l_idx = arm_to_idx[r_arm]
-        m1_draws = arm_mode1[j_idx] - arm_mode1[l_idx]
-        tr_draws = arm_trajs[j_idx] - arm_trajs[l_idx]
-        contrast_mode1_draws[(t_arm, r_arm)] = m1_draws
-        contrast_trajectory_draws[(t_arm, r_arm)] = tr_draws
-        contrast_cumulative_draws[(t_arm, r_arm)] = tr_draws[:, :h_eff].sum(axis=1)
-
-    # Own vs implied trajectory additivity diagnostic on redundant fitted contrasts
-    trajectory_additivity_gaps: dict[tuple[str, str], float] = {}
-    for red_pair in redundant_pairs:
-        fit_r = results_map[red_pair]
-        cohorts_r, ever_r, _ = _infer_panel_masks_from_result(
-            fit_r,
-            _get_pair_arg(cohorts, red_pair),
-            _get_pair_arg(ever, red_pair),
-            _get_pair_arg(att_w, red_pair),
-        )
-        implied_m1 = contrast_mode1_draws[red_pair]
-        own_traj = _project_cohort_damped_trajectory(
-            implied_m1, fit_r, ever_r, cohorts_r, resolved_tau_clip, catt_floor
-        )
-        implied_traj = contrast_trajectory_draws[red_pair]
-        min_t = min(own_traj.shape[1], implied_traj.shape[1])
-        gap = float(np.max(np.abs(own_traj[:, :min_t] - implied_traj[:, :min_t])))
-        trajectory_additivity_gaps[red_pair] = gap
-
-    own_vs_implied_max_gap = float(
-        max(trajectory_additivity_gaps.values(), default=0.0)
-    )
-    # Cycle additivity max gap across all triples (l < k < j) of reconciled trajectories
-    cycle_traj_max_gap = 0.0
-    for l_idx in range(n_arms):
-        for k_idx in range(l_idx + 1, n_arms):
-            for j_idx in range(k_idx + 1, n_arms):
-                tr_jl = contrast_trajectory_draws[(arms_tuple[j_idx], arms_tuple[l_idx])]
-                tr_jk = contrast_trajectory_draws[(arms_tuple[j_idx], arms_tuple[k_idx])]
-                tr_kl = contrast_trajectory_draws[(arms_tuple[k_idx], arms_tuple[l_idx])]
-                cycle_traj_max_gap = max(
-                    cycle_traj_max_gap,
-                    float(np.max(np.abs(tr_jl - (tr_jk + tr_kl)))),
-                )
-
-    pri_mu_out: np.ndarray | None = None
-    pri_inc_out: np.ndarray | None = None
-    pri_m1_out: dict[tuple[str, str], np.ndarray] | None = None
-    pri_traj_out: dict[tuple[str, str], np.ndarray] | None = None
-    if return_prior_draws and pri_mu_pool.shape[0] > 0:
-        sel = rng.choice(
-            pri_mu_pool.shape[0],
-            size=n_draws,
-            replace=pri_mu_pool.shape[0] < n_draws,
-        )
-        pri_mu_out = pri_mu_pool[sel]
-        if spike_mode:
-            pri_mu_out = np.array(pri_mu_out, dtype=np.float64, copy=True)
-            pri_mu_out[rng.random(n_draws) < float(spike_prob)] = 0.0
-        pri_inc_out = pri_mu_out @ t_tree.T
-        pri_edge_trajs: list[np.ndarray] = []
-        for e_idx, edge_pair in enumerate(tree_edges):
-            orig_pair, fit_e, _ = undir_to_oriented[frozenset(edge_pair)]
-            sign_e = 1.0 if orig_pair == edge_pair else -1.0
-            cohorts_e, ever_e, _ = _infer_panel_masks_from_result(
-                fit_e,
-                _get_pair_arg(cohorts, orig_pair),
-                _get_pair_arg(ever, orig_pair),
-                _get_pair_arg(att_w, orig_pair),
-            )
-            fit_e_oriented = (
-                replace(
-                    fit_e,
-                    mode_tau_draws=tuple(
-                        -np.asarray(m, dtype=np.float64) for m in fit_e.mode_tau_draws
-                    ),
-                )
-                if sign_e < 0.0
-                else fit_e
-            )
-            p_traj_e = _project_cohort_damped_trajectory(
-                pri_inc_out[:, e_idx],
-                fit_e_oriented,
-                ever_e,
-                cohorts_e,
-                resolved_tau_clip,
-                catt_floor,
-            )
-            pri_edge_trajs.append(p_traj_e)
-        pri_arm_trajs: list[np.ndarray] = [np.zeros((n_draws, t_post), dtype=np.float64)]
-        for j_idx in range(1, n_arms):
-            p_tr_j = np.zeros((n_draws, t_post), dtype=np.float64)
-            for e_idx in range(d_dim):
-                coeff = float(m_tree[j_idx - 1, e_idx])
-                if coeff != 0.0:
-                    p_tr_j = p_tr_j + coeff * pri_edge_trajs[e_idx]
-            pri_arm_trajs.append(p_tr_j)
-        pri_arm_m1 = [np.zeros(n_draws, dtype=np.float64)] + [
-            pri_mu_out[:, j_idx] for j_idx in range(d_dim)
-        ]
-        pri_m1_out = {}
-        pri_traj_out = {}
-        for t_arm, r_arm in canonical_pairs:
-            j_idx = arm_to_idx[t_arm]
-            l_idx = arm_to_idx[r_arm]
-            pri_m1_out[(t_arm, r_arm)] = pri_arm_m1[j_idx] - pri_arm_m1[l_idx]
-            pri_traj_out[(t_arm, r_arm)] = pri_arm_trajs[j_idx] - pri_arm_trajs[l_idx]
-
-    return MultiArmReconciliationResult(
-        arms=arms_tuple,
-        topology=topology_requested,
-        tree_edges=tree_edges,
-        fitted_pairs=fitted_pairs,
-        redundant_pairs=redundant_pairs,
-        tau_mu_draws=post_mu,
-        tau_increment_draws=tau_increment_draws,
-        contrast_mode1_draws=contrast_mode1_draws,
-        contrast_trajectory_draws=contrast_trajectory_draws,
-        contrast_catt_draws=dict(contrast_trajectory_draws),
-        contrast_cumulative_draws=contrast_cumulative_draws,
-        mu_hat=mu_hat,
-        sigma_lik=sigma_lik,
-        arm_variances=arm_variances,
-        nnls_residual=nnls_residual,
-        is_bipartite=is_bipartite,
-        cycle_discrepancy_ratio=cycle_discrepancy_ratio,
-        trajectory_additivity_max_gap=cycle_traj_max_gap,
-        sampler_diagnostics=diag,
-        trajectory_additivity_gaps=trajectory_additivity_gaps,
-        prior_mode=prior_mode_requested,
-        prior_scale=scale_used,
-        horizon=h_eff,
-        own_vs_implied_trajectory_max_gap=own_vs_implied_max_gap,
-        prior_mu_draws=pri_mu_out,
-        prior_increment_draws=pri_inc_out,
-        prior_contrast_mode1_draws=pri_m1_out,
-        prior_contrast_trajectory_draws=pri_traj_out,
-        legacy_3arm_result=None,
-        bipartite_policy=bipartite_policy if (is_bipartite and arm_variance_source == "backsolve") else None,
-        null_shift_interval=null_interval,
-        null_shift=null_shift,
-        spike_posterior_prob=spike_weight,
-        projection=projection,
-        projection_weights=projection_weights,
-        flagged_pairs=flagged_pairs,
-        arm_variance_source=arm_variance_source,
-    )
+    return core["by_outcome"]["_single"]

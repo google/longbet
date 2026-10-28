@@ -103,14 +103,12 @@ from longbet._rank_k import (
 )
 from longbet._rank_k_multi import (
     CrossOutcomeCorrelationResult,
-    ImanConoverResult,
     MultiArmMultiOutcomeReconciliationResult,
     Nested3ArmMultiReconciliationResult,
     RankKConvergenceCheck,
     check_rank_k_convergence,
     estimate_cross_outcome_correlation,
     ge_revenue_draws,
-    iman_conover_couple,
     paid_winsor_cap,
     reconcile_multi_arm_multi_outcome_draws,
     reconcile_nested_3arm_multi_draws,
@@ -178,7 +176,7 @@ from longbet._stability import (
     wearout_ancova,
 )
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 
 def build_causal_timesfm_features(*args, **kwargs):  # pragma: no cover - thin deprecated alias
@@ -214,7 +212,6 @@ __all__ = [
     "EncouragementDesignResult",
     "EncouragementPrediction",
     "ExposureBasisSpec",
-    "ImanConoverResult",
     "IntensityConditionalPrediction",
     "IntensityEncouragementPrediction",
     "IntensityReference",
@@ -282,7 +279,6 @@ __all__ = [
     "ge_revenue_draws",
     "get_att",
     "get_catt",
-    "iman_conover_couple",
     "intensity_reference",
     "joint_prob",
     "lag_dose_matrix",

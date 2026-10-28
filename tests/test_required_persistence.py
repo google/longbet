@@ -828,7 +828,7 @@ def fitted_stag():
 
 
 def test_integration_from_the_golden_fixture(fitted_stag) -> None:
-    rec = M.reconcile_nested_3arm_draws(fitted_stag, fitted_stag, fitted_stag, prior_scale=0.3, n_proposals=20000)
+    rec = M.reconcile_nested_3arm_draws(fitted_stag, fitted_stag, fitted_stag, prior_scale=0.3)
     n_obs = rec.trt_catt_ac.shape[1]
     survival = P.weibull_survival_weights(36, n_obs, median_periods=24.0)
     decay = P.extrapolate_rank_k_decay(rec, horizon=36, rho=0.9, rho_sd=None, pulse_decay_tau=3.0, survival=survival)

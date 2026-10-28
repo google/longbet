@@ -76,7 +76,7 @@ def sens(res_stag, res_bal, tiers):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RankKConfigWarning)
         return P.evaluate_prior_sensitivity(
-            res_stag, res_bal, res_stag, tiers=tiers, rho=0.85, extrap_horizon=12, n_proposals=N_PROPOSALS, seed=2026
+            res_stag, res_bal, res_stag, tiers=tiers, rho=0.85, extrap_horizon=12, seed=2026
         )
 
 
@@ -130,19 +130,19 @@ def test_public_names_are_exported_from_the_package() -> None:
 
 
 def test_ytlr_prior_tiers_match_the_specification(tiers) -> None:
-    assert [(t.name, t.prior_mode, t.prior_scale) for t in tiers] == [
-        ("Out-of-sample Half-Normal", "bundle_halfnormal", 0.3),
-        ("In-sample SE Half-Normal", "bundle_halfnormal", "in_sample"),
-        ("Half-Student-t", "bundle_halfstudentt", 0.3),
-        ("Gamma spike", "bundle_gamma_spike", 0.3),
+    assert [(t.name, t.prior_scale, t.monotone, t.family) for t in tiers] == [
+        ("Hierarchical Half-t3 (default)", None, True, "halft3"),
+        ("Calibrated Half-Normal (0.5x)", 0.15, True, "halfnormal"),
+        ("Calibrated Half-Normal (1.0x)", 0.3, True, "halfnormal"),
+        ("Calibrated Half-Normal (2.0x)", 0.6, True, "halfnormal"),
     ]
-    assert tiers[1].is_in_sample and not tiers[0].is_in_sample
+    assert tiers[0].is_hierarchical and not tiers[1].is_hierarchical
     with pytest.raises(ValueError):
         P.ytlr_prior_tiers(0.0)
     with pytest.raises(ValueError):
-        P.PriorTier("x", "independent_halfnormal", 1.0)
+        P.PriorTier("x", prior_scale="in_sample")
     with pytest.raises(ValueError):
-        P.PriorTier("x", "bundle_halfnormal", "posterior")
+        P.PriorTier("x", prior_scale=0.0)
 
 
 def test_standardized_families_match_scipy(tiers) -> None:
@@ -150,29 +150,20 @@ def test_standardized_families_match_scipy(tiers) -> None:
     assert list(df["tier"]) == [t.name for t in tiers]
     assert not df.drop(columns=["scale_value"]).isna().any().any()
     hn = stats.halfnorm(scale=1.0)
-    gm = stats.gamma(a=0.40, scale=1.60)
-    row_hn = df.iloc[0]
-    row_in = df.iloc[1]
-    row_t = df.iloc[2]
-    row_g = df.iloc[3]
+    row_ht3 = df.iloc[0]
+    row_hn = df.iloc[2]
     for q, col in ((0.3, "P30"), (0.5, "P50"), (0.7, "P70")):
         np.testing.assert_allclose(row_hn[col], hn.ppf(q), rtol=1e-12)
-        np.testing.assert_allclose(row_in[col], hn.ppf(q), rtol=1e-12)
-        np.testing.assert_allclose(row_t[col], 0.5 * stats.t.ppf(0.5 * (1 + q), df=2.5), rtol=1e-12)
-        np.testing.assert_allclose(row_g[col], gm.ppf(q), rtol=1e-12)
+        np.testing.assert_allclose(row_ht3[col], stats.t.ppf(0.5 * (1 + q), df=3.0), rtol=1e-12)
     np.testing.assert_allclose(row_hn["Mean"], hn.mean(), rtol=1e-12)
     np.testing.assert_allclose(row_hn["SD"], hn.std(), rtol=1e-12)
     np.testing.assert_allclose(row_hn["Var"], hn.var(), rtol=1e-12)
-    np.testing.assert_allclose(row_g["Mean"], gm.mean(), rtol=1e-12)
-    np.testing.assert_allclose(row_g["SD"], gm.std(), rtol=1e-12)
     np.testing.assert_allclose(row_hn["pr_below_0.25_scale"], hn.cdf(0.25), rtol=1e-12)
-    np.testing.assert_allclose(row_g["pr_below_0.5_scale"], gm.cdf(0.5), rtol=1e-12)
-    np.testing.assert_allclose(row_t["pr_below_0.5_scale"], 2 * stats.t.cdf(0.5 / 0.5, df=2.5) - 1, rtol=1e-12)
-    # Half-t moments: closed forms against a long Monte Carlo sample (mean only; the SD has a heavy tail).
-    mc = np.abs(np.random.default_rng(0).standard_t(2.5, size=400_000)) * 0.5
-    np.testing.assert_allclose(row_t["Mean"], mc.mean(), rtol=0.02)
-    assert row_t["Var"] == pytest.approx(0.25 * 2.5 / 0.5 - row_t["Mean"] ** 2)
-    assert row_in["scale_unit"] == "in-sample posterior SD" and np.isnan(row_in["scale_value"])
+    np.testing.assert_allclose(row_ht3["pr_below_0.5_scale"], 2 * stats.t.cdf(0.5, df=3.0) - 1, rtol=1e-12)
+    mc = np.abs(np.random.default_rng(0).standard_t(3.0, size=400_000))
+    np.testing.assert_allclose(row_ht3["Mean"], mc.mean(), rtol=0.02)
+    assert row_ht3["Var"] == pytest.approx(3.0 / (3.0 - 2.0) - row_ht3["Mean"] ** 2)
+    assert row_ht3["scale_unit"] == "stage1_top_sd" and np.isnan(row_ht3["scale_value"])
     assert row_hn["scale_unit"] == "sigma_hist" and row_hn["scale_value"] == 0.3
     with pytest.raises(ValueError, match="unique"):
         P.standardized_prior_family_table([tiers[0], tiers[0]])
@@ -289,7 +280,7 @@ def test_assert_nested_additivity(synthetic_arms) -> None:
 
 
 def test_nested_3arm_trajectories_requires_prior_draws(sens) -> None:
-    rec = sens.draws_by_tier["Out-of-sample Half-Normal"]
+    rec = sens.draws_by_tier["Calibrated Half-Normal (1.0x)"]
     prior, post = P.nested_3arm_trajectories(rec)
     assert list(prior) == list(post) == ["BC", "AB", "AC"]
     assert prior["AC"].shape == post["AC"].shape == rec.trt_catt_ac.shape
@@ -298,12 +289,6 @@ def test_nested_3arm_trajectories_requires_prior_draws(sens) -> None:
     df = P.prior_vs_posterior_summary(prior, post, ref_total=100.0)
     assert len(df) == 3 and not df["post_P50"].isna().any()
     assert df.loc[2, "post_Mean"] == pytest.approx(df.loc[0, "post_Mean"] + df.loc[1, "post_Mean"], abs=1e-8)
-    stripped = M.Nested3ArmReconciliationResult(
-        trt_catt_bc=rec.trt_catt_bc, trt_catt_ab=rec.trt_catt_ab, trt_catt_ac=rec.trt_catt_ac,
-        post_att_bc=rec.post_att_bc, post_att_ab=rec.post_att_ab, post_att_ac=rec.post_att_ac,
-    )
-    with pytest.raises(ValueError, match="return_prior_draws"):
-        P.nested_3arm_trajectories(stripped)
 
 
 # ---- Prior sensitivity ---------------------------------------------------------------------------
@@ -316,11 +301,10 @@ def test_evaluate_prior_sensitivity_tables(sens, tiers) -> None:
     comp = sens.posterior_comparison_df
     assert len(comp) == len(names) * 3 * 2
     assert set(comp["horizon"]) == {"observed", "extrapolated"} and set(comp["contrast"]) == {"BC", "AB", "AC"}
-    assert not comp[["P30", "P50", "P70", "Mean", "SD", "prior_scale", "sir_ess"]].isna().any().any()
+    assert not comp[["P30", "P50", "P70", "Mean", "SD", "prior_scale", "ess", "r_hat"]].isna().any().any()
     assert (comp["P30"] <= comp["P50"]).all() and (comp["P50"] <= comp["P70"]).all()
     for name in names:
         rec = sens.draws_by_tier[name]
-        assert rec.prior_catt_ac is not None
         obs = sens.observed_cumulative_by_tier[name]
         ext = sens.extrapolated_cumulative_by_tier[name]
         np.testing.assert_allclose(obs["AC"], obs["BC"] + obs["AB"], atol=1e-10)
@@ -330,9 +314,9 @@ def test_evaluate_prior_sensitivity_tables(sens, tiers) -> None:
         np.testing.assert_allclose(ext["AC"], obs["AC"] + tail, atol=1e-10)
         row = comp.loc[(comp["tier"] == name) & (comp["contrast"] == "AC") & (comp["horizon"] == "extrapolated")].iloc[0]
         assert row["P50"] == pytest.approx(np.quantile(ext["AC"], 0.5)) and row["horizon_periods"] == 12
-    in_sample = sens.standardized_families_df.set_index("tier").loc["In-sample SE Half-Normal"]
-    assert in_sample["scale_value"] == pytest.approx(sens.draws_by_tier["In-sample SE Half-Normal"].prior_scale)
-    assert sens.standardized_families_df.set_index("tier").loc["Gamma spike", "scale_value"] == 0.3
+    hier = sens.standardized_families_df.set_index("tier").loc["Hierarchical Half-t3 (default)"]
+    assert hier["scale_value"] == pytest.approx(sens.draws_by_tier["Hierarchical Half-t3 (default)"].multi_arm_result.s0_scale)
+    assert sens.standardized_families_df.set_index("tier").loc["Calibrated Half-Normal (1.0x)", "scale_value"] == 0.3
 
 
 def test_roi_break_even_arithmetic(sens, tiers) -> None:
@@ -354,21 +338,12 @@ def test_roi_break_even_arithmetic(sens, tiers) -> None:
         P.roi_break_even_table({"AC": np.ones(10)}, cost_grid=(1.0,), alpha_grid=(1.5,), horizon_periods=1)
 
 
-def test_evaluate_prior_sensitivity_silences_only_the_in_sample_warning(res_stag, res_bal) -> None:
-    only_in_sample = (P.PriorTier("In-sample", "bundle_halfnormal", "in_sample"),)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        P.evaluate_prior_sensitivity(res_stag, res_bal, res_stag, tiers=only_in_sample, n_proposals=N_PROPOSALS)
-    assert not any("in_sample" in str(w.message) for w in caught)
-    # The filter must not leak: a direct call still warns.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        M.reconcile_nested_3arm_draws(res_stag, res_bal, res_stag, prior_scale="in_sample", n_proposals=5000)
-    assert sum("in_sample" in str(w.message) for w in caught) == 1
+def test_evaluate_prior_sensitivity_input_validation(res_stag, res_bal) -> None:
+    one_tier = (P.PriorTier("Default", prior_scale=None),)
     with pytest.raises(ValueError, match="extrap_horizon"):
-        P.evaluate_prior_sensitivity(res_stag, res_bal, res_stag, tiers=only_in_sample, extrap_horizon=3, n_proposals=5000)
+        P.evaluate_prior_sensitivity(res_stag, res_bal, res_stag, tiers=one_tier, extrap_horizon=3)
     with pytest.raises(ValueError, match="reconcile_kwargs"):
-        P.evaluate_prior_sensitivity(res_stag, res_bal, res_stag, tiers=only_in_sample, reconcile_kwargs={"seed": 1})
+        P.evaluate_prior_sensitivity(res_stag, res_bal, res_stag, tiers=one_tier, reconcile_kwargs={"seed": 1})
 
 
 # ---- Decay extrapolation -------------------------------------------------------------------------
@@ -471,14 +446,14 @@ def test_plot_prior_calibration_variants() -> None:
     assert isinstance(axes, np.ndarray) and axes.shape == (2,) and all(_is_axes(a) for a in axes)
     labels = [t.get_text() for t in axes[0].get_legend().get_texts()]
     assert any("Historical benchmark" in s for s in labels) and any("Implied single-component" in s for s in labels)
-    single = P.plot_rank_k_prior_calibration(0.3, prior_mode="bundle_gamma_spike", show_rayleigh_comparison=False)
+    single = P.plot_rank_k_prior_calibration(0.3, prior_family="gamma_spike", show_rayleigh_comparison=False)
     assert _is_axes(single)
-    for mode in P.BUNDLE_PRIOR_MODES:
-        assert _is_axes(P.plot_rank_k_prior_calibration(1.0, prior_mode=mode, show_rayleigh_comparison=False, hist_mean=0.5))
+    for fam in ("halfnormal", "halft3", "halfstudentt", "gamma_spike"):
+        assert _is_axes(P.plot_rank_k_prior_calibration(1.0, prior_family=fam, show_rayleigh_comparison=False, hist_mean=0.5))
     with pytest.raises(ValueError, match="hist_mean"):
         P.plot_rank_k_prior_calibration(0.3, hist_se=0.1)
-    with pytest.raises(ValueError, match="prior_mode"):
-        P.plot_rank_k_prior_calibration(0.3, prior_mode="independent_halfnormal")
+    with pytest.raises(ValueError, match="prior_family"):
+        P.plot_rank_k_prior_calibration(0.3, prior_family="normal")
     # Closed-form density of the sum of two iid half-normals integrates to one.
     grid = np.linspace(0.0, 40.0, 200_001)
     assert np.trapezoid(P._two_halfnormal_sum_pdf(grid, 2.0), grid) == pytest.approx(1.0, abs=1e-6)
@@ -499,7 +474,7 @@ def test_plot_prior_sensitivity(sens) -> None:
 
 
 def test_plot_decay_extrapolation(sens) -> None:
-    prior, post = P.nested_3arm_trajectories(sens.draws_by_tier["Half-Student-t"])
+    prior, post = P.nested_3arm_trajectories(sens.draws_by_tier["Hierarchical Half-t3 (default)"])
     d_post = P.extrapolate_rank_k_decay(post, horizon=36, num_mc_per_draw=4)
     d_prior = P.extrapolate_rank_k_decay(prior, horizon=36, num_mc_per_draw=4)
     axes = P.plot_rank_k_decay_extrapolation(d_post, prior_decay_result=d_prior, unit="$", title="decay")

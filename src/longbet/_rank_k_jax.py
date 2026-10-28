@@ -1737,6 +1737,7 @@ def _scan_sweeps(
         out = {
             "tau": st.tau_intercept + st.nu_fit,
             "mu": st.mu_fit + st.intercept,
+            "resid": st.resid,
             "theta_f": st.theta_f,
             "sigma": jnp.sqrt(st.sigma2),
             "s_zeta": jnp.sqrt(st.s_zeta2),
@@ -2015,6 +2016,10 @@ def sample_rank_k_mode_jax(
 
         C, S, N = tau_chains.shape
         tau_flat = tau_chains.reshape(C * S, N).T  # (N, M_total)
+        resid_chains = np.asarray(trace["resid"], dtype=np.float64) * y_scale  # (C, S, N)
+        resid_flat = resid_chains.reshape(C * S, N)
+        resid_mean = resid_flat.mean(axis=0)
+        resid_var = resid_flat.var(axis=0, ddof=1) if C * S > 1 else np.zeros(N, dtype=np.float64)
         return {
             "tau_draws": tau_flat,
             "tau_chains": tau_chains,
@@ -2026,6 +2031,8 @@ def sample_rank_k_mode_jax(
             "tau_intercept_draws": tau_int_chains.reshape(-1),
             "s_eta2_draws": s_eta2_chains.reshape(-1),
             "sigma_nu_total_draws": sigma_nu_chains.reshape(-1),
+            "resid_mean": resid_mean,
+            "resid_var": resid_var,
             "y_scale": float(y_scale),
         }
 
@@ -2100,6 +2107,10 @@ def sample_rank_k_mode_jax(
             arr = arr.reshape(C, M * S)
         return arr.reshape(-1)
 
+    resid_flat = np.asarray(trace_flat["resid"], dtype=np.float64).reshape(C * M * S, N) * y_scale
+    resid_mean = resid_flat.mean(axis=0)
+    resid_var = resid_flat.var(axis=0, ddof=1) if C * M * S > 1 else np.zeros(N, dtype=np.float64)
+
     return {
         "tau_draws": tau_flat,
         "tau_chains": tau_chains,
@@ -2112,5 +2123,7 @@ def sample_rank_k_mode_jax(
         "tau_intercept_draws": _chain_major_scalar("tau_intercept", y_scale),
         "s_eta2_draws": _chain_major_scalar("s_eta2", y_scale**2),
         "sigma_nu_total_draws": np.sqrt(_chain_major_scalar("sigma_nu_leaf2", 1.0)) * y_scale * math.sqrt(max(int(num_trees_nu), 1)),
+        "resid_mean": resid_mean,
+        "resid_var": resid_var,
         "y_scale": float(y_scale),
     }

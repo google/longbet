@@ -24,8 +24,8 @@ pure numpy / pandas data layer and thin ``plot_*`` functions that import
 matplotlib only when called:
 
 * :func:`sample_rank_k_prior_draws` draws the mode-1 ATT prior of a two-arm fit
-  and projects it onto post-adoption trajectories with the same zero-sum
-  higher-mode damping as the posterior (:func:`_project_cohort_damped_trajectory`).
+  and projects it onto post-adoption trajectories with the fit's higher-mode
+  dynamics.
 * :func:`prior_vs_posterior_summary` tabulates prior and posterior quantiles of
   the horizon statistic (the sum of the trajectory over its periods), the lift
   against a control baseline total, the interval-width change and an overlap flag;
@@ -72,19 +72,16 @@ from scipy import stats as sp_stats
 
 from longbet._rank_k import (
     Nested3ArmReconciliationResult,
-    RankKConfigWarning,
     RankKLongBetResult,
     _infer_panel_masks_from_result,
-    _project_cohort_damped_trajectory,
+    orthonormal_exposure_basis,
     reconcile_nested_3arm_draws,
 )
 from longbet._rank_k_multi import MultiArmMultiOutcomeReconciliationResult
 from longbet._rank_k_multi_arm import MultiArmReconciliationResult
 
-#: Mode-1 ATT prior families accepted by :func:`sample_rank_k_prior_draws`.
-PRIOR_FAMILIES = ("normal", "halfnormal", "halfstudentt", "gamma_spike")
-#: Bundle prior modes of :func:`reconcile_nested_3arm_draws` accepted in a :class:`PriorTier`.
-BUNDLE_PRIOR_MODES = ("bundle_halfnormal", "bundle_halfstudentt", "bundle_gamma_spike")
+#: Mode-1 ATT prior families accepted by :func:`sample_rank_k_prior_draws` and :func:`plot_rank_k_prior_calibration`.
+PRIOR_FAMILIES = ("normal", "halfnormal", "halft3", "halfstudentt", "gamma_spike")
 #: Contrast labels of a nested three-arm design, in the order the reconciliation returns them.
 NESTED_CONTRASTS = ("BC", "AB", "AC")
 #: Default central quantiles of every summary table (P30 / P50 / P70).
@@ -116,14 +113,10 @@ _GRID_BLOCK_ELEMENTS = 4_000_000
 # A placebo decision cell is immune when Pr(ROI > 0) under the placebo draws is below this share.
 _PLACEBO_DECISION_THRESHOLD = 0.5
 
-_FAMILY_OF_MODE = {
-    "bundle_halfnormal": "halfnormal",
-    "bundle_halfstudentt": "halfstudentt",
-    "bundle_gamma_spike": "gamma_spike",
-}
 _FAMILY_DISPLAY = {
     "normal": "Normal",
     "halfnormal": "Half-Normal",
+    "halft3": "Half-Student-t (df 3, scale s)",
     "halfstudentt": "Half-Student-t (df 2.5, scale 0.5 s)",
     "gamma_spike": "Gamma spike (shape 0.40, scale 1.60 s)",
 }
@@ -278,9 +271,10 @@ class _HalfStudentT:
 
 
 def _prior_family_distribution(family: str, scale: float, mean: float = 0.0) -> Any:
-    """Frozen distribution of a mode-1 ATT prior family, parameterized exactly as the sampler does.
+    """Frozen distribution of a mode-1 ATT prior family.
 
-    ``"halfnormal"`` is ``N^+(0, scale^2)``, ``"halfstudentt"`` is ``T^+_{2.5}(0, (0.5 scale)^2)``,
+    ``"halfnormal"`` is ``N^+(0, scale^2)``, ``"halft3"`` is ``T^+_3(0, scale^2)``,
+    ``"halfstudentt"`` is ``T^+_{2.5}(0, (0.5 scale)^2)``,
     ``"gamma_spike"`` is ``Gamma(0.40, 1.60 scale)`` and ``"normal"`` is ``N(mean, scale^2)``
     (truncation to ``tau_clip`` is applied by the caller). The returned object exposes
     ``pdf``, ``cdf``, ``ppf``, ``mean()`` and ``std()``.
@@ -290,6 +284,8 @@ def _prior_family_distribution(family: str, scale: float, mean: float = 0.0) -> 
     scale = _positive_scalar(scale, "prior_scale")
     if family == "halfnormal":
         return sp_stats.halfnorm(loc=0.0, scale=scale)
+    if family == "halft3":
+        return _HalfStudentT(df=3.0, scale=scale)
     if family == "halfstudentt":
         return _HalfStudentT(df=_HALF_T_DF, scale=_HALF_T_SCALE_FACTOR * scale)
     if family == "gamma_spike":
@@ -300,72 +296,123 @@ def _prior_family_distribution(family: str, scale: float, mean: float = 0.0) -> 
     return sp_stats.norm(loc=mean, scale=scale)
 
 
-def _family_of_prior_mode(prior_mode: str) -> str:
-    """Map a bundle ``prior_mode`` of the reconciliation onto its ATT prior family."""
-    if prior_mode not in BUNDLE_PRIOR_MODES:
-        raise ValueError(f"prior_mode must be one of {BUNDLE_PRIOR_MODES}; got {prior_mode!r}")
-    return _FAMILY_OF_MODE[prior_mode]
-
-
 @dataclass(frozen=True)
 class PriorTier:
     """One prior-sensitivity tier of :func:`evaluate_prior_sensitivity`.
 
     Attributes:
       name: Display name (unique within a tier list).
-      prior_mode: Bundle prior mode passed to :func:`reconcile_nested_3arm_draws`; one of
-        :data:`BUNDLE_PRIOR_MODES`.
-      prior_scale: Positive scale in outcome units, or ``"in_sample"`` to use the fit's own
-        posterior SD (the reconciliation warns about that choice; the sensitivity driver
-        silences the warning for this tier only).
+      prior_scale: Positive calibrated scale in outcome units, or ``None`` for the
+        default hierarchical ``Half-t_3(0, s_0)`` scale prior.
+      monotone: Whether the poset-cone positivity support is enforced (default ``True``).
     """
 
     name: str
-    prior_mode: str
-    prior_scale: float | str
+    prior_scale: float | None = None
+    monotone: bool = True
 
     def __post_init__(self) -> None:
         if not str(self.name):
             raise ValueError("PriorTier.name must be a non-empty string")
-        _family_of_prior_mode(self.prior_mode)
-        if isinstance(self.prior_scale, str):
-            if self.prior_scale != "in_sample":
-                raise ValueError(
-                    f"PriorTier.prior_scale must be a positive number or 'in_sample'; got {self.prior_scale!r}"
-                )
-        else:
-            _positive_scalar(self.prior_scale, "PriorTier.prior_scale")
+        if isinstance(self.prior_scale, (str, bool, np.bool_)):
+            raise ValueError(
+                f"PriorTier.prior_scale must be None or a positive float; got {self.prior_scale!r}"
+            )
+        if self.prior_scale is not None:
+            object.__setattr__(
+                self, "prior_scale", _positive_scalar(self.prior_scale, "PriorTier.prior_scale")
+            )
+        object.__setattr__(self, "monotone", bool(self.monotone))
 
     @property
     def family(self) -> str:
-        """ATT prior family implied by ``prior_mode`` (``"halfnormal"``, ``"halfstudentt"`` or ``"gamma_spike"``)."""
-        return _family_of_prior_mode(self.prior_mode)
+        """Standardized prior family key (``'halft3'``, ``'halfnormal'`` or ``'normal'``)."""
+        if self.prior_scale is None:
+            return "halft3"
+        return "halfnormal" if self.monotone else "normal"
 
     @property
-    def is_in_sample(self) -> bool:
-        """Whether the scale is the data-dependent ``"in_sample"`` posterior SD."""
-        return isinstance(self.prior_scale, str)
+    def is_hierarchical(self) -> bool:
+        """Whether ``prior_scale`` is the hierarchical ``Half-t_3(0, s_0)`` default."""
+        return self.prior_scale is None
 
 
 def ytlr_prior_tiers(sigma_hist: float) -> tuple[PriorTier, ...]:
-    """The four standard bundle prior-sensitivity tiers for a historical benchmark scale ``sigma_hist``.
+    """Standard v0.11 prior-sensitivity tiers around a historical benchmark scale ``sigma_hist``.
 
-    Returns ``("Out-of-sample Half-Normal", "bundle_halfnormal", sigma_hist)``,
-    ``("In-sample SE Half-Normal", "bundle_halfnormal", "in_sample")``,
-    ``("Half-Student-t", "bundle_halfstudentt", sigma_hist)`` and
-    ``("Gamma spike", "bundle_gamma_spike", sigma_hist)``.
+    Compares the default hierarchical ``Half-t_3(0, s_0)`` scale prior against
+    externally calibrated fixed scales ``{0.5 * sigma_hist, 1.0 * sigma_hist, 2.0 * sigma_hist}``
+    on the monotone poset cone.
 
     Args:
-      sigma_hist: Positive out-of-sample calibrated scale of the total bundle effect, in
+      sigma_hist: Positive out-of-sample calibrated scale of the top bundle effect, in
         per-period outcome units.
     """
     scale = _positive_scalar(sigma_hist, "sigma_hist")
     return (
-        PriorTier("Out-of-sample Half-Normal", "bundle_halfnormal", scale),
-        PriorTier("In-sample SE Half-Normal", "bundle_halfnormal", "in_sample"),
-        PriorTier("Half-Student-t", "bundle_halfstudentt", scale),
-        PriorTier("Gamma spike", "bundle_gamma_spike", scale),
+        PriorTier("Hierarchical Half-t3 (default)", prior_scale=None, monotone=True),
+        PriorTier("Calibrated Half-Normal (0.5x)", prior_scale=0.5 * scale, monotone=True),
+        PriorTier("Calibrated Half-Normal (1.0x)", prior_scale=scale, monotone=True),
+        PriorTier("Calibrated Half-Normal (2.0x)", prior_scale=2.0 * scale, monotone=True),
     )
+
+
+def _project_two_arm_prior_trajectory(
+    joint_att: np.ndarray,
+    res: RankKLongBetResult,
+    ever_arr: np.ndarray,
+    cohorts_arr: np.ndarray,
+    tau_clip: tuple[float, float],
+    catt_floor: float | None,
+) -> np.ndarray:
+    """Project mode-1 ATT draws and higher-mode dynamics of a single two-arm fit onto ``(S, T_post)``."""
+    waves = sorted(int(g) for g in res.bases.keys())
+    t0 = min(waves) if waves else 1
+    n_periods = int(res.catt_draws.shape[2])
+    t_post = n_periods - t0
+    res_horizon = getattr(res, "horizon", None)
+    if res_horizon is not None:
+        t_post = min(t_post, int(res_horizon))
+    n_draws = int(joint_att.shape[0])
+
+    low_clip, high_clip = float(tau_clip[0]), float(tau_clip[1])
+    tau1 = np.clip(joint_att, low_clip, high_clip)
+    if len(res.mode_tau_draws) < 2 or t_post <= 1:
+        traj = np.repeat(tau1[:, None], max(t_post, 1), axis=1)
+        if catt_floor is not None:
+            traj = np.maximum(traj, float(catt_floor))
+        return traj
+
+    trt_dynamic = np.zeros((n_draws, t_post), dtype=np.float64)
+    total_trt = max(float(np.sum(ever_arr)), 1.0)
+    n_avail = int(res.mode_tau_draws[1].shape[1])
+    cols = np.arange(n_draws) % n_avail
+    for g in waves:
+        mask_g = (cohorts_arr == g) & ever_arr
+        if not np.any(mask_g):
+            continue
+        w_g = float(np.sum(mask_g)) / total_trt
+        basis_g = res.bases[g]
+        l_g = min(basis_g.shape[0], t_post - (g - t0))
+        offset = g - t0
+        if l_g <= 0:
+            continue
+        for k_idx in range(1, len(res.mode_tau_draws)):
+            if k_idx >= basis_g.shape[1]:
+                continue
+            psi_k = basis_g[:l_g, k_idx]
+            mode_k = res.mode_tau_draws[k_idx][mask_g]
+            mode_k_trt_mean = mode_k[:, cols].mean(axis=0)
+            trt_dynamic[:, offset : offset + l_g] += w_g * mode_k_trt_mean[:, None] * psi_k[None, :]
+
+    if catt_floor is not None:
+        floor_val = float(catt_floor)
+        avail_room = np.maximum(tau1 - floor_val, 0.0)
+        neg_exc = np.maximum(-trt_dynamic, 0.0).max(axis=1)
+        alpha = np.where(neg_exc > 1e-12, np.minimum(1.0, avail_room / neg_exc), 1.0)
+        traj = tau1[:, None] + alpha[:, None] * trt_dynamic
+        return np.maximum(traj, floor_val)
+    return tau1[:, None] + trt_dynamic
 
 
 # ---- Prior draws of a two-arm fit ----------------------------------------------------------------
@@ -476,8 +523,8 @@ def sample_rank_k_prior_draws(
 
     cohorts_arr, ever_arr, _ = _infer_panel_masks_from_result(res, cohorts, ever, None)
     floor = None if catt_floor is None else float(catt_floor)
-    traj = _project_cohort_damped_trajectory(att, res, ever_arr, cohorts_arr, (low, high), floor)
-    post_traj = _project_cohort_damped_trajectory(posterior_att, res, ever_arr, cohorts_arr, (low, high), floor)
+    traj = _project_two_arm_prior_trajectory(att, res, ever_arr, cohorts_arr, (low, high), floor)
+    post_traj = _project_two_arm_prior_trajectory(posterior_att, res, ever_arr, cohorts_arr, (low, high), floor)
     return RankKPriorDraws(
         att_draws=att,
         traj_draws=np.asarray(traj, dtype=np.float64),
@@ -672,26 +719,114 @@ def assert_nested_additivity(
             raise AssertionError(f"AC != BC + AB draw by draw: max |AC - BC - AB| = {gap:.3e} (atol {atol:.1e})")
 
 
+def _sample_nested_3arm_cone_prior(
+    *,
+    horizon: int,
+    n_modes: int,
+    monotone: bool,
+    prior_scale: float | None,
+    s0_scale: float,
+    n_draws: int,
+    seed: int = 2026,
+) -> dict[str, np.ndarray]:
+    """Sample coherent ``(BC, AB, AC)`` prior trajectories from the v0.11 poset-cone generative prior."""
+    rng = np.random.default_rng(int(seed))
+    h_int = int(horizon)
+    k_eff = min(int(n_modes), h_int)
+    psi = np.asarray(orthonormal_exposure_basis(h_int, k_eff)[:, :k_eff], dtype=np.float64) / math.sqrt(float(h_int))
+    s0 = max(float(s0_scale), 1e-8)
+
+    if prior_scale is None:
+        sigma_draws = np.abs(rng.standard_t(df=3.0, size=n_draws)) * s0
+    else:
+        sigma_draws = np.full(n_draws, float(prior_scale), dtype=np.float64)
+    kappa_draws = np.abs(rng.standard_t(df=3.0, size=n_draws)) * s0
+
+    def _draw_step_trajectories(sig: np.ndarray, kap: np.ndarray) -> np.ndarray:
+        out = np.empty((n_draws, h_int), dtype=np.float64)
+        sd0 = np.sqrt(0.5 * float(h_int)) * sig
+        sdk = np.sqrt(0.5 * float(h_int)) * kap
+        if not monotone:
+            z = rng.standard_normal((n_draws, k_eff))
+            z[:, 0] *= sd0
+            if k_eff > 1:
+                z[:, 1:] *= sdk[:, None]
+            return z @ psi.T
+        filled = np.zeros(n_draws, dtype=bool)
+        while not np.all(filled):
+            todo = np.nonzero(~filled)[0]
+            z = rng.standard_normal((todo.size * 8, k_eff))
+            rep = np.repeat(todo, 8)
+            z[:, 0] *= sd0[rep]
+            if k_eff > 1:
+                z[:, 1:] *= sdk[rep, None]
+            tr = z @ psi.T
+            ok = (z[:, 0] >= 0.0) & np.all(tr >= 0.0, axis=1)
+            ok_reshaped = ok.reshape(todo.size, 8)
+            tr_reshaped = tr.reshape(todo.size, 8, h_int)
+            has_hit = np.any(ok_reshaped, axis=1)
+            first_hit = np.argmax(ok_reshaped, axis=1)
+            for j_idx in np.nonzero(has_hit)[0]:
+                slot = todo[j_idx]
+                out[slot] = tr_reshaped[j_idx, first_hit[j_idx]]
+                filled[slot] = True
+        return out
+
+    bc = _draw_step_trajectories(sigma_draws, kappa_draws)
+    ab = _draw_step_trajectories(sigma_draws, kappa_draws)
+    return {"BC": bc, "AB": ab, "AC": bc + ab}
+
+
 def nested_3arm_trajectories(
     rec: Nested3ArmReconciliationResult,
+    *,
+    prior_scale: float | None = None,
+    n_draws: int | None = None,
+    seed: int = 2026,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """Split a reconciliation result into ``(prior, posterior)`` trajectory dicts keyed by contrast.
+    """Return ``(prior, posterior)`` trajectory dicts keyed by :data:`NESTED_CONTRASTS` (``"BC"``, ``"AB"``, ``"AC"``).
 
-    Both dicts use the keys of :data:`NESTED_CONTRASTS` (``"BC"``, ``"AB"``, ``"AC"``) and
-    feed :func:`prior_vs_posterior_summary` / :func:`plot_rank_k_prior_vs_posterior`
-    directly. Requires the result of ``reconcile_nested_3arm_draws(...,
-    return_prior_draws=True)``.
+    Prior trajectories are sampled coherently from the v0.11 poset-cone generative prior
+    matching ``rec.multi_arm_result`` (or an explicit ``prior_scale`` override when supplied),
+    so ``AC = BC + AB`` holds draw by draw in both prior and posterior.
     """
-    if rec.prior_catt_bc is None or rec.prior_catt_ab is None or rec.prior_catt_ac is None:
-        raise ValueError(
-            "the reconciliation holds no prior draws; rerun reconcile_nested_3arm_draws(..., return_prior_draws=True)"
-        )
-    prior = {"BC": rec.prior_catt_bc, "AB": rec.prior_catt_ab, "AC": rec.prior_catt_ac}
-    post = {"BC": rec.trt_catt_bc, "AB": rec.trt_catt_ab, "AC": rec.trt_catt_ac}
-    return (
-        {k: _as_draw_matrix(v, f"prior_catt_{k.lower()}") for k, v in prior.items()},
-        {k: _as_draw_matrix(v, f"trt_catt_{k.lower()}") for k, v in post.items()},
+    post = {
+        "BC": _as_draw_matrix(rec.trt_catt_bc, "trt_catt_bc"),
+        "AB": _as_draw_matrix(rec.trt_catt_ab, "trt_catt_ab"),
+        "AC": _as_draw_matrix(rec.trt_catt_ac, "trt_catt_ac"),
+    }
+    n_out = int(post["AC"].shape[0]) if n_draws is None else _positive_int(n_draws, "n_draws")
+    if n_out < 2:
+        raise ValueError(f"n_draws must be >= 2; got {n_draws!r}")
+    h_obs = int(post["AC"].shape[1])
+
+    ma = getattr(rec, "multi_arm_result", None)
+    if ma is not None:
+        k_modes = int(ma.n_modes)
+        mono = bool(ma.monotone)
+        ps_eff = ma.prior_scale if prior_scale is None else _positive_scalar(prior_scale, "prior_scale")
+        s0_eff = float(ma.s0_scale)
+    else:
+        if prior_scale is None and rec.prior_scale is None:
+            raise ValueError(
+                "rec holds no multi_arm_result metadata or prior_scale; pass prior_scale=<positive float> "
+                "or pass the result of reconcile_nested_3arm_draws()"
+            )
+        k_modes = min(2, h_obs)
+        mono = True
+        ps_eff = rec.prior_scale if prior_scale is None else _positive_scalar(prior_scale, "prior_scale")
+        s0_eff = float(ps_eff)
+
+    prior = _sample_nested_3arm_cone_prior(
+        horizon=h_obs,
+        n_modes=k_modes,
+        monotone=mono,
+        prior_scale=ps_eff,
+        s0_scale=s0_eff,
+        n_draws=n_out,
+        seed=seed,
     )
+    return prior, post
 
 
 # ---- Decay extrapolation ("LongBet Regime 4") ----------------------------------------------------
@@ -1262,25 +1397,20 @@ def standardized_prior_family_table(
     thresholds: Sequence[float] = (0.25, 0.50),
     realized_scales: Mapping[str, float] | None = None,
 ) -> pd.DataFrame:
-    """Analytic summaries of each tier's prior family in units of its scale.
-
-    Every family is a scale family, so its quantiles, moments and near-zero mass are
-    computed once at unit scale with scipy: in units of ``sigma_hist`` for the numeric
-    tiers and in units of the fit's own posterior SD for an ``"in_sample"`` tier.
+    """Analytic summaries of each tier's standardized prior family in units of its scale.
 
     Args:
       tiers: The tiers to tabulate (unique names).
       quantiles: Probabilities to report (odd length; default P30/P50/P70).
       thresholds: Multiples of the scale whose prior mass ``Pr(tau < c * scale)`` is reported.
-      realized_scales: Optional ``{tier name: scale in outcome units}`` (the reconciliation's
-        realized scale, which resolves ``"in_sample"``) written into ``scale_value``.
+      realized_scales: Optional ``{tier name: scale in outcome units}`` written into ``scale_value``.
 
     Returns:
-      pandas.DataFrame with one row per tier and the columns ``tier``, ``prior_mode``,
-      ``family``, ``scale_unit`` (``"sigma_hist"`` or ``"in-sample posterior SD"``),
+      pandas.DataFrame with one row per tier and the columns ``tier``, ``family_key``,
+      ``family``, ``monotone``, ``scale_unit`` (``"sigma_hist"`` or ``"stage1_top_sd"``),
       ``scale_value`` (outcome units; NaN when unknown), one column per quantile
       (``P30``, ``P50``, ``P70``), ``Mean``, ``SD``, ``Var`` and one
-      ``pr_below_<c>_scale`` column per threshold (for example ``pr_below_0.25_scale``).
+      ``pr_below_<c>_scale`` column per threshold.
     """
     qs = _check_quantiles(quantiles)
     names = [t.name for t in tiers]
@@ -1296,14 +1426,15 @@ def standardized_prior_family_table(
         dist = _prior_family_distribution(tier.family, 1.0)
         row: dict[str, Any] = {
             "tier": tier.name,
-            "prior_mode": tier.prior_mode,
+            "family_key": tier.family,
             "family": _FAMILY_DISPLAY[tier.family],
-            "scale_unit": "in-sample posterior SD" if tier.is_in_sample else "sigma_hist",
+            "monotone": tier.monotone,
+            "scale_unit": "stage1_top_sd" if tier.is_hierarchical else "sigma_hist",
             "scale_value": float("nan"),
         }
         if realized_scales is not None and tier.name in realized_scales:
             row["scale_value"] = float(realized_scales[tier.name])
-        elif not tier.is_in_sample:
+        elif not tier.is_hierarchical and tier.prior_scale is not None:
             row["scale_value"] = float(tier.prior_scale)
         for q in qs:
             row[_quantile_label(q)] = float(dist.ppf(q))
@@ -1329,15 +1460,12 @@ class PriorSensitivityResult:
       alpha_grid: Incrementality shares of the break-even table.
       standardized_families_df: :func:`standardized_prior_family_table` of the tiers.
       posterior_comparison_df: Long table with one row per tier, contrast and horizon:
-        ``tier``, ``prior_mode``, ``prior_scale`` (realized, outcome units), ``sir_ess``,
-        ``contrast`` (``"BC"`` / ``"AB"`` / ``"AC"``), ``horizon`` (``"observed"`` /
-        ``"extrapolated"``), ``horizon_periods``, ``P30``, ``P50``, ``P70``, ``Mean``, ``SD`` of
-        the cumulative effect.
-      roi_break_even_df: One row per tier, contrast, cost and alpha: ``tier``, ``contrast``,
-        ``horizon_periods``, ``cost``, ``alpha``, ``pr_roi_positive``
-        (``Pr(alpha * cumulative_H > cost)`` over the draws) and ``break_even_alpha_50``
-        (``cost / median(cumulative_H)``: the incrementality at which ``Pr(ROI > 0) = 0.5``).
-      draws_by_tier: ``{tier name: Nested3ArmReconciliationResult}`` with prior draws attached.
+        ``tier``, ``family_key``, ``monotone``, ``prior_scale`` (realized, outcome units),
+        ``ess``, ``r_hat``, ``contrast`` (``"BC"`` / ``"AB"`` / ``"AC"``), ``horizon``
+        (``"observed"`` / ``"extrapolated"``), ``horizon_periods``, ``P30``, ``P50``, ``P70``,
+        ``Mean``, ``SD`` of the cumulative effect.
+      roi_break_even_df: One row per tier, contrast, cost and alpha.
+      draws_by_tier: ``{tier name: Nested3ArmReconciliationResult}``.
       observed_cumulative_by_tier: ``{tier name: {contrast: (S,)}}`` sums over the observed window.
       extrapolated_cumulative_by_tier: ``{tier name: {contrast: (S,)}}`` cumulative at ``H``.
     """
@@ -1912,17 +2040,18 @@ def _reconcile_tier(
     res_ac: RankKLongBetResult,
     *,
     seed: int,
-    n_proposals: int | None,
     reconcile_kwargs: Mapping[str, Any],
 ) -> Nested3ArmReconciliationResult:
-    """Run the reconciliation for one tier, silencing only the ``in_sample`` scale warning of that tier."""
-    with warnings.catch_warnings():
-        if tier.is_in_sample:
-            warnings.filterwarnings("ignore", message=r".*prior_scale='in_sample'.*", category=RankKConfigWarning)
-        return reconcile_nested_3arm_draws(
-            res_bc, res_ab, res_ac, prior_mode=tier.prior_mode, prior_scale=tier.prior_scale, seed=seed,
-            n_proposals=n_proposals, return_prior_draws=True, **dict(reconcile_kwargs),
-        )
+    """Run :func:`reconcile_nested_3arm_draws` for a single :class:`PriorTier`."""
+    return reconcile_nested_3arm_draws(
+        res_bc,
+        res_ab,
+        res_ac,
+        monotone=tier.monotone,
+        prior_scale=tier.prior_scale,
+        seed=seed,
+        **dict(reconcile_kwargs),
+    )
 
 
 def evaluate_prior_sensitivity(
@@ -1936,41 +2065,15 @@ def evaluate_prior_sensitivity(
     cost_grid: Sequence[float] = (1.10, 2.85),
     alpha_grid: Sequence[float] = (0.50, 1.00),
     seed: int = 2026,
-    n_proposals: int | None = None,
     quantiles: Sequence[float] = DEFAULT_QUANTILES,
     reconcile_kwargs: Mapping[str, Any] | None = None,
 ) -> PriorSensitivityResult:
-    """Rerun the nested three-arm reconciliation under several prior tiers and tabulate the decision quantities.
-
-    For each tier the reconciliation is run with ``prior_mode=tier.prior_mode`` and
-    ``prior_scale=tier.prior_scale`` (prior draws attached); the ``in_sample`` warning of
-    the reconciliation is silenced for that tier's call only. The observed-horizon
-    statistic is the sum of each posterior trajectory over its ``L`` periods and the
-    extrapolated-horizon statistic is the cumulative effect at ``extrap_horizon`` under the
-    geometric decay ``rho`` of :func:`extrapolate_rank_k_decay`.
-
-    Args:
-      res_bc, res_ab, res_ac: The three pairwise fits (base vs control, incremental vs base,
-        combined vs control).
-      tiers: Prior tiers, for example :func:`ytlr_prior_tiers`.
-      rho: Geometric decay of the extrapolated horizon, in ``[0, 1]``.
-      extrap_horizon: Decision horizon ``H >= L`` in periods.
-      cost_grid: Per-unit costs of the break-even table.
-      alpha_grid: Incrementality shares of the break-even table.
-      seed: Seed shared by every tier's reconciliation.
-      n_proposals: Importance-sampling proposals per tier (``None`` for the reconciliation default).
-      quantiles: Probabilities of the summary tables (odd length).
-      reconcile_kwargs: Extra keyword arguments forwarded to :func:`reconcile_nested_3arm_draws`
-        (for example ``tau_clip``, ``catt_floor`` or explicit cohorts).
-
-    Returns:
-      :class:`PriorSensitivityResult`.
-    """
+    """Rerun the nested three-arm reconciliation under several prior tiers and tabulate the decision quantities."""
     tiers = tuple(tiers)
     qs = _check_quantiles(quantiles)
-    families_df = standardized_prior_family_table(tiers, quantiles=qs)  # validates names and modes
+    standardized_prior_family_table(tiers, quantiles=qs)
     extra = dict(reconcile_kwargs or {})
-    for forbidden in ("prior_mode", "prior_scale", "seed", "n_proposals", "return_prior_draws"):
+    for forbidden in ("monotone", "prior_scale", "seed"):
         if forbidden in extra:
             raise ValueError(f"reconcile_kwargs must not set {forbidden!r}; it is controlled by the tiers / arguments")
     rho = float(rho)
@@ -1986,37 +2089,62 @@ def evaluate_prior_sensitivity(
     roi_frames = []
     n_obs = None
     for tier in tiers:
-        rec = _reconcile_tier(tier, res_bc, res_ab, res_ac, seed=seed, n_proposals=n_proposals, reconcile_kwargs=extra)
-        _, post = nested_3arm_trajectories(rec)
+        rec = _reconcile_tier(tier, res_bc, res_ab, res_ac, seed=seed, reconcile_kwargs=extra)
+        post = {"BC": rec.trt_catt_bc, "AB": rec.trt_catt_ab, "AC": rec.trt_catt_ac}
         n_obs = int(post["AC"].shape[1])
         if horizon < n_obs:
             raise ValueError(f"extrap_horizon ({horizon}) must be >= the observed post-adoption length ({n_obs})")
         draws_by_tier[tier.name] = rec
-        scale = rec.prior_scale if isinstance(rec.prior_scale, (int, float)) else float("nan")
-        realized_scales[tier.name] = float(scale)
+        ma = rec.multi_arm_result
+        if tier.prior_scale is not None:
+            scale = float(tier.prior_scale)
+            scale_table_val = float(tier.prior_scale)
+        else:
+            scale = float(np.median(ma.sigma_draws))
+            scale_table_val = float(ma.s0_scale)
+        realized_scales[tier.name] = scale_table_val
+        ess_val = float(ma.sampler_diagnostics.min_ess_bulk)
+        rhat_val = float(ma.sampler_diagnostics.max_rhat)
         observed[tier.name] = {k: v.sum(axis=1) for k, v in post.items()}
         extrapolated[tier.name] = {k: _extend_with_decay(v, rho, horizon).sum(axis=1) for k, v in post.items()}
         for contrast in NESTED_CONTRASTS:
             for kind, stat, periods in (("observed", observed, n_obs), ("extrapolated", extrapolated, horizon)):
                 row: dict[str, Any] = {
-                    "tier": tier.name, "prior_mode": tier.prior_mode, "prior_scale": float(scale),
-                    "sir_ess": float(rec.sir_ess), "contrast": contrast, "horizon": kind, "horizon_periods": periods,
+                    "tier": tier.name,
+                    "family_key": tier.family,
+                    "monotone": tier.monotone,
+                    "prior_scale": scale,
+                    "ess": ess_val,
+                    "r_hat": rhat_val,
+                    "contrast": contrast,
+                    "horizon": kind,
+                    "horizon_periods": periods,
                 }
                 row.update(_summarize(stat[tier.name][contrast], qs))
                 comparison_rows.append(row)
         roi_frames.append(
             roi_break_even_table(
-                extrapolated[tier.name], cost_grid=cost_grid, alpha_grid=alpha_grid, horizon_periods=horizon,
+                extrapolated[tier.name],
+                cost_grid=cost_grid,
+                alpha_grid=alpha_grid,
+                horizon_periods=horizon,
                 tier=tier.name,
             )
         )
     families_df = standardized_prior_family_table(tiers, quantiles=qs, realized_scales=realized_scales)
     return PriorSensitivityResult(
-        tiers=tiers, rho=rho, extrap_horizon=horizon, n_observed=int(n_obs or 0),
-        cost_grid=tuple(float(c) for c in cost_grid), alpha_grid=tuple(float(a) for a in alpha_grid),
-        standardized_families_df=families_df, posterior_comparison_df=pd.DataFrame(comparison_rows),
-        roi_break_even_df=pd.concat(roi_frames, ignore_index=True), draws_by_tier=draws_by_tier,
-        observed_cumulative_by_tier=observed, extrapolated_cumulative_by_tier=extrapolated,
+        tiers=tiers,
+        rho=rho,
+        extrap_horizon=horizon,
+        n_observed=int(n_obs or 0),
+        cost_grid=tuple(float(c) for c in cost_grid),
+        alpha_grid=tuple(float(a) for a in alpha_grid),
+        standardized_families_df=families_df,
+        posterior_comparison_df=pd.DataFrame(comparison_rows),
+        roi_break_even_df=pd.concat(roi_frames, ignore_index=True),
+        draws_by_tier=draws_by_tier,
+        observed_cumulative_by_tier=observed,
+        extrapolated_cumulative_by_tier=extrapolated,
     )
 
 
@@ -3310,7 +3438,7 @@ def plot_rank_k_prior_calibration(
     *,
     hist_mean: float | None = None,
     hist_se: float | None = None,
-    prior_mode: str = "bundle_halfnormal",
+    prior_family: str = "halft3",
     split_share: float = 0.5,
     horizon_periods: int = 1,
     unit: str = "",
@@ -3318,37 +3446,13 @@ def plot_rank_k_prior_calibration(
     ax: Any = None,
     title: str | None = None,
 ) -> Any:
-    """Show how the zero-mode bundle prior on the total effect relates to a historical benchmark.
-
-    Panel A draws the prior density of the total bundle effect over ``horizon_periods``
-    (the family of ``prior_mode`` with scale ``horizon_periods * prior_scale``, since the
-    prior is on the per-period level), shades ``[P30, P70]``, marks P50 and the implied
-    single-component P50 (``split_share * P50``), and places the historical benchmark
-    ``hist_mean +/- hist_se`` with the percent discount of the prior P50 relative to it.
-    Panel B (``show_rayleigh_comparison``) contrasts the bundle construction
-    ``tau_AC ~ N^+(0, s^2)`` split by ``u ~ U(0, 1)`` -- whose total is the half-normal
-    itself -- with the Rayleigh-shaped density of a sum of two independent ``N^+(0, s^2)``
-    components (the total implied by independent half-normal priors on ``BC`` and ``AB``,
-    which vanishes at zero and roughly doubles the prior mean).
-
-    Args:
-      prior_scale: Per-period bundle prior scale ``s`` in outcome units.
-      hist_mean: Historical benchmark point estimate of the horizon total, or ``None``.
-      hist_se: Its standard error (needs ``hist_mean``), or ``None``.
-      prior_mode: One of :data:`BUNDLE_PRIOR_MODES`.
-      split_share: Share of the bundle attributed to one component for the implied P50 marker.
-      horizon_periods: Periods summed into the horizon total (``>= 1``).
-      unit: Outcome unit for the axis label.
-      show_rayleigh_comparison: Add panel B.
-      ax: One Axes (panel A only) or a sequence of two Axes, or ``None`` to create a figure.
-      title: Figure-level title, or ``None``.
-
-    Returns:
-      A single Axes without panel B, else a length-2 object array of Axes.
-    """
+    """Show how a non-negative prior on the total effect relates to a historical benchmark."""
     plt = _pyplot("plot_rank_k_prior_calibration")
     scale = _positive_scalar(prior_scale, "prior_scale")
-    family = _family_of_prior_mode(prior_mode)
+    if prior_family not in PRIOR_FAMILIES or prior_family == "normal":
+        raise ValueError(
+            f"prior_family must be a non-negative family in {PRIOR_FAMILIES}; got {prior_family!r}"
+        )
     periods = int(horizon_periods)
     if periods < 1:
         raise ValueError(f"horizon_periods must be >= 1; got {horizon_periods!r}")
@@ -3357,9 +3461,9 @@ def plot_rank_k_prior_calibration(
     if hist_se is not None and hist_mean is None:
         raise ValueError("hist_se needs hist_mean")
     total_scale = periods * scale
-    dist = _prior_family_distribution(family, total_scale)
+    dist = _prior_family_distribution(prior_family, total_scale)
     p30, p50, p70 = (float(dist.ppf(q)) for q in (0.30, 0.50, 0.70))
-    x_max = float(dist.ppf(0.995))
+    x_max = float(dist.ppf(0.99))
     if hist_mean is not None:
         x_max = max(x_max, float(hist_mean) + 3.0 * float(hist_se or 0.0))
     grid = np.linspace(0.0, 1.05 * x_max, 500)
@@ -3371,7 +3475,7 @@ def plot_rank_k_prior_calibration(
     finite = np.isfinite(density)
     pax.plot(
         grid[finite], density[finite], color=_ARM_COLORS[0], lw=1.8,
-        label=f"{_FAMILY_DISPLAY[family]} prior, s = {scale:g}",
+        label=f"{_FAMILY_DISPLAY[prior_family]} prior, s = {scale:g}",
     )
     band = (grid >= p30) & (grid <= p70) & finite
     pax.fill_between(
@@ -3397,22 +3501,23 @@ def plot_rank_k_prior_calibration(
         )
     pax.set_xlabel(f"Total bundle effect over {periods} period(s){_unit_suffix(unit)}")
     pax.set_ylabel("Prior density")
-    pax.set_title("A. Zero-mode bundle prior on the total effect")
+    pax.set_title("A. Calibrated scale prior vs historical benchmark")
     pax.legend(frameon=False, fontsize=8)
     if show_rayleigh_comparison:
         rax = axes[1]
-        hn = sp_stats.halfnorm(scale=total_scale)
+        unit_var_step = total_scale / math.sqrt(2.0)
         rax.plot(
-            grid, hn.pdf(grid), color=_ARM_COLORS[0], lw=1.8, label="Bundle: tau_AC ~ N+(0, s^2), u ~ U(0, 1) split"
+            grid, _two_halfnormal_sum_pdf(grid, unit_var_step), color=_ARM_COLORS[0], lw=1.8,
+            label="Poset cone (unit-variance scaled steps s / sqrt(2))",
         )
         rax.plot(
             grid, _two_halfnormal_sum_pdf(grid, total_scale), color=_ARM_COLORS[1], lw=1.8, ls="--",
-            label="Sum of two independent N+(0, s^2) (Rayleigh-shaped)",
+            label="Unscaled sum of two independent N+(0, s^2)",
         )
-        rax.axvline(float(hn.ppf(0.5)), color=_ARM_COLORS[0], lw=1.0, ls=":")
+        rax.axvline(p50, color=_ARM_COLORS[0], lw=1.0, ls=":")
         rax.set_xlabel(f"Total effect{_unit_suffix(unit)}")
         rax.set_ylabel("Prior density")
-        rax.set_title("B. Bundle prior vs independent-component prior")
+        rax.set_title("B. Unit-variance poset cone vs unscaled step sum")
         rax.legend(frameon=False, fontsize=8)
     if title:
         if n_panels == 2:
@@ -3432,27 +3537,7 @@ def plot_rank_k_prior_sensitivity(
     axes: Any = None,
     title: str | None = None,
 ) -> np.ndarray:
-    """Three-panel prior-sensitivity figure: standardized priors, posterior comparison, break-even curves.
-
-    Panel A draws each distinct prior family at unit scale with its near-zero mass
-    annotations (``Pr(tau < 0.25 s)``, ``Pr(tau < 0.50 s)``); panel B is a forest of the
-    posterior P50 with ``[P30, P70]`` per tier for the observed and extrapolated horizons of
-    ``contrast``; panel C draws ``Pr(ROI > 0 | alpha, cost_highlight)`` against the
-    incrementality ``alpha`` for each tier, with the break-even ``alpha_50`` markers where
-    the curves cross one half.
-
-    Args:
-      sens_result: Output of :func:`evaluate_prior_sensitivity`.
-      metric_label: Name of the outcome for the axis labels.
-      unit: Outcome unit for the axis labels.
-      cost_highlight: Per-unit cost of the break-even curves (outcome units, ``> 0``).
-      contrast: Contrast shown in panels B and C (``"BC"``, ``"AB"`` or ``"AC"``).
-      axes: Sequence of three Axes, or ``None`` to create a one-row figure.
-      title: Figure-level title, or ``None``.
-
-    Returns:
-      Length-3 object array of Axes.
-    """
+    """Three-panel prior-sensitivity figure: standardized priors, posterior comparison, break-even curves."""
     plt = _pyplot("plot_rank_k_prior_sensitivity")
     cost = _positive_scalar(cost_highlight, "cost_highlight")
     if contrast not in NESTED_CONTRASTS:
@@ -3465,10 +3550,10 @@ def plot_rank_k_prior_sensitivity(
     grid = np.linspace(1e-3, 3.0, 400)
     seen: dict[str, list[str]] = {}
     for row in fam_df.itertuples(index=False):
-        seen.setdefault(row.prior_mode, []).append(row.tier)
-    for i, (mode, tier_names) in enumerate(seen.items()):
-        dist = _prior_family_distribution(_FAMILY_OF_MODE[mode], 1.0)
-        rec = fam_df.loc[fam_df["prior_mode"] == mode].iloc[0]
+        seen.setdefault(row.family_key, []).append(row.tier)
+    for i, (fam_key, tier_names) in enumerate(seen.items()):
+        dist = _prior_family_distribution(fam_key, 1.0)
+        rec = fam_df.loc[fam_df["family_key"] == fam_key].iloc[0]
         mass = ", ".join(f"Pr(<{c.split('_')[2]}s)={rec[c]:.2f}" for c in pr_cols)
         color = _ARM_COLORS[i % len(_ARM_COLORS)]
         axs[0].plot(grid, dist.pdf(grid), color=color, lw=1.8, label=f"{', '.join(tier_names)}\n{mass}")
@@ -3780,7 +3865,6 @@ def plot_required_persistence_and_payback(
 
 
 __all__ = [
-    "BUNDLE_PRIOR_MODES",
     "DEFAULT_MILESTONES",
     "DEFAULT_PERSISTENCE_CHECKPOINTS",
     "DEFAULT_QUANTILES",

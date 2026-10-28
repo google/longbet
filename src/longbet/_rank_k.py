@@ -476,8 +476,9 @@ class RankKLongBetConfig:
       sigma_nu_prior_scale: Scale ``> 0`` of that half-Cauchy hyperprior (default 0.5).
       treated_extra_variance: Add a treated-arm excess residual variance ``s_eta^2``
         (idiosyncratic unit effects), learned from the treated residuals; its draws are
-        in ``RankKLongBetResult.diagnostics["s_eta2_draws"]`` (default False; JAX
-        engine, ``baseline_cells="untreated"`` only).
+        in ``RankKLongBetResult.diagnostics["s_eta2_draws"]`` (default ``None``: ``True``
+        when ``baseline_cells="untreated"`` and ``False`` otherwise; JAX engine,
+        ``baseline_cells="untreated"`` only).
       basis_spec: :class:`ExposureBasisSpec` of the exposure-basis generators
         (default ``None``: the paper's ``{1, 1 - exp(-s / 3), s / L}`` plus cosines).
       keep_unprojected_draws: Keep the unprojected posterior draws (``*_raw``) whenever
@@ -551,7 +552,7 @@ class RankKLongBetConfig:
     nu_working_zeta_weight: float = 1.0
     learn_sigma_nu: bool = False
     sigma_nu_prior_scale: float = 0.5
-    treated_extra_variance: bool = False
+    treated_extra_variance: bool | None = None
     basis_spec: ExposureBasisSpec | None = None
     keep_unprojected_draws: bool = True
     # Masked event-time panels (0.7.0): population estimand, per-unit windows, common basis
@@ -738,8 +739,15 @@ class RankKLongBetConfig:
             _fail(f"nu_working_zeta_weight must lie in [0, 1]; got {self.nu_working_zeta_weight!r}")
         if not _real("sigma_nu_prior_scale") > 0:
             _fail(f"sigma_nu_prior_scale must be > 0; got {self.sigma_nu_prior_scale!r}")
-        for name in ("learn_sigma_nu", "treated_extra_variance", "keep_unprojected_draws"):
+        for name in ("learn_sigma_nu", "keep_unprojected_draws"):
             _set(name, _flag(name, getattr(self, name)))
+        if self.treated_extra_variance is None:
+            _set("treated_extra_variance", self.baseline_cells == "untreated")
+        else:
+            _set(
+                "treated_extra_variance",
+                _flag("treated_extra_variance", self.treated_extra_variance, allowed="None, True or False"),
+            )
         if self.treated_extra_variance and self.baseline_cells != "untreated":
             _fail("treated_extra_variance=True requires baseline_cells='untreated'")
         if self.basis_spec is not None and not isinstance(self.basis_spec, ExposureBasisSpec):
@@ -858,6 +866,7 @@ class RankKLongBetResult:
     support_mask: np.ndarray | None = None
     post_window_length: np.ndarray | None = None
     cohorts: np.ndarray | None = None
+    arm_metadata: dict[str, Any] | None = None
 
     @property
     def treated_units(self) -> np.ndarray:
@@ -1527,6 +1536,11 @@ def _fit_rank_k_stochtree(
     sigma_modes: list[float] = []
     gp_hyper_draws: list[dict[str, np.ndarray]] = []
     active_units: list[np.ndarray] = []
+    resid_means: list[np.ndarray] = []
+    resid_vars: list[np.ndarray] = []
+    w_units_st: list[np.ndarray] = []
+    bayes_var_ctrl: list[float] = []
+    t0_st = min(waves) if waves else 1
     trt_keep_vars = list(range(x_mod.shape[1]))
     total_trt_cells_st = float(np.sum(z_arr == 1))
     if att_w is None:
@@ -1542,10 +1556,14 @@ def _fit_rank_k_stochtree(
             break
         dy_k = _project_panel_to_mode(dy_dm, cohorts_arr, ctrl, active_waves, wave_weights, bases, k)
         df_k = _project_panel_to_mode(df_dm, cohorts_arr, ctrl, active_waves, wave_weights, bases, k)
+        w_unit_k = _compute_mode_precision_weights(
+            cohorts_arr, ctrl, active_waves, wave_weights, bases, t0_st, T, k
+        )
         # Units that have mode k: every control and the treated cohorts with L_g >= k + 1
         # (short cohorts are excluded from the fit instead of being padded with zero outcomes).
         active = _mode_active_mask(cohorts_arr, ctrl, active_waves)
         active_units.append(active)
+        w_units_st.append(np.where(active, w_unit_k, 0.0))
         idx = np.nonzero(active)[0]
         full = bool(np.all(active))
         dy_k_a = dy_k if full else dy_k[idx]
@@ -1595,16 +1613,38 @@ def _fit_rank_k_stochtree(
                 "keep_vars": trt_keep_vars,
             },
         )
-        tau_k = model.predict(X=x_k, Z=ever_a.astype(np.float64), propensity=ps_a, type="posterior", terms="tau")
-        if isinstance(tau_k, dict):
-            tau_k = tau_k["tau"]
+        pred_k = model.predict(
+            X=x_k, Z=ever_a.astype(np.float64), propensity=ps_a, type="posterior", terms=["tau", "y_hat"]
+        )
+        if isinstance(pred_k, dict):
+            tau_k = pred_k.get("tau_hat", pred_k.get("tau"))
+            yhat_k = pred_k.get("y_hat")
+        else:
+            tau_k = pred_k
+            yhat_k = None
         tau_k = np.asarray(tau_k, dtype=np.float64)
         if tau_k.ndim == 3:
             tau_k = tau_k[:, :, 0]
+        if yhat_k is not None:
+            yhat_arr = np.asarray(yhat_k, dtype=np.float64)
+            if yhat_arr.ndim == 3:
+                yhat_arr = yhat_arr[:, :, 0]
+            resid_draws_k = y_k[:, None] - yhat_arr
+            r_mean_a = resid_draws_k.mean(axis=1)
+            r_var_a = resid_draws_k.var(axis=1, ddof=1) if resid_draws_k.shape[1] > 1 else np.zeros_like(y_k)
+        else:
+            r_mean_a = y_k - ever_a.astype(np.float64) * tau_k.mean(axis=1)
+            r_var_a = np.zeros_like(y_k)
         if not full:
             tau_k = _scatter_rows(tau_k, idx, N, axis=0)
+            r_mean_a = _scatter_rows(r_mean_a, idx, N, axis=0)
+            r_var_a = _scatter_rows(r_var_a, idx, N, axis=0)
+        resid_means.append(r_mean_a)
+        resid_vars.append(r_var_a)
         mode_tau_draws.append(tau_k)
-        sigma_modes.append(float(np.sqrt(np.mean(model.global_var_samples))))
+        gvar_mean = float(np.mean(model.global_var_samples))
+        bayes_var_ctrl.append(gvar_mean)
+        sigma_modes.append(float(np.sqrt(gvar_mean)))
         gp_hyper_draws.append(
             {
                 "s_zeta": np.zeros(n_draws, dtype=np.float64),
@@ -1613,6 +1653,23 @@ def _fit_rank_k_stochtree(
         )
 
     compute_rhat, compute_ess = _get_rhat_ess()
+    t_post_st = int((result_fields or {}).get("horizon") or (T - t0_st))
+    arm_meta_inputs = {
+        "y_arr": y_arr,
+        "f_arr": np.zeros_like(y_arr),
+        "has_forecast": False,
+        "dy_dm": dy_dm,
+        "df_dm": df_dm,
+        "obs": np.isfinite(y_arr),
+        "ctrl": ctrl,
+        "t0": t0_st,
+        "t_post": t_post_st,
+        "resid_means": resid_means,
+        "resid_vars": resid_vars,
+        "w_units": w_units_st,
+        "bayes_var_ctrl": bayes_var_ctrl,
+        "bayes_var_trt": bayes_var_ctrl,
+    }
     return _finalize_result(
         mode_tau_draws_raw=mode_tau_draws,
         cohorts_arr=cohorts_arr,
@@ -1639,7 +1696,215 @@ def _fit_rank_k_stochtree(
         compute_rhat=compute_rhat,
         compute_ess=compute_ess,
         result_fields=result_fields,
+        arm_meta_inputs=arm_meta_inputs,
     )
+
+
+def _extract_event_time_trt_trajectory(
+    catt_draws: np.ndarray,
+    ever: np.ndarray,
+    cohorts_arr: np.ndarray,
+    waves: list[int],
+    t0: int,
+    t_post: int,
+) -> np.ndarray:
+    """Return ``(S, t_post)`` treated-unit-average trajectory draws over event time ``1..t_post``."""
+    n_draws, _, n_periods = catt_draws.shape
+    t_post_eff = max(int(t_post), 1)
+    if len(waves) <= 1:
+        end_t = min(t0 + t_post_eff, n_periods)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            traj = np.nanmean(catt_draws[:, ever, t0:end_t], axis=1)
+        if traj.shape[1] < t_post_eff:
+            pad = np.repeat(traj[:, -1:], t_post_eff - traj.shape[1], axis=1)
+            traj = np.concatenate([traj, pad], axis=1)
+        return np.asarray(traj, dtype=np.float64)
+
+    traj = np.zeros((n_draws, t_post_eff), dtype=np.float64)
+    trt_idx = np.nonzero(ever)[0]
+    trt_cohorts = cohorts_arr[trt_idx]
+    for s in range(t_post_eff):
+        cal_t = trt_cohorts + s
+        valid = cal_t < n_periods
+        if np.any(valid):
+            vals = catt_draws[:, trt_idx[valid], cal_t[valid]]
+            traj[:, s] = np.nanmean(vals, axis=1)
+        elif s > 0:
+            traj[:, s] = traj[:, s - 1]
+    return traj
+
+
+def _psd_clip_matrix(mat: np.ndarray, floor: float = 0.0) -> np.ndarray:
+    """Symmetrize ``mat`` and clip eigenvalues below ``floor``."""
+    sym = 0.5 * (np.asarray(mat, dtype=np.float64) + np.asarray(mat, dtype=np.float64).T)
+    if sym.size == 0:
+        return sym
+    eigvals, eigvecs = np.linalg.eigh(sym)
+    eigvals = np.maximum(eigvals, float(floor))
+    out = (eigvecs * eigvals[None, :]) @ eigvecs.T
+    return 0.5 * (out + out.T)
+
+
+def _pairwise_mean_cov(u_arm: np.ndarray) -> np.ndarray:
+    """Estimate covariance of the column-wise sample mean across observed cells of ``u_arm``."""
+    _, h_len = u_arm.shape
+    if u_arm.shape[0] <= 1 or h_len == 0:
+        return np.zeros((h_len, h_len), dtype=np.float64)
+    finite = np.isfinite(u_arm)
+    counts = finite.sum(axis=0).astype(np.float64)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        col_means = np.nanmean(u_arm, axis=0, keepdims=True)
+    col_means = np.where(np.isfinite(col_means), col_means, 0.0)
+    centered = np.where(finite, u_arm - col_means, 0.0)
+    pair_n = finite.astype(np.float64).T @ finite.astype(np.float64)
+    denom_cov = np.maximum(pair_n - 1.0, 1.0)
+    raw_cov = (centered.T @ centered) / denom_cov
+    raw_cov = np.where(pair_n >= 2.0, raw_cov, 0.0)
+    n_eff = np.maximum(np.maximum(counts[:, None], counts[None, :]), 1.0)
+    return _psd_clip_matrix(raw_cov / n_eff, floor=0.0)
+
+
+def _build_stage1_arm_metadata(
+    *,
+    catt_draws: np.ndarray,
+    catt_hat: np.ndarray,
+    ever: np.ndarray,
+    cohorts_arr: np.ndarray,
+    waves: list[int],
+    bases: dict[int, np.ndarray],
+    theta_f_modes: list[float],
+    arm_meta_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Assemble lightweight Stage-1 arm metadata for Bayesian multi-arm reconciliation (§3)."""
+    y_arr = np.asarray(arm_meta_inputs["y_arr"], dtype=np.float64)
+    f_arr = np.asarray(arm_meta_inputs["f_arr"], dtype=np.float64)
+    has_forecast = bool(arm_meta_inputs["has_forecast"])
+    dy_dm = np.asarray(arm_meta_inputs["dy_dm"], dtype=np.float64)
+    df_dm = np.asarray(arm_meta_inputs["df_dm"], dtype=np.float64)
+    obs = np.asarray(arm_meta_inputs["obs"], dtype=bool)
+    ctrl = np.asarray(arm_meta_inputs["ctrl"], dtype=bool)
+    t0 = int(arm_meta_inputs["t0"])
+    t_post = max(int(arm_meta_inputs["t_post"]), 1)
+    resid_means: list[np.ndarray] = list(arm_meta_inputs["resid_means"])
+    resid_vars: list[np.ndarray] = list(arm_meta_inputs["resid_vars"])
+    w_units: list[np.ndarray] = list(arm_meta_inputs["w_units"])
+    bayes_var_ctrl: list[float] = list(arm_meta_inputs["bayes_var_ctrl"])
+    bayes_var_trt: list[float] = list(arm_meta_inputs["bayes_var_trt"])
+
+    n_units, n_periods = y_arr.shape
+    theta_0 = float(theta_f_modes[0]) if len(theta_f_modes) > 0 else 0.0
+
+    # Pre-period unit residual variance per arm
+    pre_u = y_arr[:, :t0] - (theta_0 * f_arr[:, :t0] if has_forecast else 0.0)
+    pre_masked = np.where(obs[:, :t0], pre_u, np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        ctrl_pre_col = np.nanmean(pre_masked[ctrl], axis=0, keepdims=True)
+        ctrl_pre_col = np.where(np.isfinite(ctrl_pre_col), ctrl_pre_col, 0.0)
+        pre_dm = pre_masked - ctrl_pre_col
+        if t0 >= 2:
+            pre_within = pre_dm - np.nanmean(pre_dm, axis=1, keepdims=True)
+            df_scale = float(t0) / float(t0 - 1)
+        else:
+            pre_within = pre_dm - np.nanmean(pre_dm, axis=0, keepdims=True)
+            df_scale = 1.0
+
+    def _arm_pre_var(mask_a: np.ndarray) -> float:
+        vals = pre_within[mask_a]
+        fin = vals[np.isfinite(vals)]
+        return float(np.var(fin, ddof=1) * df_scale) if fin.size > 1 else 0.0
+
+    pre_var_trt = _arm_pre_var(ever)
+    pre_var_ctrl = _arm_pre_var(ctrl)
+
+    # Reference exposure basis on event time 1..t_post
+    k_eff = len(resid_means)
+    if t0 in bases and bases[t0].shape[0] >= t_post and k_eff >= 1:
+        b_post = np.asarray(bases[t0][:t_post, : min(k_eff, bases[t0].shape[1])], dtype=np.float64)
+    elif k_eff >= 1:
+        b_post = orthonormal_exposure_basis(t_post, k_eff)[:, :k_eff]
+    else:
+        b_post = np.zeros((t_post, 0), dtype=np.float64)
+    k_use = int(b_post.shape[1])
+
+    if k_use >= 1:
+        q_basis, _ = np.linalg.qr(b_post, mode="reduced")
+        p_orth = np.eye(t_post, dtype=np.float64) - q_basis @ q_basis.T
+    else:
+        p_orth = np.eye(t_post, dtype=np.float64)
+
+    # Event-time residual panel for orthogonal out-of-basis covariance
+    u_panel = dy_dm - theta_0 * df_dm - catt_hat
+    u_panel_obs = np.where(obs, u_panel, np.nan)
+
+    def _event_time_rows(mask_a: np.ndarray, is_trt: bool) -> np.ndarray:
+        idx_a = np.nonzero(mask_a)[0]
+        if not is_trt or len(waves) <= 1:
+            end_t = min(t0 + t_post, n_periods)
+            sub = u_panel_obs[idx_a, t0:end_t]
+            if sub.shape[1] < t_post:
+                pad = np.full((idx_a.size, t_post - sub.shape[1]), np.nan, dtype=np.float64)
+                sub = np.concatenate([sub, pad], axis=1)
+            return sub
+        out_u = np.full((idx_a.size, t_post), np.nan, dtype=np.float64)
+        for r_i, u_i in enumerate(idx_a):
+            g_i = int(cohorts_arr[u_i])
+            len_i = min(t_post, max(n_periods - g_i, 0))
+            if len_i > 0:
+                out_u[r_i, :len_i] = u_panel_obs[u_i, g_i : g_i + len_i]
+        return out_u
+
+    def _arm_post_cov(mask_a: np.ndarray, b_vars: list[float], is_trt: bool) -> np.ndarray:
+        if k_use >= 1:
+            q_cols = np.zeros((n_units, k_use), dtype=np.float64)
+            diag_draw = np.zeros(k_use, dtype=np.float64)
+            v_floors = np.zeros(k_use, dtype=np.float64)
+            for k in range(k_use):
+                w_k = np.where(mask_a, np.maximum(np.asarray(w_units[k], dtype=np.float64), 0.0), 0.0)
+                w_sum = float(np.sum(w_k))
+                if w_sum <= 1e-12:
+                    continue
+                alpha_k = w_k / w_sum
+                rm_k = np.asarray(resid_means[k], dtype=np.float64)
+                rv_k = np.asarray(resid_vars[k], dtype=np.float64)
+                mean_r = float(np.sum(alpha_k * rm_k))
+                n_eff_k = 1.0 / max(float(np.sum(alpha_k**2)), 1e-12)
+                df_fac = math.sqrt(n_eff_k / max(n_eff_k - 1.0, 1.0))
+                q_cols[:, k] = np.where(w_k > 0.0, df_fac * alpha_k * (rm_k - mean_r), 0.0)
+                diag_draw[k] = float(np.sum((alpha_k**2) * rv_k))
+                if k < len(b_vars):
+                    v_floors[k] = max(float(b_vars[k]), 0.0) / w_sum
+            v_modes = (q_cols.T @ q_cols) + np.diag(diag_draw)
+            scales = np.ones(k_use, dtype=np.float64)
+            for k in range(k_use):
+                if v_floors[k] > v_modes[k, k]:
+                    if v_modes[k, k] > 1e-30:
+                        scales[k] = math.sqrt(v_floors[k] / v_modes[k, k])
+                    else:
+                        v_modes[k, k] = v_floors[k]
+            v_modes = (v_modes * scales[:, None]) * scales[None, :]
+            cov_span = b_post @ v_modes @ b_post.T
+        else:
+            cov_span = np.zeros((t_post, t_post), dtype=np.float64)
+        u_rows = _event_time_rows(mask_a, is_trt=is_trt)
+        cov_emp = _pairwise_mean_cov(u_rows)
+        cov_orth = p_orth @ cov_emp @ p_orth
+        return _psd_clip_matrix(cov_span + cov_orth, floor=0.0)
+
+    trt_traj_draws = _extract_event_time_trt_trajectory(catt_draws, ever, cohorts_arr, waves, t0, t_post)
+    return {
+        "n_treated": int(np.sum(ever)),
+        "n_control": int(np.sum(ctrl)),
+        "t0": t0,
+        "t_post": t_post,
+        "post_residual_cov_treated": _arm_post_cov(ever, bayes_var_trt, is_trt=True),
+        "post_residual_cov_control": _arm_post_cov(ctrl, bayes_var_ctrl, is_trt=False),
+        "pre_residual_var_treated": pre_var_trt,
+        "pre_residual_var_control": pre_var_ctrl,
+        "trt_trajectory_draws": trt_traj_draws,
+    }
 
 
 def _finalize_result(
@@ -1670,6 +1935,8 @@ def _finalize_result(
     compute_ess: Any,
     result_fields: dict[str, Any] | None = None,
     treated_cells: np.ndarray | None = None,
+    arm_meta_inputs: dict[str, Any] | None = None,
+    arm_metadata_override: dict[str, Any] | None = None,
 ) -> RankKLongBetResult:
     """Apply the (declared) post-processing projections, assemble cell draws and build the result.
 
@@ -1744,6 +2011,25 @@ def _finalize_result(
     diag.setdefault("basis_spec", cfg.resolved_basis_spec)
     extra = {"unit_weights": np.asarray(att_unit_weights, dtype=np.float64), "cohorts": np.asarray(cohorts_arr)}
     extra.update(result_fields or {})
+    if arm_metadata_override is not None:
+        arm_meta_out = dict(arm_metadata_override)
+        t0_ov = int(arm_meta_out.get("t0", min(waves) if waves else 1))
+        t_post_ov = int(arm_meta_out.get("t_post", max(T - t0_ov, 1)))
+        arm_meta_out["trt_trajectory_draws"] = _extract_event_time_trt_trajectory(
+            catt_draws, ever, cohorts_arr, waves, t0_ov, t_post_ov
+        )
+        extra["arm_metadata"] = arm_meta_out
+    elif arm_meta_inputs is not None:
+        extra["arm_metadata"] = _build_stage1_arm_metadata(
+            catt_draws=catt_draws,
+            catt_hat=catt_hat,
+            ever=ever,
+            cohorts_arr=cohorts_arr,
+            waves=waves,
+            bases=bases,
+            theta_f_modes=theta_f_modes,
+            arm_meta_inputs=arm_meta_inputs,
+        )
     return RankKLongBetResult(
         catt_draws=catt_draws,
         catt_hat=catt_hat,
@@ -1878,6 +2164,7 @@ def _non_default_options(cfg: RankKLongBetConfig, names: tuple[str, ...]) -> lis
     defaults = {f.name: f.default for f in dc_fields(RankKLongBetConfig)}
     defaults.update(_PROPAGATED_DEFAULTS if cfg.uncertainty_propagation else _PLUG_IN_DEFAULTS)
     defaults["max_forecast_draws"] = cfg.n_forecast_draws
+    defaults["treated_extra_variance"] = cfg.baseline_cells == "untreated"
     changed = []
     for name in names:
         value = _max_forecast_draws(cfg) if name == "max_forecast_draws" else getattr(cfg, name)
@@ -3062,11 +3349,17 @@ def _fit_rank_k_longbet(
             **_sampler_kwargs(k),
             **extra_draws,
         )
+        res = dict(res)
+        if "resid_mean" not in res:
+            res["resid_mean"] = np.zeros_like(sub["dy_k"], dtype=np.float64)
+        if "resid_var" not in res:
+            res["resid_var"] = np.zeros_like(sub["dy_k"], dtype=np.float64)
         if idx is not None:
-            res = dict(res)
             res["tau_draws"] = _scatter_rows(res["tau_draws"], idx, N, axis=0)
             res["tau_chains"] = _scatter_rows(res["tau_chains"], idx, N, axis=2)
             res["comp_tau_draws"] = _scatter_rows(res["comp_tau_draws"], idx, N, axis=2)
+            res["resid_mean"] = _scatter_rows(res["resid_mean"], idx, N, axis=0)
+            res["resid_var"] = _scatter_rows(res["resid_var"], idx, N, axis=0)
         return res
 
     if layout is not None:
@@ -3307,6 +3600,30 @@ def _fit_rank_k_longbet(
         diagnostics["precision_weights"] = [w_units[k] for k in range(K_eff)]
         diagnostics["n_mode_components"] = int(m_eff if propagate_modes else 1)
         diagnostics["n_forecast_components"] = int(m_eff if df_dm_draws_all is not None else 1)
+        b_ctrl_et: list[float] = []
+        b_trt_et: list[float] = []
+        for k in range(K_eff):
+            sig2_k = float(np.mean(np.asarray(fitted[k]["sigma_draws"], dtype=np.float64) ** 2))
+            eta2_arr = np.asarray(fitted[k].get("s_eta2_draws", np.zeros(0)), dtype=np.float64)
+            eta2_k = float(np.mean(eta2_arr)) if eta2_arr.size > 0 else 0.0
+            b_ctrl_et.append(sig2_k)
+            b_trt_et.append(sig2_k + eta2_k)
+        arm_meta_inputs_et = {
+            "y_arr": y_arr,
+            "f_arr": f_arr,
+            "has_forecast": has_forecast,
+            "dy_dm": dy_dm,
+            "df_dm": df_dm,
+            "obs": obs,
+            "ctrl": ctrl,
+            "t0": t0,
+            "t_post": int(layout.horizon),
+            "resid_means": [fitted[k]["resid_mean"] for k in range(K_eff)],
+            "resid_vars": [fitted[k]["resid_var"] for k in range(K_eff)],
+            "w_units": [w_units[k] for k in range(K_eff)],
+            "bayes_var_ctrl": b_ctrl_et,
+            "bayes_var_trt": b_trt_et,
+        }
         return _finalize_result(
             mode_tau_draws_raw=mode_tau_draws,
             cohorts_arr=cohorts_arr,
@@ -3334,8 +3651,14 @@ def _fit_rank_k_longbet(
             compute_ess=compute_ess,
             result_fields=event_time_fields,
             treated_cells=treated_cells_modeled,
+            arm_meta_inputs=arm_meta_inputs_et,
         )
 
+    resid_means_pc: list[np.ndarray] = []
+    resid_vars_pc: list[np.ndarray] = []
+    w_units_pc: list[np.ndarray] = []
+    b_ctrl_pc: list[float] = []
+    b_trt_pc: list[float] = []
     for k in range(K):
         active_waves = [g for g in waves if k < bases[g].shape[1]]
         if not active_waves:
@@ -3446,6 +3769,14 @@ def _fit_rank_k_longbet(
         theta_f_draws.append(res_k["theta_f_draws"])
         theta_f_modes.append(float(np.mean(res_k["theta_f_draws"])))
         sigma_modes.append(float(np.mean(res_k["sigma_draws"])))
+        resid_means_pc.append(res_k["resid_mean"])
+        resid_vars_pc.append(res_k["resid_var"])
+        w_units_pc.append(np.where(active, w_unit, 0.0))
+        sig2_pc_k = float(np.mean(np.asarray(res_k["sigma_draws"], dtype=np.float64) ** 2))
+        eta2_pc_arr = np.asarray(res_k.get("s_eta2_draws", np.zeros(0)), dtype=np.float64)
+        eta2_pc_k = float(np.mean(eta2_pc_arr)) if eta2_pc_arr.size > 0 else 0.0
+        b_ctrl_pc.append(sig2_pc_k)
+        b_trt_pc.append(sig2_pc_k + eta2_pc_k)
         gp_hyper_draws.append(
             {
                 "s_zeta": res_k["s_zeta_draws"],
@@ -3453,6 +3784,22 @@ def _fit_rank_k_longbet(
             }
         )
 
+    arm_meta_inputs_pc = {
+        "y_arr": y_arr,
+        "f_arr": f_arr,
+        "has_forecast": has_forecast,
+        "dy_dm": dy_dm,
+        "df_dm": df_dm,
+        "obs": obs,
+        "ctrl": ctrl,
+        "t0": t0,
+        "t_post": T - t0,
+        "resid_means": resid_means_pc,
+        "resid_vars": resid_vars_pc,
+        "w_units": w_units_pc,
+        "bayes_var_ctrl": b_ctrl_pc,
+        "bayes_var_trt": b_trt_pc,
+    }
     return _finalize_result(
         mode_tau_draws_raw=mode_tau_draws,
         cohorts_arr=cohorts_arr,
@@ -3478,6 +3825,7 @@ def _fit_rank_k_longbet(
         t_start=t_start,
         compute_rhat=compute_rhat,
         compute_ess=compute_ess,
+        arm_meta_inputs=arm_meta_inputs_pc,
     )
 
 
@@ -3769,80 +4117,14 @@ def _infer_panel_masks_from_result(
     return cohorts_arr, ever_arr, att_w_arr
 
 
-def _project_cohort_damped_trajectory(
-    joint_att: np.ndarray,
-    res: RankKLongBetResult,
-    ever_arr: np.ndarray,
-    cohorts_arr: np.ndarray,
-    tau_clip: tuple[float, float],
-    catt_floor: float | None,
-) -> np.ndarray:
-    """Project reconciled Mode-1 ATT draws and higher-mode draws via zero-sum dynamic damping.
-
-    Returns ``(S, T_post)`` treated-average trajectory draws: the mode-1 level
-    ``joint_att`` plus the cohort-share-weighted higher-mode dynamics of ``res``,
-    with the zero-sum amplitude damping of ``catt_floor`` applied per draw.
-    """
-    waves = sorted(int(g) for g in res.bases.keys())
-    t0 = min(waves) if waves else 1
-    n_periods = int(res.catt_draws.shape[2])
-    t_post = n_periods - t0
-    res_horizon = getattr(res, "horizon", None)
-    if res_horizon is not None:
-        t_post = min(t_post, int(res_horizon))
-    n_draws = int(joint_att.shape[0])
-
-    low_clip, high_clip = float(tau_clip[0]), float(tau_clip[1])
-    tau1 = np.clip(joint_att, low_clip, high_clip)
-    if len(res.mode_tau_draws) < 2 or t_post <= 1:
-        traj = np.repeat(tau1[:, None], max(t_post, 1), axis=1)
-        if catt_floor is not None:
-            traj = np.maximum(traj, float(catt_floor))
-        return traj
-
-    # Weighted average of higher modes across treated cohorts
-    trt_dynamic = np.zeros((n_draws, t_post), dtype=np.float64)
-    total_trt = max(float(np.sum(ever_arr)), 1.0)
-    n_avail = int(res.mode_tau_draws[1].shape[1])
-    for g in waves:
-        mask_g = (cohorts_arr == g) & ever_arr
-        if not np.any(mask_g):
-            continue
-        w_g = float(np.sum(mask_g)) / total_trt
-        basis_g = res.bases[g]
-        l_g = basis_g.shape[0]
-        offset = g - t0
-        for k_idx in range(1, len(res.mode_tau_draws)):
-            if k_idx >= basis_g.shape[1]:
-                continue
-            psi_k = basis_g[:, k_idx]
-            mode_k = res.mode_tau_draws[k_idx][mask_g]
-            # Match the draw count of ``joint_att`` (recycle the higher-mode draws if needed)
-            cols = np.arange(n_draws) % n_avail
-            mode_k_trt_mean = mode_k[:, cols].mean(axis=0)
-            trt_dynamic[:, offset : offset + l_g] += w_g * mode_k_trt_mean[:, None] * psi_k[None, :]
-
-    if catt_floor is not None:
-        floor_val = float(catt_floor)
-        avail_room = np.maximum(tau1 - floor_val, 0.0)
-        neg_exc = np.maximum(-trt_dynamic, 0.0).max(axis=1)
-        alpha = np.where(neg_exc > 1e-12, np.minimum(1.0, avail_room / neg_exc), 1.0)
-        traj = tau1[:, None] + alpha[:, None] * trt_dynamic
-        traj = np.maximum(traj, floor_val)
-    else:
-        traj = tau1[:, None] + trt_dynamic
-    return traj
-
-
 @dataclass
 class Nested3ArmReconciliationResult:
     """Output of :func:`reconcile_nested_3arm_draws`.
 
-    Unpacks as the backward-compatible 3-tuple ``(trt_catt_bc, trt_catt_ab, trt_catt_ac)``
-    of ``(S, T_post)`` posterior trajectory draws, and exposes the matched prior
-    trajectory draws (``prior_catt_*``, when ``return_prior_draws=True``), the
-    mode-1 prior and posterior draws, the bivariate GLS likelihood summary and the
-    effective sample size of the sampling-importance-resampling weights.
+    Unpacks as the 3-tuple ``(trt_catt_bc, trt_catt_ab, trt_catt_ac)`` of
+    ``(S, H)`` posterior trajectory draws and exposes the window-mean Mode-1
+    posterior draws ``post_att_*`` and the underlying
+    :class:`MultiArmReconciliationResult` (``multi_arm_result``).
     """
 
     trt_catt_bc: np.ndarray
@@ -3851,17 +4133,8 @@ class Nested3ArmReconciliationResult:
     post_att_bc: np.ndarray
     post_att_ab: np.ndarray
     post_att_ac: np.ndarray
-    prior_att_bc: np.ndarray | None = None
-    prior_att_ab: np.ndarray | None = None
-    prior_att_ac: np.ndarray | None = None
-    prior_catt_bc: np.ndarray | None = None
-    prior_catt_ab: np.ndarray | None = None
-    prior_catt_ac: np.ndarray | None = None
-    lik_mean: np.ndarray | None = None
-    lik_cov: np.ndarray | None = None
-    prior_mode: str = "bundle_halfnormal"
-    prior_scale: float | tuple[float, float] | None = None
-    sir_ess: float = float("nan")
+    prior_scale: float | None = None
+    multi_arm_result: Any = None
 
     def __iter__(self):
         yield self.trt_catt_bc
@@ -3874,101 +4147,30 @@ class Nested3ArmReconciliationResult:
     def __len__(self) -> int:
         return 3
 
+    @property
+    def sampler_diagnostics(self) -> Any:
+        """Delegate :attr:`sampler_diagnostics` to :attr:`multi_arm_result`."""
+        return getattr(self.multi_arm_result, "sampler_diagnostics", None)
 
-_BUNDLE_PRIOR_MODES = ("bundle_halfnormal", "bundle_halfstudentt", "bundle_gamma_spike")
+    @property
+    def diagnostics(self) -> Any:
+        """Delegate :attr:`diagnostics` to :attr:`multi_arm_result`."""
+        return getattr(self.multi_arm_result, "diagnostics", None)
 
+    @property
+    def max_cycle_discrepancy(self) -> float:
+        """Delegate :attr:`max_cycle_discrepancy` to :attr:`multi_arm_result`."""
+        return float(getattr(self.multi_arm_result, "max_cycle_discrepancy", 0.0))
 
-def _draw_bundle_prior(rng: np.random.Generator, prior_mode: str, sd_ac: float, n: int) -> np.ndarray:
-    """Draw the total-bundle Mode-1 prior ``tau_{AC,1}`` for the three bundle prior families."""
-    if prior_mode == "bundle_halfstudentt":
-        return np.abs(rng.standard_t(2.5, size=n)) * (0.50 * sd_ac)
-    if prior_mode == "bundle_gamma_spike":
-        return rng.gamma(0.40, 1.60 * sd_ac, size=n)
-    return np.abs(rng.standard_normal(n)) * sd_ac
+    @property
+    def ppc_cycle_pvalue(self) -> float | None:
+        """Delegate :attr:`ppc_cycle_pvalue` to :attr:`multi_arm_result`."""
+        return getattr(self.multi_arm_result, "ppc_cycle_pvalue", None)
 
-
-def _bundle_prior_logpdf(prior_mode: str, sd_ac: float, t: np.ndarray) -> np.ndarray:
-    """Log density of the total-bundle prior ``tau_{AC,1}`` on ``t > 0`` (``-inf`` elsewhere)."""
-    from scipy import stats as _st
-
-    t = np.asarray(t, dtype=np.float64)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        if prior_mode == "bundle_halfstudentt":
-            scale = 0.50 * sd_ac
-            val = np.log(2.0) + _st.t.logpdf(t / scale, df=2.5) - np.log(scale)
-        elif prior_mode == "bundle_gamma_spike":
-            val = _st.gamma.logpdf(t, a=0.40, scale=1.60 * sd_ac)
-        else:
-            val = np.log(2.0) + _st.norm.logpdf(t / sd_ac) - np.log(sd_ac)
-    return np.where(t > 0.0, val, -np.inf)
-
-
-def _sir_posterior_2d(
-    rng: np.random.Generator,
-    *,
-    prior_draw: Any,
-    prior_logpdf: Any,
-    mu_lik: np.ndarray,
-    sigma_lik: np.ndarray,
-    low_clip: float,
-    high_clip: float,
-    n_draws: int,
-    n_prop: int,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Sampling-importance-resampling of ``prior x bivariate Gaussian likelihood`` on the clipped quadrant.
-
-    Uses a defensive 50/50 mixture proposal (prior draws and likelihood-shaped
-    Gaussian draws, both restricted to ``[low_clip, high_clip]^2`` by rejection),
-    so the importance weights stay bounded whether the prior is wide or narrow
-    relative to the likelihood. Returns the resampled posterior pairs, the
-    accepted prior proposals (prior draws on the support) and the effective
-    sample size of the normalized weights.
-    """
-    from scipy import stats as _st
-
-    def _inside(pts: np.ndarray) -> np.ndarray:
-        ok = (pts[:, 0] >= low_clip) & (pts[:, 1] >= low_clip)
-        if np.isfinite(high_clip):
-            ok &= (pts[:, 0] <= high_clip) & (pts[:, 1] <= high_clip)
-        return ok
-
-    n_half = max(n_prop // 2, 1000)
-    pri_all = prior_draw(n_half)
-    keep_a = _inside(pri_all)
-    z_a = max(float(np.mean(keep_a)), 1e-12)  # prior mass inside the clip (truncation normalizer)
-    pri = pri_all[keep_a]
-    lik_pts = []
-    n_tried = 0
-    n_kept = 0
-    for _ in range(50):
-        cand = rng.multivariate_normal(mu_lik, sigma_lik, size=n_half)
-        keep = _inside(cand)
-        n_tried += cand.shape[0]
-        n_kept += int(keep.sum())
-        lik_pts.append(cand[keep])
-        if n_kept >= n_half:
-            break
-    lik = np.concatenate(lik_pts, axis=0)[:n_half] if lik_pts else np.zeros((0, 2))
-    z_b = max(n_kept / max(n_tried, 1), 1e-12)  # likelihood mass inside the clip
-    pts = np.concatenate([pri, lik], axis=0)
-    if pts.shape[0] < 10:
-        raise ValueError("The prior and the likelihood put no mass inside tau_clip; widen the clip or the prior")
-    log_prior = prior_logpdf(pts)
-    log_lik = _st.multivariate_normal(mu_lik, sigma_lik, allow_singular=True).logpdf(pts)
-    w_a = pri.shape[0] / float(pts.shape[0])
-    w_b = 1.0 - w_a
-    log_q = np.logaddexp(
-        np.log(max(w_a, 1e-300)) + log_prior - np.log(z_a),
-        np.log(max(w_b, 1e-300)) + log_lik - np.log(z_b),
-    )
-    log_w = log_prior + log_lik - log_q
-    log_w = np.where(np.isfinite(log_w), log_w, -np.inf)
-    log_w -= float(np.max(log_w))
-    w = np.exp(log_w)
-    w /= float(np.sum(w))
-    ess = float(1.0 / np.sum(w**2))
-    idx = rng.choice(pts.shape[0], size=n_draws, replace=True, p=w)
-    return pts[idx], pri, ess
+    @property
+    def ppc_basis_pvalue(self) -> float | None:
+        """Delegate :attr:`ppc_basis_pvalue` to :attr:`multi_arm_result`."""
+        return getattr(self.multi_arm_result, "ppc_basis_pvalue", None)
 
 
 def reconcile_nested_3arm_draws(
@@ -3976,199 +4178,35 @@ def reconcile_nested_3arm_draws(
     res_ab: RankKLongBetResult,
     res_ac: RankKLongBetResult,
     *,
-    prior_scale: float | str | None = None,
-    prior_mode: str = "bundle_halfnormal",
-    cohorts_bc: np.ndarray | None = None,
-    ever_bc: np.ndarray | None = None,
-    att_w_bc: np.ndarray | None = None,
-    cohorts_ab: np.ndarray | None = None,
-    ever_ab: np.ndarray | None = None,
-    att_w_ab: np.ndarray | None = None,
-    prior_sd_ac: float | None = None,
-    prior_sd_bc: float | None = None,
-    prior_sd_ab: float | None = None,
-    prior_mean_bc: float = 0.0,
-    prior_mean_ab: float = 0.0,
-    tau_clip: tuple[float, float] = (0.0, float("inf")),
-    catt_floor: float | None = 0.0,
-    min_group_var_share: float = 0.15,
-    n_proposals: int | None = None,
+    monotone: bool = True,
+    prior_scale: float | None = None,
+    horizon: int | None = None,
+    n_modes: int = 2,
     seed: int = 2026,
-    return_prior_draws: bool = False,
+    _model_options: Any = None,
 ) -> Nested3ArmReconciliationResult:
-    """Reconcile 3-arm nested Rank-K BCF posteriors into coherent ``(BC, AB, AC = BC + AB)`` trajectories.
-
-    In a nested 3-arm design (C control, B base treatment, A base plus incremental
-    treatment) the three pairwise fits ignore (i) the negative sampling covariance
-    ``Cov(tau_hat_BC, tau_hat_AB) = -v_B`` induced by the shared B arm and (ii) the
-    structural identity ``tau_AC = tau_BC + tau_AB``. The three posterior means are
-    reduced to the two parameters ``(theta_BC, theta_AB)`` by generalized least
-    squares under the shared-arm covariance; because that covariance is singular
-    along the additivity discrepancy ``m_AC - m_BC - m_AB``, the GLS point estimate
-    is the equal split of the discrepancy over the three fits and the GLS covariance
-    is the ``(BC, AB)`` block ``[[v_B + v_C, -v_B], [-v_B, v_A + v_B]]`` (the AC fit
-    carries no further information about ``(theta_BC, theta_AB)``). The group
-    variances ``(v_A, v_B, v_C)`` are back-solved from the three posterior variances
-    with the floor ``min_group_var_share`` (each is at least that share of the
-    smallest relevant pairwise variance).
-
-    The prior is then applied by sampling-importance-resampling against the
-    bivariate Gaussian likelihood:
-
-    * ``prior_mode="bundle_halfnormal"`` (default): ``tau_{AC,1} ~ N^+(0, prior_scale^2)``
-      split by an agnostic ``u ~ Uniform(0, 1)``, ``tau_{BC,1} = u tau_{AC,1}``,
-      ``tau_{AB,1} = (1 - u) tau_{AC,1}``;
-    * ``"bundle_halfstudentt"``: ``tau_{AC,1} ~ T^+_{2.5}(0, (0.5 prior_scale)^2)``;
-    * ``"bundle_gamma_spike"``: ``tau_{AC,1} ~ Gamma(0.40, 1.60 prior_scale)``;
-    * ``"independent_halfnormal"``: independent ``N(prior_mean_*, prior_scale^2)`` on
-      ``tau_{BC,1}`` and ``tau_{AB,1}``, truncated to ``tau_clip``.
-
-    ``prior_scale`` is required: a positive float in outcome units (for instance an
-    out-of-sample calibrated scale), or the string ``"in_sample"`` to use the
-    posterior SD of the fit itself (an empirical-Bayes-style choice that shrinks
-    toward zero by a data-dependent amount; it warns and should be reported next to
-    an out-of-sample scale). The former data-dependent default was removed. The
-    deprecated ``prior_sd_ac`` / ``prior_sd_bc`` / ``prior_sd_ab`` are accepted as
-    explicit scales. Draws are projected onto the post-adoption trajectories with the
-    zero-sum higher-mode damping of ``catt_floor`` (a decision-layer projection).
-
-    Returns a :class:`Nested3ArmReconciliationResult`, which unpacks as
-    ``(trt_catt_bc, trt_catt_ab, trt_catt_ac)``.
-    """
-    if prior_mode not in (*_BUNDLE_PRIOR_MODES, "independent_halfnormal"):
-        raise ValueError(
-            f"prior_mode must be one of {(*_BUNDLE_PRIOR_MODES, 'independent_halfnormal')}; got {prior_mode!r}"
-        )
-    d_bc = np.asarray(res_bc.att_draws, dtype=np.float64)
-    d_ab = np.asarray(res_ab.att_draws, dtype=np.float64)
-    d_ac = np.asarray(res_ac.att_draws, dtype=np.float64)
-    n_draws = int(d_bc.shape[0])
-
-    m_bc, v_bc = float(np.mean(d_bc)), float(np.var(d_bc, ddof=1))
-    m_ab, v_ab = float(np.mean(d_ab)), float(np.var(d_ab, ddof=1))
-    m_ac, v_ac = float(np.mean(d_ac)), float(np.var(d_ac, ddof=1))
-
-    cohorts_bc_arr, ever_bc_arr, _ = _infer_panel_masks_from_result(res_bc, cohorts_bc, ever_bc, att_w_bc)
-    cohorts_ab_arr, ever_ab_arr, _ = _infer_panel_masks_from_result(res_ab, cohorts_ab, ever_ab, att_w_ab)
-
-    def _resolve_scale(explicit: float | None, posterior_sd: float, what: str) -> float:
-        if explicit is not None:
-            if not float(explicit) > 0:
-                raise ValueError(f"{what} must be > 0; got {explicit!r}")
-            return float(explicit)
-        if isinstance(prior_scale, str):
-            if prior_scale != "in_sample":
-                raise ValueError(f"prior_scale must be a positive number or 'in_sample'; got {prior_scale!r}")
-            _warn_rank_k(f"prior_scale='in_sample' sets the {what} to the fit's own posterior SD ({posterior_sd:.4g}): an "
-                "empirical-Bayes-style prior that shrinks toward zero by a data-dependent amount independent of the "
-                "sample size. Report it next to an out-of-sample calibrated scale.")
-            return float(posterior_sd)
-        if prior_scale is None:
-            raise ValueError(
-                "reconcile_nested_3arm_draws needs an explicit prior scale: pass prior_scale=<positive float in "
-                "outcome units> (for example a scale calibrated on an earlier study) or prior_scale='in_sample' "
-                "to use the fit's posterior SD deliberately. The former silent default (posterior SD) was removed "
-                "because it shrank the ATTs toward zero by 15-41% and the posterior SD by about a third independent "
-                "of the sample size."
-            )
-        if not float(prior_scale) > 0:
-            raise ValueError(f"prior_scale must be > 0; got {prior_scale!r}")
-        return float(prior_scale)
-
-    # Group-level sampling variances (v_C, v_B, v_A) implied by the 3 pairwise fits
-    share = float(min_group_var_share)
-    v_b = max(0.5 * (v_bc + v_ab - v_ac), share * min(v_bc, v_ab))
-    v_c = max(v_bc - v_b, share * v_bc)
-    v_a = max(v_ab - v_b, share * v_ab)
-
-    sigma_lik = np.array([[v_b + v_c, -v_b], [-v_b, v_a + v_b]], dtype=np.float64)
-    # Singular-GLS projection of (m_bc, m_ab, m_ac) onto (theta_bc, theta_ab): equal split of the
-    # additivity discrepancy (exact for any (v_a, v_b, v_c); see the docstring).
-    delta = (m_ac - (m_bc + m_ab)) / 3.0
-    mu_lik = np.array([m_bc + delta, m_ab + delta], dtype=np.float64)
-
-    rng = np.random.default_rng(seed)
-    low_clip, high_clip = float(tau_clip[0]), float(tau_clip[1])
-    n_prop = int(n_proposals) if n_proposals is not None else max(n_draws * 500, 250000)
-
-    if prior_mode in _BUNDLE_PRIOR_MODES:
-        sd_ac = _resolve_scale(prior_sd_ac, float(np.sqrt(max(v_ac, 1e-12))), "bundle prior scale")
-
-        def _prior_draw(n: int) -> np.ndarray:
-            tot = _draw_bundle_prior(rng, prior_mode, sd_ac, n)
-            u = rng.uniform(0.0, 1.0, size=n)
-            return np.column_stack([u * tot, (1.0 - u) * tot])
-
-        def _prior_logpdf(pts: np.ndarray) -> np.ndarray:
-            # (t, u) -> (u t, (1 - u) t) has Jacobian t, so p(x1, x2) = p_AC(x1 + x2) / (x1 + x2)
-            t = pts[:, 0] + pts[:, 1]
-            with np.errstate(divide="ignore"):
-                return _bundle_prior_logpdf(prior_mode, sd_ac, t) - np.log(np.maximum(t, 1e-300))
-
-        scale_used: float | tuple[float, float] = sd_ac
-    else:
-        sd_bc = _resolve_scale(prior_sd_bc, float(np.sqrt(max(v_bc, 1e-12))), "prior SD of tau_BC")
-        sd_ab = _resolve_scale(prior_sd_ab, float(np.sqrt(max(v_ab, 1e-12))), "prior SD of tau_AB")
-        m_pri = np.array([float(prior_mean_bc), float(prior_mean_ab)])
-        s_pri = np.array([sd_bc, sd_ab])
-
-        def _prior_draw(n: int) -> np.ndarray:
-            return m_pri[None, :] + s_pri[None, :] * rng.standard_normal((n, 2))
-
-        def _prior_logpdf(pts: np.ndarray) -> np.ndarray:
-            zsc = (pts - m_pri[None, :]) / s_pri[None, :]
-            return -0.5 * np.sum(zsc**2, axis=1)
-
-        scale_used = (sd_bc, sd_ab)
-
-    post_pts, pri_pts, sir_ess = _sir_posterior_2d(
-        rng,
-        prior_draw=_prior_draw,
-        prior_logpdf=_prior_logpdf,
-        mu_lik=mu_lik,
-        sigma_lik=sigma_lik,
-        low_clip=low_clip,
-        high_clip=high_clip,
-        n_draws=n_draws,
-        n_prop=n_prop,
+    """Convenience wrapper reconciling nested 3-arm fits ``(C <= B <= A)`` via :func:`reconcile_multi_arm_draws`."""
+    rec = reconcile_multi_arm_draws(
+        {("B", "C"): res_bc, ("A", "B"): res_ab, ("A", "C"): res_ac},
+        arms=("C", "B", "A"),
+        order=("C", "B", "A"),
+        monotone=monotone,
+        prior_scale=prior_scale,
+        horizon=horizon,
+        n_modes=n_modes,
+        seed=seed,
+        _model_options=_model_options,
     )
-    if sir_ess < 100.0:
-        _warn_rank_k(f"reconcile_nested_3arm_draws: the importance weights have an effective sample size of {sir_ess:.1f}; "
-            "raise n_proposals or check for a prior-data conflict (the prior and the likelihood barely overlap).")
-    joint_att_bc = post_pts[:, 0]
-    joint_att_ab = post_pts[:, 1]
-
-    trt_catt_bc = _project_cohort_damped_trajectory(joint_att_bc, res_bc, ever_bc_arr, cohorts_bc_arr, tau_clip, catt_floor)
-    trt_catt_ab = _project_cohort_damped_trajectory(joint_att_ab, res_ab, ever_ab_arr, cohorts_ab_arr, tau_clip, catt_floor)
-    # Exact structural additivity: Combined (A vs C) = Base (B vs C) + Incremental (A vs B)
-    trt_catt_ac = trt_catt_bc + trt_catt_ab
-
-    out = Nested3ArmReconciliationResult(
-        trt_catt_bc=trt_catt_bc,
-        trt_catt_ab=trt_catt_ab,
-        trt_catt_ac=trt_catt_ac,
-        post_att_bc=joint_att_bc,
-        post_att_ab=joint_att_ab,
-        post_att_ac=joint_att_bc + joint_att_ab,
-        lik_mean=mu_lik,
-        lik_cov=sigma_lik,
-        prior_mode=prior_mode,
-        prior_scale=scale_used,
-        sir_ess=sir_ess,
+    return Nested3ArmReconciliationResult(
+        trt_catt_bc=rec.contrast_trajectory_draws[("B", "C")],
+        trt_catt_ab=rec.contrast_trajectory_draws[("A", "B")],
+        trt_catt_ac=rec.contrast_trajectory_draws[("A", "C")],
+        post_att_bc=rec.contrast_mode1_draws[("B", "C")],
+        post_att_ab=rec.contrast_mode1_draws[("A", "B")],
+        post_att_ac=rec.contrast_mode1_draws[("A", "C")],
+        prior_scale=rec.prior_scale,
+        multi_arm_result=rec,
     )
-    if return_prior_draws:
-        sel = rng.choice(pri_pts.shape[0], size=n_draws, replace=pri_pts.shape[0] < n_draws)
-        out.prior_att_bc = pri_pts[sel, 0]
-        out.prior_att_ab = pri_pts[sel, 1]
-        out.prior_att_ac = out.prior_att_bc + out.prior_att_ab
-        out.prior_catt_bc = _project_cohort_damped_trajectory(
-            out.prior_att_bc, res_bc, ever_bc_arr, cohorts_bc_arr, tau_clip, catt_floor
-        )
-        out.prior_catt_ab = _project_cohort_damped_trajectory(
-            out.prior_att_ab, res_ab, ever_ab_arr, cohorts_ab_arr, tau_clip, catt_floor
-        )
-        out.prior_catt_ac = out.prior_catt_bc + out.prior_catt_ab
-    return out
 
 
 reconcile_nested_3arm_monthly_draws = reconcile_nested_3arm_draws
@@ -4307,19 +4345,18 @@ def fit_rank_k_hybrid(
         t_start=t_start,
         compute_rhat=compute_rhat,
         compute_ess=compute_ess,
+        arm_metadata_override=res_p.arm_metadata or res_q.arm_metadata,
     )
 
 
 from longbet._rank_k_multi import (  # noqa: E402
     CrossOutcomeCorrelationResult,
-    ImanConoverResult,
     MultiArmMultiOutcomeReconciliationResult,
     Nested3ArmMultiReconciliationResult,
     RankKConvergenceCheck,
     check_rank_k_convergence,
     estimate_cross_outcome_correlation,
     ge_revenue_draws,
-    iman_conover_couple,
     paid_winsor_cap,
     reconcile_multi_arm_multi_outcome_draws,
     reconcile_nested_3arm_multi_draws,

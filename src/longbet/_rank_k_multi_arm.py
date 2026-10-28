@@ -48,6 +48,7 @@ import warnings
 
 import numpy as np
 from scipy import interpolate as sp_interpolate
+from scipy import linalg as sp_linalg
 from scipy import optimize as sp_optimize
 from scipy import special as sp_special
 from scipy import stats as sp_stats
@@ -94,6 +95,9 @@ _R2_BETA_ALPHA = 1.0
 _R2_BETA_BETA = 9.0
 _R2_LOG_INFL_MU = math.log(16.0)
 _R2_LOG_INFL_SD = 1.0
+
+# Process-level cache of 2,049-point P1 diamond log-normalizer lookup tables.
+_P1_LUT_CACHE: dict[tuple[Any, ...], list[float]] = {}
 
 
 class RankKDesignWarning(UserWarning):
@@ -283,7 +287,7 @@ def _parse_model_options(options: Mapping[str, Any] | None) -> dict[str, Any]:
         "use_sur": True,
         "dynamic_shrinkage": True,
         "n_chains": 4,
-        "n_warmup": 300,
+        "n_warmup": 200,
         "n_draws_per_chain": 400,
         "max_continuation_rounds": 4,
     }
@@ -1065,13 +1069,15 @@ class _OutcomeConePriorSpec:
         self.a_cone = _build_cone_matrix_outcome(
             self.c_cover, self.psi, self.horizon, self.monotone, self.period_positivity
         )
+        self.a_cone_0 = self.a_cone[:, : self.n_nonctrl]
+        self.a_cone_dyn = self.a_cone[:, self.n_nonctrl :]
 
         # Deterministic QMC normal bank for general non-tree K' >= 3 fallback
         self._qmc_z: np.ndarray | None = None
-        self._p1_spline: sp_interpolate.CubicSpline | None = None
+        self._p1_lut: list[float] | None = None
         if self.monotone and not self.is_tree_poset:
             if self.scale_prior == "global_halft" and self.period_positivity and self.k_dim >= 2:
-                self._p1_spline = self._build_p1_logz_spline()
+                self._p1_lut = self._build_p1_logz_lut()
 
     def _identify_diamond_edges(self) -> tuple[int, int, int, int] | None:
         """Identify edge indices ``(e_10_0, e_01_0, e_11_10, e_11_01)`` if standard 2x2 diamond."""
@@ -1223,8 +1229,20 @@ class _OutcomeConePriorSpec:
         prob = max(float(np.mean(inside)), 0.5 / float(n_pts))
         return math.log(prob)
 
-    def _build_p1_logz_spline(self) -> sp_interpolate.CubicSpline:
-        """Precompute cubic spline of ``log Z_m(exp(u), 1)`` on ``u in [-12, 12]``."""
+    def _build_p1_logz_lut(self) -> list[float]:
+        """Precompute dense 2,049-point lookup table of ``log Z_m(exp(u), 1)`` on ``u in [-12, 12]``."""
+        cache_key = (
+            self.horizon,
+            self.k_dim,
+            round(self.m_plus, 12),
+            round(self.m_minus, 12),
+            round(self.c_scale, 12),
+            self._diamond_map,
+            self.c_cover.tobytes(),
+        )
+        cached = _P1_LUT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         u_grid = np.linspace(-12.0, 12.0, 97)
         ones = np.ones(self.n_edges, dtype=np.float64)
         vals = np.array(
@@ -1236,13 +1254,18 @@ class _OutcomeConePriorSpec:
             ],
             dtype=np.float64,
         )
-        return sp_interpolate.CubicSpline(u_grid, vals, extrapolate=True)
+        spline = sp_interpolate.CubicSpline(u_grid, vals, extrapolate=True)
+        u_dense = np.linspace(-12.0, 12.0, 2049)
+        lut = [float(x) for x in spline(u_dense)]
+        _P1_LUT_CACHE[cache_key] = lut
+        return lut
 
     def log_normalizer(self, ratio: float, local_scales: np.ndarray) -> float:
         """Return ``log Pr((X_0, ratio * X_{1..K'-1}) in K_m | Lambda_0(local_scales))``."""
         if not self.monotone or self.n_edges == 0:
             return 0.0
-        r_clamped = float(np.clip(ratio, 1e-8, 1e8))
+        r_f = float(ratio)
+        r_clamped = 1e-8 if r_f < 1e-8 else (1e8 if r_f > 1e8 else r_f)
         if self.is_tree_poset:
             if not self.period_positivity or self.k_dim == 1:
                 return -float(self.n_nonctrl) * math.log(2.0)
@@ -1259,13 +1282,20 @@ class _OutcomeConePriorSpec:
                 if self._diamond_map is not None:
                     return self._diamond_logz_exact(0.0, np.ones(self.n_edges))
                 return self._qmc_logz(0.0, np.ones(self.n_edges))
-            assert self._p1_spline is not None
-            u_val = float(np.clip(math.log(r_clamped), -12.0, 12.0))
-            if math.log(r_clamped) > 12.0:
+            lut = self._p1_lut
+            assert lut is not None
+            log_r = math.log(r_clamped)
+            if log_r >= 12.0:
                 # Asymptotic tail: Z(r) ~ r^{-(A-1)(K'-1)} for large r
-                base_12 = float(self._p1_spline(12.0))
-                return base_12 - float(self.n_nonctrl * (self.k_dim - 1)) * (math.log(r_clamped) - 12.0)
-            return float(self._p1_spline(u_val))
+                return lut[2048] - float(self.n_nonctrl * (self.k_dim - 1)) * (log_r - 12.0)
+            if log_r <= -12.0:
+                return lut[0]
+            pos = (log_r + 12.0) * (2048.0 / 24.0)
+            idx = int(pos)
+            if idx >= 2048:
+                return lut[2048]
+            y0 = lut[idx]
+            return y0 + (pos - float(idx)) * (lut[idx + 1] - y0)
 
         if self._diamond_map is not None:
             return self._diamond_logz_exact(r_clamped, local_scales, fast_grid=True)
@@ -1340,6 +1370,14 @@ def _univariate_tn_gibbs_sweep(
     return z_cur
 
 
+def _fast_cholesky(mat: np.ndarray, *, floor: float = 1e-12) -> np.ndarray:
+    """Fast-path Cholesky factorization falling back to eigendecomposition clipping only if needed."""
+    try:
+        return np.linalg.cholesky(mat)
+    except np.linalg.LinAlgError:
+        return np.linalg.cholesky(_psd_clip(mat, floor=floor))
+
+
 def _pakman_paninski_hmc_whitened(
     z_init: np.ndarray,
     f_walls: np.ndarray,
@@ -1347,7 +1385,7 @@ def _pakman_paninski_hmc_whitened(
     rng: np.random.Generator,
     *,
     n_steps: int = 2,
-    max_events: int = 400,
+    max_events: int = 64,
 ) -> np.ndarray:
     """Exact Pakman & Paninski (2014) wall-reflecting HMC for ``z ~ N(0, I_D)`` s.t. ``F z + g >= 0``.
 
@@ -1365,6 +1403,7 @@ def _pakman_paninski_hmc_whitened(
         z = _univariate_tn_gibbs_sweep(z, f_walls, g_walls, rng)
 
     two_pi = 2.0 * math.pi
+    abs_g_tol = np.abs(g_walls) + 1e-14
     for _ in range(n_steps):
         z_saved = z.copy()
         v = rng.standard_normal(d_dim)
@@ -1378,36 +1417,39 @@ def _pakman_paninski_hmc_whitened(
             u_vec = np.hypot(a_vec, b_vec)
 
             # Candidate outward wall hit: u_j * cos(t + phi_j) + g_j == 0 with sin(t + phi_j) > 0
-            can_hit = u_vec > np.abs(g_walls) + 1e-14
+            can_hit = u_vec > abs_g_tol
             if not np.any(can_hit):
                 z = z * math.cos(t_rem) + v * math.sin(t_rem)
                 break
 
-            hit_times = np.full(m_walls, math.inf, dtype=np.float64)
             idx_cand = np.nonzero(can_hit)[0]
             u_c = u_vec[idx_cand]
             ratio_c = np.clip(-g_walls[idx_cand] / u_c, -1.0, 1.0)
             alpha_c = np.arccos(ratio_c)  # in [0, pi], sin(alpha_c) >= 0
             phi_c = np.arctan2(-b_vec[idx_cand], a_vec[idx_cand])
             t_c = np.mod(alpha_c - phi_c, two_pi)
+            t_c = np.where((t_c < 1e-13) & (b_vec[idx_cand] >= 0.0), t_c + two_pi, t_c)
+            if last_wall >= 0:
+                lw_mask = idx_cand == last_wall
+                if np.any(lw_mask):
+                    t_c = np.where(
+                        lw_mask,
+                        np.where(alpha_c > 1e-11, 2.0 * alpha_c, two_pi),
+                        t_c,
+                    )
 
-            # Outward normal velocity at t_c is -u_c * sin(alpha_c) <= 0
-            vel_out = -u_c * np.sin(alpha_c)
-            for k_local, w_idx in enumerate(idx_cand):
-                tk = float(t_c[k_local])
-                if w_idx == last_wall:
-                    # Just reflected inward off last_wall (b > 0); next outward hit is at 2 * alpha
-                    tk = float(2.0 * alpha_c[k_local]) if alpha_c[k_local] > 1e-11 else two_pi
-                elif tk < 1e-13 and b_vec[w_idx] >= 0.0:
-                    tk += two_pi
-                if vel_out[k_local] < -1e-13 and tk > 1e-14:
-                    hit_times[w_idx] = tk
+            valid_c = (u_c * np.sin(alpha_c) > 1e-13) & (t_c > 1e-14)
+            if not np.any(valid_c):
+                z = z * math.cos(t_rem) + v * math.sin(t_rem)
+                break
 
-            j_hit = int(np.argmin(hit_times))
-            t_hit = float(hit_times[j_hit])
+            t_valid = np.where(valid_c, t_c, math.inf)
+            k_best = int(np.argmin(t_valid))
+            t_hit = float(t_valid[k_best])
             if t_hit >= t_rem:
                 z = z * math.cos(t_rem) + v * math.sin(t_rem)
                 break
+            j_hit = int(idx_cand[k_best])
 
             # Advance to wall j_hit and reflect momentum elastically
             cos_h = math.cos(t_hit)
@@ -1447,12 +1489,14 @@ def _sample_truncated_mvn(
     rng: np.random.Generator,
     *,
     n_hmc_steps: int = 2,
+    chol_prec: np.ndarray | None = None,
 ) -> np.ndarray:
     """Sample ``theta ~ N(mean, precision^{-1})`` truncated to ``{theta : a_cone @ theta >= 0}``."""
     d_dim = mean.shape[0]
-    chol_prec = np.linalg.cholesky(_psd_clip(precision, floor=1e-12))
+    if chol_prec is None:
+        chol_prec = _fast_cholesky(precision, floor=1e-12)
     # precision = L L^T => cov = L^{-T} L^{-1}; set M_cov = L^{-T}
-    m_cov = np.linalg.solve(chol_prec, np.eye(d_dim, dtype=np.float64)).T
+    m_cov = np.linalg.inv(chol_prec).T
     if a_cone.shape[0] == 0:
         return mean + m_cov @ rng.standard_normal(d_dim)
 
@@ -1494,9 +1538,8 @@ def _cone_qp_mode(
     """Compute exact cone-constrained posterior mode ``argmin 0.5 (x - mu)^T P (x - mu)`` s.t. ``A x >= 0``."""
     if a_cone.shape[0] == 0 or float(np.min(a_cone @ mean)) >= 1e-5:
         return mean.copy()
-    d_dim = mean.shape[0]
-    chol_prec = np.linalg.cholesky(_psd_clip(precision, floor=1e-12))
-    m_cov = np.linalg.solve(chol_prec, np.eye(d_dim, dtype=np.float64)).T
+    chol_prec = _fast_cholesky(precision, floor=1e-12)
+    m_cov = np.linalg.inv(chol_prec).T
     f_raw = a_cone @ m_cov
     g_raw = a_cone @ mean
     norms = np.linalg.norm(f_raw, axis=1)
@@ -1537,21 +1580,22 @@ def _slice_sample_1d(
     x_init: float,
     rng: np.random.Generator,
     *,
-    width: float = 0.8,
-    max_steps: int = 32,
+    width: float = 1.5,
+    max_steps: int = 12,
     bounds: tuple[float, float] = (-14.0, 14.0),
 ) -> float:
     """Exact Neal (2003) stepping-out + shrinkage 1-D slice sampler on ``bounds``."""
     lo_b, hi_b = bounds
-    x0 = float(np.clip(x_init, lo_b + 1e-9, hi_b - 1e-9))
+    x_f = float(x_init)
+    x0 = lo_b + 1e-9 if x_f < lo_b + 1e-9 else (hi_b - 1e-9 if x_f > hi_b - 1e-9 else x_f)
+    rand = rng.random
     fx0 = float(log_prob_fn(x0))
-    log_y = fx0 - float(rng.exponential(1.0))
+    log_y = fx0 - float(rng.standard_exponential())
 
-    u = float(rng.uniform(0.0, width))
-    left = max(lo_b, x0 - u)
+    left = max(lo_b, x0 - float(rand()) * width)
     right = min(hi_b, left + width)
 
-    j_steps = int(rng.integers(0, max_steps))
+    j_steps = int(float(rand()) * max_steps)
     k_steps = (max_steps - 1) - j_steps
     while j_steps > 0 and left > lo_b and float(log_prob_fn(left)) > log_y:
         left = max(lo_b, left - width)
@@ -1561,14 +1605,14 @@ def _slice_sample_1d(
         k_steps -= 1
 
     for _ in range(128):
-        x_prop = float(rng.uniform(left, right))
+        x_prop = left + float(rand()) * (right - left)
         if float(log_prob_fn(x_prop)) >= log_y:
             return x_prop
         if x_prop < x0:
             left = x_prop
         else:
             right = x_prop
-        if abs(right - left) < 1e-13:
+        if right - left < 1e-13:
             break
     return x0
 
@@ -1749,14 +1793,23 @@ def _build_sigma_xi(
     n_arms: int,
     n_outcomes: int,
     k_dim: int,
+    *,
+    d_arms_stack: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build block-diagonal ``Sigma_xi(R)`` and its generative factor ``L_xi`` of shape ``(A*M*K', A*M*K')``."""
-    chol_r = np.linalg.cholesky(_psd_clip(corr_r, floor=1e-10))
+    chol_r = _fast_cholesky(corr_r, floor=1e-10)
     rk_factor = np.kron(chol_r, np.eye(k_dim, dtype=np.float64))  # (M*K', M*K')
     amk = n_arms * n_outcomes * k_dim
     sigma_xi = np.zeros((amk, amk), dtype=np.float64)
     l_xi = np.zeros((amk, amk), dtype=np.float64)
     mk = n_outcomes * k_dim
+    if d_arms_stack is not None:
+        la_stack = d_arms_stack @ rk_factor
+        s_stack = la_stack @ np.swapaxes(la_stack, 1, 2)
+        a_idx = np.arange(n_arms)
+        l_xi.reshape(n_arms, mk, n_arms, mk)[a_idx, :, a_idx, :] = la_stack
+        sigma_xi.reshape(n_arms, mk, n_arms, mk)[a_idx, :, a_idx, :] = s_stack
+        return sigma_xi, l_xi
     for a in range(n_arms):
         d_a = np.zeros((mk, mk), dtype=np.float64)
         for m in range(n_outcomes):
@@ -1771,21 +1824,23 @@ def _build_sigma_xi(
 def _build_omega_cov(
     g_xi: np.ndarray,
     sigma_xi: np.ndarray,
-    f_blocks: list[np.ndarray],
+    f_blocks: Sequence[np.ndarray] | np.ndarray,
     omega_vec: np.ndarray,
     k_dim: int,
 ) -> np.ndarray:
     """Collapsed measurement covariance ``Omega(omega, R) = G Sigma_xi(R) G^T + blkdiag(F_q / omega_q)``."""
     omega_mat = g_xi @ sigma_xi @ g_xi.T
-    for q_idx, fq in enumerate(f_blocks):
-        sl = slice(q_idx * k_dim, (q_idx + 1) * k_dim)
-        omega_mat[sl, sl] += fq / max(float(omega_vec[q_idx]), 1e-12)
-    return _psd_clip(omega_mat, floor=1e-13)
+    n_q = len(f_blocks)
+    f_arr = f_blocks if isinstance(f_blocks, np.ndarray) else np.stack(f_blocks, axis=0)
+    q_idx = np.arange(n_q)
+    omega_4d = omega_mat.reshape(n_q, k_dim, n_q, k_dim)
+    omega_4d[q_idx, :, q_idx, :] += f_arr / np.maximum(omega_vec, 1e-12)[:, None, None]
+    return omega_mat
 
 
 def _sample_omega_weights(
     eta_blocks: np.ndarray,
-    f_inv_blocks: list[np.ndarray],
+    f_inv_blocks: Sequence[np.ndarray] | np.ndarray,
     robust_error: str,
     pi_mix: float,
     rng: np.random.Generator,
@@ -1795,20 +1850,14 @@ def _sample_omega_weights(
     if robust_error == "gaussian":
         return np.ones(n_q, dtype=np.float64), np.zeros(n_q, dtype=np.float64), 0.0
 
-    d_sq = np.array(
-        [float(eta_blocks[q] @ f_inv_blocks[q] @ eta_blocks[q]) for q in range(n_q)],
-        dtype=np.float64,
-    )
+    f_inv_arr = f_inv_blocks if isinstance(f_inv_blocks, np.ndarray) else np.stack(f_inv_blocks, axis=0)
+    d_sq = np.einsum("qi,qij,qj->q", eta_blocks, f_inv_arr, eta_blocks)
     if robust_error == "t4":
         # Student-t_4: omega_q ~ Gamma(2, 2) => omega_q | eta_q ~ Gamma(2 + K'/2, 2 + d_q^2 / 2)
         shape_post = 2.0 + 0.5 * float(k_dim)
-        omega_out = np.empty(n_q, dtype=np.float64)
-        flag_out = np.empty(n_q, dtype=np.float64)
-        for q in range(n_q):
-            rate_q = 2.0 + 0.5 * max(float(d_sq[q]), 0.0)
-            w_q = float(rng.gamma(shape=shape_post, scale=1.0 / rate_q))
-            omega_out[q] = max(w_q, 1e-10)
-            flag_out[q] = 1.0 if omega_out[q] < 0.40 else 0.0
+        rates = 2.0 + 0.5 * np.maximum(d_sq, 0.0)
+        omega_out = np.maximum(rng.gamma(shape=shape_post, scale=1.0 / rates), 1e-10)
+        flag_out = (omega_out < 0.40).astype(np.float64)
         return omega_out, flag_out, pi_mix
 
     # R2 ("mixture"): z_q ~ Bern(pi), log(1/omega_q) | z_q=1 ~ N(mu_infl, sd_infl^2), exact GH16 collapse
@@ -1848,14 +1897,17 @@ def _sample_iw_correlation(
     df_iw: float,
     scale_iw: np.ndarray,
     rng: np.random.Generator,
+    *,
+    chol_inv: np.ndarray | None = None,
 ) -> np.ndarray:
     """Draw ``Sigma ~ InvWishart(df_iw, scale_iw)`` and rescale to correlation matrix ``R``."""
     m_dim = scale_iw.shape[0]
     if m_dim == 1:
         return np.ones((1, 1), dtype=np.float64)
     # Sample W ~ Wishart(df_iw, scale_iw^{-1}) via Bartlett decomposition
-    inv_scale = np.linalg.inv(_psd_clip(scale_iw, floor=1e-12))
-    chol_inv = np.linalg.cholesky(_psd_clip(inv_scale, floor=1e-12))
+    if chol_inv is None:
+        inv_scale = np.linalg.inv(_psd_clip(scale_iw, floor=1e-12))
+        chol_inv = _fast_cholesky(inv_scale, floor=1e-12)
     a_bart = np.zeros((m_dim, m_dim), dtype=np.float64)
     for i in range(m_dim):
         a_bart[i, i] = math.sqrt(max(float(rng.chisquare(max(df_iw - float(i), 1.0))), 1e-15))
@@ -1863,12 +1915,15 @@ def _sample_iw_correlation(
             a_bart[i, j] = float(rng.standard_normal())
     la = chol_inv @ a_bart
     w_mat = la @ la.T
-    sig_mat = np.linalg.inv(_psd_clip(w_mat, floor=1e-14))
+    try:
+        sig_mat = np.linalg.inv(w_mat)
+    except np.linalg.LinAlgError:
+        sig_mat = np.linalg.inv(_psd_clip(w_mat, floor=1e-14))
     d_inv = 1.0 / np.sqrt(np.maximum(np.diag(sig_mat), 1e-24))
     r_mat = sig_mat * (d_inv[:, None] * d_inv[None, :])
     r_mat = 0.5 * (r_mat + r_mat.T)
     np.fill_diagonal(r_mat, 1.0)
-    return _psd_clip(r_mat, floor=1e-8)
+    return r_mat
 
 
 # ---- Posterior predictive checks (cycle, composite, basis) ---------------------------------------
@@ -2017,18 +2072,15 @@ def _asis_interweave_outcome_scales(
     # AA-0: Non-centered Mode-1 scale interweaving holding eta_0 = theta_0 / sigma_m fixed
     if fixed_sigma_m is None and k_dim >= 2 and dynamic_shrinkage and not skip_expensive_ratio_aa:
         sl_0 = slice(base_m, base_m + n_nonctrl)
+        sl_dyn = slice(base_m + n_nonctrl, base_m + d_per_m)
         sig_0 = math.sqrt(max(sigma_sq_m, 1e-28))
         kap_0 = math.sqrt(max(kappa_sq_m, 1e-28))
         eta_0 = theta[sl_0] / sig_0
         if float(np.dot(eta_0, eta_0)) > 1e-50:
             ws_lo, ws_hi = -13.0, 13.0
             if spec.a_cone.shape[0] > 0:
-                th_base_0 = np.zeros(d_per_m, dtype=np.float64)
-                th_base_0[n_nonctrl:] = theta[base_m + n_nonctrl : base_m + d_per_m]
-                th_dir_0 = np.zeros(d_per_m, dtype=np.float64)
-                th_dir_0[:n_nonctrl] = eta_0
-                a0 = spec.a_cone @ th_base_0
-                a1 = spec.a_cone @ th_dir_0
+                a0 = spec.a_cone_dyn @ theta[sl_dyn]
+                a1 = spec.a_cone_0 @ eta_0
                 neg_mask = a1 < -1e-15
                 if np.any(neg_mask):
                     sig_max = float(np.min(-a0[neg_mask] / a1[neg_mask]))
@@ -2061,6 +2113,7 @@ def _asis_interweave_outcome_scales(
 
     # AA-1: Non-centered dynamic-scale interweaving holding eta_dyn = theta_dyn / kappa_m fixed
     if dynamic_shrinkage and k_dim >= 2 and not skip_expensive_ratio_aa:
+        sl_0 = slice(base_m, base_m + n_nonctrl)
         sl_dyn = slice(base_m + n_nonctrl, base_m + d_per_m)
         kap_0 = math.sqrt(max(kappa_sq_m, 1e-28))
         sig_0 = math.sqrt(max(sigma_sq_m, 1e-28))
@@ -2068,12 +2121,8 @@ def _asis_interweave_outcome_scales(
         if float(np.dot(eta_dyn, eta_dyn)) > 1e-50:
             w_lo, w_hi = -13.0, 13.0
             if spec.a_cone.shape[0] > 0:
-                th_base_m = np.zeros(d_per_m, dtype=np.float64)
-                th_base_m[:n_nonctrl] = theta[base_m : base_m + n_nonctrl]
-                th_dir_m = np.zeros(d_per_m, dtype=np.float64)
-                th_dir_m[n_nonctrl:] = eta_dyn
-                a0 = spec.a_cone @ th_base_m
-                a1 = spec.a_cone @ th_dir_m
+                a0 = spec.a_cone_0 @ theta[sl_0]
+                a1 = spec.a_cone_dyn @ eta_dyn
                 neg_mask = a1 < -1e-15
                 if np.any(neg_mask):
                     kap_max = float(np.min(-a0[neg_mask] / a1[neg_mask]))
@@ -2251,14 +2300,57 @@ def _run_single_gibbs_chain(
         tr_theta = tr_sigma = tr_kappa = tr_omega = tr_flag = tr_corr = None  # type: ignore[assignment]
         tr_local = []
 
-    sigma_xi, l_xi = _build_sigma_xi(sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim)
+    mk = n_outcomes * k_dim
+    d_arms_stack = np.zeros((n_arms, mk, mk), dtype=np.float64)
+    for a in range(n_arms):
+        for m in range(n_outcomes):
+            d_arms_stack[a, m * k_dim : (m + 1) * k_dim, m * k_dim : (m + 1) * k_dim] = sqrt_v_arms[m][a]
+
+    sigma_xi, l_xi = _build_sigma_xi(
+        sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack
+    )
+    base_xi_cov = g_xi @ sigma_xi @ g_xi.T
+    f_stack = np.stack(f_blocks, axis=0)
+    chol_f_stack = np.stack(chol_f_blocks, axis=0)
+    f_inv_stack = np.stack(f_inv_blocks, axis=0)
+    q_arange = np.arange(n_q)
+    xy_des = np.column_stack([x_des, y_vec])
+    g_xi_t = np.ascontiguousarray(g_xi.T)
+
+    if sample_corr and n_outcomes >= 2:
+        inv_iw_scale = np.linalg.inv(_psd_clip(iw_scale, floor=1e-12))
+        chol_iw_inv = _fast_cholesky(inv_iw_scale, floor=1e-12)
+        # Precompute constant bilinear basis B_{m, m'} so G Sigma_xi(R) G^T = sum_{m,m'} R_{m,m'} B_{m,m'}
+        n_meas = y_vec.shape[0]
+        xi_cov_basis = np.zeros((n_outcomes, n_outcomes, n_meas, n_meas), dtype=np.float64)
+        for m1 in range(n_outcomes):
+            for m2 in range(m1, n_outcomes):
+                blk_mm = np.zeros((n_arms * mk, n_arms * mk), dtype=np.float64)
+                for a in range(n_arms):
+                    r_sl = slice(a * mk + m1 * k_dim, a * mk + (m1 + 1) * k_dim)
+                    c_sl = slice(a * mk + m2 * k_dim, a * mk + (m2 + 1) * k_dim)
+                    blk_mm[r_sl, c_sl] = sqrt_v_arms[m1][a] @ sqrt_v_arms[m2][a].T
+                b_12 = g_xi @ blk_mm @ g_xi_t
+                xi_cov_basis[m1, m2] = b_12
+                if m1 != m2:
+                    xi_cov_basis[m2, m1] = b_12.T
+    else:
+        chol_iw_inv = None
+        xi_cov_basis = None
+
+    def _make_omega_chol(base_cov: np.ndarray, om_vec: np.ndarray) -> np.ndarray:
+        om_mat = base_cov.copy()
+        om_4d = om_mat.reshape(n_q, k_dim, n_q, k_dim)
+        om_4d[q_arange, :, q_arange, :] += f_stack / np.maximum(om_vec, 1e-12)[:, None, None]
+        return _fast_cholesky(om_mat, floor=1e-13)
+
+    chol_omega = _make_omega_chol(base_xi_cov, omega_vec)
 
     for it_idx in range(total_iters):
         # 1. Collapsed likelihood precision & mean marginalizing shared arm noise xi
-        omega_cov = _build_omega_cov(g_xi, sigma_xi, f_blocks, omega_vec, k_dim)
-        chol_omega = np.linalg.cholesky(omega_cov)
-        wx = np.linalg.solve(chol_omega, x_des)
-        wy = np.linalg.solve(chol_omega, y_vec)
+        wxy = np.linalg.solve(chol_omega, xy_des)
+        wx = wxy[:, :-1]
+        wy = wxy[:, -1]
         prec_lik = wx.T @ wx
         h_lik = wx.T @ wy
 
@@ -2273,7 +2365,8 @@ def _run_single_gibbs_chain(
                 slk = slice(base_m + k * n_nonctrl, base_m + (k + 1) * n_nonctrl)
                 prec_prior[slk, slk] = l0_m / max(h_float * float(kappa_sq[m]), 1e-24)
 
-        prec_post = _psd_clip(prec_lik + prec_prior, floor=1e-12)
+        prec_post = prec_lik + prec_prior
+        chol_post = _fast_cholesky(prec_post, floor=1e-12)
         mean_post = np.linalg.solve(prec_post, h_lik)
 
         # 3. Exact Pakman--Paninski wall-reflecting HMC on cone K
@@ -2285,6 +2378,7 @@ def _run_single_gibbs_chain(
             interior_ray_joint,
             rng,
             n_hmc_steps=1,
+            chol_prec=chol_post,
         )
 
         # 4. Exact collapsed Half-t_3 SA + Yu & Meng (2011) ASIS scale updates per outcome
@@ -2333,44 +2427,42 @@ def _run_single_gibbs_chain(
         if robust_error != "gaussian":
             for sub_o in range(2):
                 if sub_o > 0:
-                    omega_cov = _build_omega_cov(g_xi, sigma_xi, f_blocks, omega_vec, k_dim)
-                    chol_omega = np.linalg.cholesky(omega_cov)
+                    chol_omega = _make_omega_chol(base_xi_cov, omega_vec)
                 xi_0 = l_xi @ rng.standard_normal(l_xi.shape[0])
-                eta_0 = np.concatenate(
-                    [
-                        (chol_f_blocks[q] @ rng.standard_normal(k_dim))
-                        / math.sqrt(max(float(omega_vec[q]), 1e-12))
-                        for q in range(n_q)
-                    ],
-                    axis=0,
-                )
+                z_eta = rng.standard_normal((n_q, k_dim))
+                eta_0 = (
+                    np.einsum("qij,qj->qi", chol_f_stack, z_eta)
+                    / np.sqrt(np.maximum(omega_vec, 1e-12))[:, None]
+                ).reshape(-1)
                 r_0 = g_xi @ xi_0 + eta_0
                 delta_r = res_vec - r_0
                 alpha_sol = np.linalg.solve(chol_omega.T, np.linalg.solve(chol_omega, delta_r))
-                xi_draw = xi_0 + sigma_xi @ (g_xi.T @ alpha_sol)
+                xi_draw = xi_0 + sigma_xi @ (g_xi_t @ alpha_sol)
                 eta_vec = res_vec - g_xi @ xi_draw
                 eta_blocks = eta_vec.reshape(n_q, k_dim)
                 omega_vec, flag_vec, pi_mix = _sample_omega_weights(
-                    eta_blocks, f_inv_blocks, robust_error, pi_mix, rng
+                    eta_blocks, f_inv_stack, robust_error, pi_mix, rng
                 )
+            chol_omega = _make_omega_chol(base_xi_cov, omega_vec)
 
         # 6. Pre-period IW independence-MH update for cross-outcome correlation R
-        if sample_corr and n_outcomes >= 2:
-            r_prop = _sample_iw_correlation(iw_df, iw_scale, rng)
-            sigma_xi_prop, l_xi_prop = _build_sigma_xi(sqrt_v_arms, r_prop, n_arms, n_outcomes, k_dim)
-            omega_cov_cur = _build_omega_cov(g_xi, sigma_xi, f_blocks, omega_vec, k_dim)
-            omega_cov_prop = _build_omega_cov(g_xi, sigma_xi_prop, f_blocks, omega_vec, k_dim)
+        if sample_corr and n_outcomes >= 2 and xi_cov_basis is not None:
+            r_prop = _sample_iw_correlation(iw_df, iw_scale, rng, chol_inv=chol_iw_inv)
+            base_xi_cov_prop = np.einsum("ij,ijkl->kl", r_prop, xi_cov_basis)
+            chol_cur = chol_omega
+            chol_prop = _make_omega_chol(base_xi_cov_prop, omega_vec)
 
-            chol_cur = np.linalg.cholesky(omega_cov_cur)
-            chol_prop = np.linalg.cholesky(omega_cov_prop)
             v_cur = np.linalg.solve(chol_cur, res_vec)
             v_prop = np.linalg.solve(chol_prop, res_vec)
             loglik_cur = -float(np.sum(np.log(np.diag(chol_cur)))) - 0.5 * float(np.dot(v_cur, v_cur))
             loglik_prop = -float(np.sum(np.log(np.diag(chol_prop)))) - 0.5 * float(np.dot(v_prop, v_prop))
             if math.log(float(rng.uniform(1e-15, 1.0))) < (loglik_prop - loglik_cur):
                 corr_r = r_prop
-                sigma_xi = sigma_xi_prop
-                l_xi = l_xi_prop
+                sigma_xi, l_xi = _build_sigma_xi(
+                    sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack
+                )
+                base_xi_cov = base_xi_cov_prop
+                chol_omega = chol_prop
 
         if record and ((it_idx + 1) % thin_eff == 0):
             rec_idx = it_idx // thin_eff

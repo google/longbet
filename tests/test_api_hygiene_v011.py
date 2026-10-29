@@ -303,23 +303,18 @@ def test_asis_interweaving_preserves_exact_2d_cone_posterior_stationarity() -> N
     h_lik = wx.T @ wy
     interior_ray = np.array([1.0, 0.0], dtype=np.float64)
 
-    # 1. Exact prior-proposal importance/rejection reference draws from joint posterior p(theta, sigma, kappa | y)
+    # 1. Exact prior-proposal importance reference draws from joint posterior p(theta, sigma, kappa | y)
     n_prop = 200_000
-    sig_p = s0 * np.abs(rng.standard_t(df=3.0, size=n_prop))
+    sig_p = s0 * np.abs(rng.standard_t(df=1.0, size=n_prop))
     kap_p = s0 * np.abs(rng.standard_t(df=3.0, size=n_prop))
-    th0_p = np.zeros(n_prop, dtype=np.float64)
-    th1_p = np.zeros(n_prop, dtype=np.float64)
-    alive = np.ones(n_prop, dtype=bool)
-    while np.any(alive):
-        idx = np.nonzero(alive)[0]
-        z0 = rng.standard_normal(idx.size) * sig_p[idx] * math.sqrt(float(h_post) / spec.c_scale)
-        z1 = rng.standard_normal(idx.size) * kap_p[idx] * math.sqrt(float(h_post) / spec.c_scale)
-        cand = np.column_stack([z0, z1])
-        ok = np.all((cand @ spec.a_cone.T) >= 0.0, axis=1)
-        acc = idx[ok]
-        th0_p[acc] = z0[ok]
-        th1_p[acc] = z1[ok]
-        alive[acc] = False
+    r_ratio = np.maximum(kap_p / np.maximum(sig_p, 1e-30), 1e-30)
+    phi_lo = -np.arctan(1.0 / np.maximum(r_ratio * spec.m_plus, 1e-30))
+    phi_hi = np.arctan(1.0 / np.maximum(r_ratio * spec.m_minus, 1e-30))
+    rad = np.sqrt(-2.0 * np.log(np.clip(rng.uniform(size=n_prop), 1e-15, 1.0)))
+    ang = rng.uniform(phi_lo, phi_hi)
+    scale_fac = math.sqrt(float(h_post) / spec.c_scale)
+    th0_p = rad * np.cos(ang) * sig_p * scale_fac
+    th1_p = rad * np.sin(ang) * kap_p * scale_fac
 
     log_lik = -0.5 * (((th0_p - y_obs[0]) / sd_obs) ** 2 + ((th1_p - y_obs[1]) / sd_obs) ** 2)
     log_lik -= np.max(log_lik)

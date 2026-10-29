@@ -96,6 +96,13 @@ _R2_BETA_BETA = 9.0
 _R2_LOG_INFL_MU = math.log(16.0)
 _R2_LOG_INFL_SD = 1.0
 
+# Hierarchical Stage-1/Stage-2 variance-decomposition Beta prior hyperparameters:
+# rho_m ~ Beta(5.0, 1.5) (shared-arm variance scale), phi_m ~ Beta(2.0, 10.0) (forest variance share floor).
+_RHO_BETA_ALPHA = 5.0
+_RHO_BETA_BETA = 1.5
+_PHI_BETA_ALPHA = 2.0
+_PHI_BETA_BETA = 10.0
+
 # Process-level cache of 2,049-point P1 diamond log-normalizer lookup tables.
 _P1_LUT_CACHE: dict[tuple[Any, ...], list[float]] = {}
 
@@ -181,6 +188,8 @@ class MultiArmReconciliationResult:
     ppc_basis_pvalue: float | None
     max_cycle_discrepancy: float
     sampler_diagnostics: SamplerDiagnostics
+    rho_draws: np.ndarray | None = None
+    phi_draws: np.ndarray | None = None
 
     @property
     def diagnostics(self) -> SamplerDiagnostics:
@@ -911,14 +920,48 @@ def _extract_outcome_summaries(
         for a in missing_arms:
             v_arms[a] = max(float(sol[a]), 1e-12) * np.eye(k_dim, dtype=np.float64)
 
+    # Align mode-wise Stage-1 shrinkage using the median across fitted pairs
+    gamma_modes = np.ones(k_dim, dtype=np.float64)
+    for k in range(k_dim):
+        ratios_k = [
+            float(s_by_pair[pair][k, k])
+            / max(float(v_arms[arm_to_idx[pair[0]]][k, k] + v_arms[arm_to_idx[pair[1]]][k, k]), 1e-18)
+            for pair in fitted_pairs
+        ]
+        gamma_modes[k] = min(1.0, max(float(np.median(ratios_k)), 1e-6))
+    sqrt_gamma = np.sqrt(gamma_modes)
+    for a in range(n_arms):
+        v_arms[a] = _psd_clip((sqrt_gamma[:, None] * v_arms[a]) * sqrt_gamma[None, :], floor=1e-12)
+
+    # Precompute simultaneous diagonalization of (S_{m,p}, V^{(0)}_{m,a} + V^{(0)}_{m,b})
+    # so F_{m,p}(rho_m, phi_m), L_F, and F^{-1} update in O(K'^2) inside Gibbs
+    rho0 = _RHO_BETA_ALPHA / (_RHO_BETA_ALPHA + _RHO_BETA_BETA)
+    phi0 = _PHI_BETA_ALPHA / (_PHI_BETA_ALPHA + _PHI_BETA_BETA)
     f_by_pair: dict[tuple[str, str], np.ndarray] = {}
+    w_f_by_pair: dict[tuple[str, str], np.ndarray] = {}
+    winv_f_by_pair: dict[tuple[str, str], np.ndarray] = {}
+    d_ratio_by_pair: dict[tuple[str, str], np.ndarray] = {}
     for pair in fitted_pairs:
         ia, ib = arm_to_idx[pair[0]], arm_to_idx[pair[1]]
-        s_mp = s_by_pair[pair]
-        floor_mp = 1e-10 * max(float(np.trace(s_mp)) / float(k_dim), 1e-12)
-        f_by_pair[pair] = _psd_clip(s_mp - v_arms[ia] - v_arms[ib], floor=floor_mp)
+        s_mp = _psd_clip(s_by_pair[pair], floor=1e-14)
+        v_sum = v_arms[ia] + v_arms[ib]
+        evals_s, evecs_s = np.linalg.eigh(s_mp)
+        evals_s = np.maximum(evals_s, 1e-14)
+        s_half = (evecs_s * np.sqrt(evals_s)[None, :]) @ evecs_s.T
+        s_inv_half = (evecs_s * (1.0 / np.sqrt(evals_s))[None, :]) @ evecs_s.T
+        sym_h = s_inv_half @ v_sum @ s_inv_half
+        sym_h = 0.5 * (sym_h + sym_h.T)
+        d_vals, u_h = np.linalg.eigh(sym_h)
+        d_vals = np.maximum(d_vals, 0.0)
+        w_q = s_half @ u_h
+        winv_q = u_h.T @ s_inv_half
+        w_f_by_pair[pair] = w_q
+        winv_f_by_pair[pair] = winv_q
+        d_ratio_by_pair[pair] = d_vals
+        e0 = np.maximum(1.0 - rho0 * d_vals, phi0)
+        f_by_pair[pair] = (w_q * e0[None, :]) @ w_q.T
 
-    # Realization-independent baseline scale s_{0,m}: stage-1 posterior SD of top contrast window Mode-1
+    # Realization-independent baseline scale s_{0,m}: 2x stage-1 posterior SD of top contrast window Mode-1
     top_arm = arms[-1]
     ctrl_arm = arms[0]
     if (top_arm, ctrl_arm) in s_by_pair:
@@ -936,13 +979,17 @@ def _extract_outcome_summaries(
         )
         top_row = b_pinv[-1]
         s0_var = float(sum((top_row[i] ** 2) * s_by_pair[p][0, 0] for i, p in enumerate(fitted_pairs))) / float(horizon)
-    s0_scale = max(math.sqrt(max(s0_var, 1e-16)), 1e-6)
+    s0_scale = max(2.0 * math.sqrt(max(s0_var, 1e-16)), 1e-6)
 
     return {
         "y_by_pair": y_by_pair,
         "s_by_pair": s_by_pair,
         "v_arms": v_arms,
         "f_by_pair": f_by_pair,
+        "w_f_by_pair": w_f_by_pair,
+        "winv_f_by_pair": winv_f_by_pair,
+        "d_ratio_by_pair": d_ratio_by_pair,
+        "gamma_modes": gamma_modes,
         "traj_mean_by_pair": traj_mean_by_pair,
         "traj_cov_by_pair": traj_cov_by_pair,
         "s0_scale": s0_scale,
@@ -1385,7 +1432,7 @@ def _pakman_paninski_hmc_whitened(
     rng: np.random.Generator,
     *,
     n_steps: int = 2,
-    max_events: int = 64,
+    max_events: int | None = None,
 ) -> np.ndarray:
     """Exact Pakman & Paninski (2014) wall-reflecting HMC for ``z ~ N(0, I_D)`` s.t. ``F z + g >= 0``.
 
@@ -1396,6 +1443,7 @@ def _pakman_paninski_hmc_whitened(
     m_walls, d_dim = f_walls.shape
     if m_walls == 0:
         return rng.standard_normal(d_dim)
+    eff_max_events = max(256, 16 * m_walls) if max_events is None else int(max_events)
 
     z = z_init.copy()
     # Ensure strict interior feasibility up to machine epsilon
@@ -1411,7 +1459,7 @@ def _pakman_paninski_hmc_whitened(
         last_wall = -1
         bounced_cleanly = True
 
-        for _event in range(max_events):
+        for _event in range(eff_max_events):
             a_vec = f_walls @ z
             b_vec = f_walls @ v
             u_vec = np.hypot(a_vec, b_vec)
@@ -1646,6 +1694,9 @@ def _update_scales_outcome(
     h_float = float(spec.horizon)
     n_nonctrl = spec.n_nonctrl
     k_dim = spec.k_dim
+    nu_sig = 1.0 if spec.scale_prior == "global_halft" else 3.0
+    half_nu_sig_p1 = 0.5 * (nu_sig + 1.0)
+    inv_nu_s0_sq = 1.0 / (nu_sig * (s0_scale**2))
     inv_3s0_sq = 1.0 / (3.0 * (s0_scale**2))
     inv_3_unit = 1.0 / 3.0
     theta_modes = theta_m.reshape(k_dim, n_nonctrl)
@@ -1704,7 +1755,7 @@ def _update_scales_outcome(
             lin_g = (2.0 if both_gk else 1.0) - float(spec.n_edges)
 
             def _logp_gamma(g_val: float) -> float:
-                lp = lin_g * g_val - 2.0 * math.log1p(math.exp(2.0 * (ws0 + g_val)) * inv_3s0_sq)
+                lp = lin_g * g_val - half_nu_sig_p1 * math.log1p(math.exp(2.0 * (ws0 + g_val)) * inv_nu_s0_sq)
                 if both_gk:
                     lp -= 2.0 * math.log1p(math.exp(2.0 * (wk0 + g_val)) * inv_3s0_sq)
                 lp -= 2.0 * float(np.sum(np.log1p(np.exp(2.0 * (w_loc0 - g_val)) * inv_3_unit)))
@@ -1724,7 +1775,7 @@ def _update_scales_outcome(
     d0 = float(n_nonctrl)
     d_dyn = float(n_nonctrl * (k_dim - 1))
 
-    # 2. Global scale sigma_m^2 & dynamic scale kappa_m^2 via exact marginal Half-t_3 conditionals
+    # 2. Global scale sigma_m^2 & dynamic scale kappa_m^2 via exact marginal Half-t conditionals
     logz_depends_on_ratio = bool(spec.monotone and spec.period_positivity and k_dim >= 2 and spec.n_edges > 0)
 
     ws_cur = math.log(float(fixed_sigma)) if fixed_sigma is not None else 0.5 * math.log(max(sigma_sq, 1e-28))
@@ -1737,7 +1788,7 @@ def _update_scales_outcome(
     if fixed_sigma is None:
         def _logp_ws(ws: float) -> float:
             e2s = math.exp(2.0 * ws)
-            lp = (1.0 - d0) * ws - 2.0 * math.log1p(e2s * inv_3s0_sq) - c0 / max(e2s, 1e-300)
+            lp = (1.0 - d0) * ws - half_nu_sig_p1 * math.log1p(e2s * inv_nu_s0_sq) - c0 / max(e2s, 1e-300)
             if logz_depends_on_ratio:
                 lp -= spec.log_normalizer(math.exp(wk_cur - ws), lam_cur)
             return lp
@@ -1771,7 +1822,7 @@ def _update_scales_outcome(
             e2k = math.exp(2.0 * (ws + u_fixed))
             return (
                 lin_comb * ws
-                - 2.0 * math.log1p(e2s * inv_3s0_sq)
+                - half_nu_sig_p1 * math.log1p(e2s * inv_nu_s0_sq)
                 - 2.0 * math.log1p(e2k * inv_3s0_sq)
                 - c_comb / max(e2s, 1e-300)
             )
@@ -1795,9 +1846,12 @@ def _build_sigma_xi(
     k_dim: int,
     *,
     d_arms_stack: np.ndarray | None = None,
+    rho_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build block-diagonal ``Sigma_xi(R)`` and its generative factor ``L_xi`` of shape ``(A*M*K', A*M*K')``."""
+    """Build block-diagonal ``Sigma_xi(R, rho)`` and its generative factor ``L_xi`` of shape ``(A*M*K', A*M*K')``."""
     chol_r = _fast_cholesky(corr_r, floor=1e-10)
+    if rho_vec is not None:
+        chol_r = np.sqrt(np.maximum(rho_vec, 1e-12))[:, None] * chol_r
     rk_factor = np.kron(chol_r, np.eye(k_dim, dtype=np.float64))  # (M*K', M*K')
     amk = n_arms * n_outcomes * k_dim
     sigma_xi = np.zeros((amk, amk), dtype=np.float64)
@@ -2064,6 +2118,9 @@ def _asis_interweave_outcome_scales(
     d_per_m = n_nonctrl * k_dim
     base_m = m_idx * d_per_m
     sl_m = slice(base_m, base_m + d_per_m)
+    nu_sig = 1.0 if spec.scale_prior == "global_halft" else 3.0
+    half_nu_sig_p1 = 0.5 * (nu_sig + 1.0)
+    inv_nu_s0_sq = 1.0 / (nu_sig * (s0_scale_m**2))
     inv_3s0_sq = 1.0 / (3.0 * (s0_scale_m**2))
     logz_dep = bool(spec.monotone and spec.period_positivity and k_dim >= 2 and spec.n_edges > 0)
 
@@ -2100,7 +2157,7 @@ def _asis_interweave_outcome_scales(
                 def _logp_aa_ws(ws: float) -> float:
                     sig = math.exp(ws)
                     sig2 = sig * sig
-                    lp = ws - 2.0 * math.log1p(sig2 * inv_3s0_sq) + sig * c1_0 - 0.5 * sig2 * c2_0
+                    lp = ws - half_nu_sig_p1 * math.log1p(sig2 * inv_nu_s0_sq) + sig * c1_0 - 0.5 * sig2 * c2_0
                     if logz_dep:
                         lp -= spec.log_normalizer(kap_0 / sig, local_scales_m)
                     return lp
@@ -2170,7 +2227,7 @@ def _asis_interweave_outcome_scales(
                 def _logp_aa_d0(delta: float) -> float:
                     s = math.exp(delta)
                     s2 = s * s
-                    return delta - 2.0 * math.log1p(s2 * sig0_sq * inv_3s0_sq) + s * d1 - 0.5 * s2 * d2
+                    return delta - half_nu_sig_p1 * math.log1p(s2 * sig0_sq * inv_nu_s0_sq) + s * d1 - 0.5 * s2 * d2
 
                 d_new = _slice_sample_1d(_logp_aa_d0, 0.0, rng, bounds=(-12.0, 12.0))
                 s_new = math.exp(d_new)
@@ -2190,7 +2247,7 @@ def _asis_interweave_outcome_scales(
                 def _logp_aa_joint(delta: float) -> float:
                     s = math.exp(delta)
                     s2 = s * s
-                    lp = delta - 2.0 * math.log1p(s2 * sig0_sq * inv_3s0_sq) + s * d1 - 0.5 * s2 * d2
+                    lp = delta - half_nu_sig_p1 * math.log1p(s2 * sig0_sq * inv_nu_s0_sq) + s * d1 - 0.5 * s2 * d2
                     if both_scales:
                         lp += delta - 2.0 * math.log1p(s2 * kap0_sq * inv_3s0_sq)
                     return lp
@@ -2250,6 +2307,10 @@ def _run_single_gibbs_chain(
     f_blocks: list[np.ndarray],
     chol_f_blocks: list[np.ndarray],
     f_inv_blocks: list[np.ndarray],
+    w_f_stack: np.ndarray,
+    winv_f_stack: np.ndarray,
+    d_ratio_stack: np.ndarray,
+    q_member_weights: np.ndarray,
     sqrt_v_arms: list[list[np.ndarray]],
     prior_specs: list[_OutcomeConePriorSpec],
     a_cone_joint: np.ndarray,
@@ -2283,6 +2344,8 @@ def _run_single_gibbs_chain(
     a_kappa = state["a_kappa"].copy()
     local_scales = [ls.copy() for ls in state["local_scales"]]
     b_local = [bl.copy() for bl in state["b_local"]]
+    rho_vec = state["rho_vec"].copy()
+    phi_vec = state["phi_vec"].copy()
     omega_vec = state["omega_vec"].copy()
     flag_vec = state["flag_vec"].copy()
     pi_mix = float(state["pi_mix"])
@@ -2293,11 +2356,13 @@ def _run_single_gibbs_chain(
         tr_sigma = np.empty((n_steps, n_outcomes), dtype=np.float64)
         tr_kappa = np.empty((n_steps, n_outcomes), dtype=np.float64)
         tr_local = [np.empty((n_steps, spec.n_edges), dtype=np.float64) for spec in prior_specs]
+        tr_rho = np.empty((n_steps, n_outcomes), dtype=np.float64)
+        tr_phi = np.empty((n_steps, n_outcomes), dtype=np.float64)
         tr_omega = np.empty((n_steps, n_q), dtype=np.float64)
         tr_flag = np.empty((n_steps, n_q), dtype=np.float64)
         tr_corr = np.empty((n_steps, n_outcomes, n_outcomes), dtype=np.float64)
     else:
-        tr_theta = tr_sigma = tr_kappa = tr_omega = tr_flag = tr_corr = None  # type: ignore[assignment]
+        tr_theta = tr_sigma = tr_kappa = tr_rho = tr_phi = tr_omega = tr_flag = tr_corr = None  # type: ignore[assignment]
         tr_local = []
 
     mk = n_outcomes * k_dim
@@ -2306,45 +2371,69 @@ def _run_single_gibbs_chain(
         for m in range(n_outcomes):
             d_arms_stack[a, m * k_dim : (m + 1) * k_dim, m * k_dim : (m + 1) * k_dim] = sqrt_v_arms[m][a]
 
-    sigma_xi, l_xi = _build_sigma_xi(
-        sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack
-    )
-    base_xi_cov = g_xi @ sigma_xi @ g_xi.T
-    f_stack = np.stack(f_blocks, axis=0)
-    chol_f_stack = np.stack(chol_f_blocks, axis=0)
-    f_inv_stack = np.stack(f_inv_blocks, axis=0)
     q_arange = np.arange(n_q)
     xy_des = np.column_stack([x_des, y_vec])
     g_xi_t = np.ascontiguousarray(g_xi.T)
 
+    # Precompute constant bilinear basis B_{m1, m2} so G Sigma_xi(R, rho) G^T = sum_{m1, m2} sqrt(rho_{m1} rho_{m2}) R_{m1, m2} B_{m1, m2}
+    n_meas = y_vec.shape[0]
+    xi_cov_basis = np.zeros((n_outcomes, n_outcomes, n_meas, n_meas), dtype=np.float64)
+    for m1 in range(n_outcomes):
+        for m2 in range(m1, n_outcomes):
+            blk_mm = np.zeros((n_arms * mk, n_arms * mk), dtype=np.float64)
+            for a in range(n_arms):
+                r_sl = slice(a * mk + m1 * k_dim, a * mk + (m1 + 1) * k_dim)
+                c_sl = slice(a * mk + m2 * k_dim, a * mk + (m2 + 1) * k_dim)
+                blk_mm[r_sl, c_sl] = sqrt_v_arms[m1][a] @ sqrt_v_arms[m2][a].T
+            b_12 = g_xi @ blk_mm @ g_xi_t
+            xi_cov_basis[m1, m2] = b_12
+            if m1 != m2:
+                xi_cov_basis[m2, m1] = b_12.T
+
     if sample_corr and n_outcomes >= 2:
         inv_iw_scale = np.linalg.inv(_psd_clip(iw_scale, floor=1e-12))
         chol_iw_inv = _fast_cholesky(inv_iw_scale, floor=1e-12)
-        # Precompute constant bilinear basis B_{m, m'} so G Sigma_xi(R) G^T = sum_{m,m'} R_{m,m'} B_{m,m'}
-        n_meas = y_vec.shape[0]
-        xi_cov_basis = np.zeros((n_outcomes, n_outcomes, n_meas, n_meas), dtype=np.float64)
-        for m1 in range(n_outcomes):
-            for m2 in range(m1, n_outcomes):
-                blk_mm = np.zeros((n_arms * mk, n_arms * mk), dtype=np.float64)
-                for a in range(n_arms):
-                    r_sl = slice(a * mk + m1 * k_dim, a * mk + (m1 + 1) * k_dim)
-                    c_sl = slice(a * mk + m2 * k_dim, a * mk + (m2 + 1) * k_dim)
-                    blk_mm[r_sl, c_sl] = sqrt_v_arms[m1][a] @ sqrt_v_arms[m2][a].T
-                b_12 = g_xi @ blk_mm @ g_xi_t
-                xi_cov_basis[m1, m2] = b_12
-                if m1 != m2:
-                    xi_cov_basis[m2, m1] = b_12.T
     else:
         chol_iw_inv = None
-        xi_cov_basis = None
 
-    def _make_omega_chol(base_cov: np.ndarray, om_vec: np.ndarray) -> np.ndarray:
+    def _compute_base_xi_cov(rv: np.ndarray, cr: np.ndarray) -> np.ndarray:
+        if n_outcomes == 1:
+            return float(rv[0]) * xi_cov_basis[0, 0]
+        sr = np.sqrt(np.maximum(rv, 1e-12))
+        rs = (sr[:, None] * cr) * sr[None, :]
+        return np.einsum("ij,ijkl->kl", rs, xi_cov_basis)
+
+    def _compute_f_stacks(rv: np.ndarray, pv: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        rho_q = q_member_weights @ rv
+        phi_q = q_member_weights @ pv
+        e_q = np.maximum(1.0 - rho_q[:, None] * d_ratio_stack, phi_q[:, None])
+        sqrt_e_q = np.sqrt(e_q)
+        cf_st = w_f_stack * sqrt_e_q[:, None, :]
+        f_st = cf_st @ np.swapaxes(cf_st, 1, 2)
+        winv_s = winv_f_stack / sqrt_e_q[:, :, None]
+        finv_st = np.swapaxes(winv_s, 1, 2) @ winv_s
+        return f_st, cf_st, finv_st
+
+    def _make_omega_chol(base_cov: np.ndarray, f_st: np.ndarray, om_vec: np.ndarray) -> np.ndarray:
         om_mat = base_cov.copy()
         om_4d = om_mat.reshape(n_q, k_dim, n_q, k_dim)
-        om_4d[q_arange, :, q_arange, :] += f_stack / np.maximum(om_vec, 1e-12)[:, None, None]
+        om_4d[q_arange, :, q_arange, :] += f_st / np.maximum(om_vec, 1e-12)[:, None, None]
         return _fast_cholesky(om_mat, floor=1e-13)
 
-    chol_omega = _make_omega_chol(base_xi_cov, omega_vec)
+    sigma_xi_unit, l_xi_unit = _build_sigma_xi(
+        sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack
+    )
+    if n_outcomes == 1:
+        r0_f = max(float(rho_vec[0]), 1e-12)
+        sigma_xi = r0_f * sigma_xi_unit
+        l_xi = math.sqrt(r0_f) * l_xi_unit
+    else:
+        sigma_xi, l_xi = _build_sigma_xi(
+            sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack, rho_vec=rho_vec
+        )
+    base_xi_cov = _compute_base_xi_cov(rho_vec, corr_r)
+    f_stack, chol_f_stack, f_inv_stack = _compute_f_stacks(rho_vec, phi_vec)
+    chol_omega = _make_omega_chol(base_xi_cov, f_stack, omega_vec)
 
     for it_idx in range(total_iters):
         # 1. Collapsed likelihood precision & mean marginalizing shared arm noise xi
@@ -2381,7 +2470,7 @@ def _run_single_gibbs_chain(
             chol_prec=chol_post,
         )
 
-        # 4. Exact collapsed Half-t_3 SA + Yu & Meng (2011) ASIS scale updates per outcome
+        # 4. Exact collapsed Half-t SA + Yu & Meng (2011) ASIS scale updates per outcome
         w_res = wy - wx @ theta
         for m in range(n_outcomes):
             theta_m = theta[m * d_per_m : (m + 1) * d_per_m]
@@ -2422,12 +2511,78 @@ def _run_single_gibbs_chain(
             local_scales[m] = lam_m
             b_local[m] = bl_m
 
-        # 5. Exact conditional draw of shared arm noise xi | theta, omega, R, y via Matheron's identity
         res_vec = y_vec - x_des @ theta
+
+        # 4b. Hierarchical Bayesian variance share updates (rho_m, phi_m) against collapsed marginal likelihood
+        inv_om_vec = 1.0 / np.maximum(omega_vec, 1e-12)
+
+        def _loglik_from_eq(b_cov: np.ndarray, eq_mat: np.ndarray) -> float:
+            cf_st = w_f_stack * np.sqrt(eq_mat)[:, None, :]
+            f_st = cf_st @ np.swapaxes(cf_st, 1, 2)
+            om_mat = b_cov.copy()
+            om_4d = om_mat.reshape(n_q, k_dim, n_q, k_dim)
+            om_4d[q_arange, :, q_arange, :] += f_st * inv_om_vec[:, None, None]
+            ch = _fast_cholesky(om_mat, floor=1e-13)
+            v_sol = np.linalg.solve(ch, res_vec)
+            return -float(np.sum(np.log(np.diag(ch)))) - 0.5 * float(np.dot(v_sol, v_sol))
+
+        for m in range(n_outcomes):
+            phi_q_cur = q_member_weights @ phi_vec
+
+            def _logp_rho(rho_try: float, _m: int = m) -> float:
+                rv_try = rho_vec.copy()
+                rv_try[_m] = rho_try
+                b_cov_try = _compute_base_xi_cov(rv_try, corr_r)
+                rho_q_try = q_member_weights @ rv_try
+                eq_try = np.maximum(1.0 - rho_q_try[:, None] * d_ratio_stack, phi_q_cur[:, None])
+                lp_prior = (_RHO_BETA_ALPHA - 1.0) * math.log(max(rho_try, 1e-300)) + (
+                    _RHO_BETA_BETA - 1.0
+                ) * math.log(max(1.0 - rho_try, 1e-300))
+                return lp_prior + _loglik_from_eq(b_cov_try, eq_try)
+
+            rho_vec[m] = _slice_sample_1d(
+                _logp_rho, float(rho_vec[m]), rng, width=0.35, max_steps=3, bounds=(1e-5, 1.0 - 1e-5)
+            )
+
+            b_cov_after_rho = _compute_base_xi_cov(rho_vec, corr_r)
+            rho_q_after = q_member_weights @ rho_vec
+            min_unclipped = 1.0 - rho_q_after[:, None] * d_ratio_stack
+            eq_base = np.maximum(min_unclipped, (q_member_weights @ phi_vec)[:, None])
+            ll_base = _loglik_from_eq(b_cov_after_rho, eq_base)
+
+            def _logp_phi(phi_try: float, _m: int = m) -> float:
+                pv_try = phi_vec.copy()
+                pv_try[_m] = phi_try
+                phi_q_try = q_member_weights @ pv_try
+                eq_try = np.maximum(min_unclipped, phi_q_try[:, None])
+                lp_prior = (_PHI_BETA_ALPHA - 1.0) * math.log(max(phi_try, 1e-300)) + (
+                    _PHI_BETA_BETA - 1.0
+                ) * math.log(max(1.0 - phi_try, 1e-300))
+                if np.array_equal(eq_try, eq_base):
+                    return lp_prior + ll_base
+                return lp_prior + _loglik_from_eq(b_cov_after_rho, eq_try)
+
+            phi_vec[m] = _slice_sample_1d(
+                _logp_phi, float(phi_vec[m]), rng, width=0.25, max_steps=3, bounds=(1e-5, 1.0 - 1e-5)
+            )
+
+        f_stack, chol_f_stack, f_inv_stack = _compute_f_stacks(rho_vec, phi_vec)
+        base_xi_cov = _compute_base_xi_cov(rho_vec, corr_r)
+        if n_outcomes == 1:
+            r0_f = max(float(rho_vec[0]), 1e-12)
+            sigma_xi = r0_f * sigma_xi_unit
+            l_xi = math.sqrt(r0_f) * l_xi_unit
+        else:
+            sigma_xi, l_xi = _build_sigma_xi(
+                sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack, rho_vec=rho_vec
+            )
+        chol_omega = _make_omega_chol(base_xi_cov, f_stack, omega_vec)
+
+        # 5. Exact conditional draw of shared arm noise xi | theta, omega, R, y via Matheron's identity
         if robust_error != "gaussian":
             for sub_o in range(2):
                 if sub_o > 0:
-                    chol_omega = _make_omega_chol(base_xi_cov, omega_vec)
+                    chol_omega = _make_omega_chol(base_xi_cov, f_stack, omega_vec)
                 xi_0 = l_xi @ rng.standard_normal(l_xi.shape[0])
                 z_eta = rng.standard_normal((n_q, k_dim))
                 eta_0 = (
@@ -2443,14 +2598,14 @@ def _run_single_gibbs_chain(
                 omega_vec, flag_vec, pi_mix = _sample_omega_weights(
                     eta_blocks, f_inv_stack, robust_error, pi_mix, rng
                 )
-            chol_omega = _make_omega_chol(base_xi_cov, omega_vec)
+            chol_omega = _make_omega_chol(base_xi_cov, f_stack, omega_vec)
 
-        # 6. Pre-period IW independence-MH update for cross-outcome correlation R
-        if sample_corr and n_outcomes >= 2 and xi_cov_basis is not None:
+        # 6. Pre-period IW independence-MH + collapsed (delta_tilde, z) slice update for correlation R
+        if sample_corr and n_outcomes >= 2:
             r_prop = _sample_iw_correlation(iw_df, iw_scale, rng, chol_inv=chol_iw_inv)
-            base_xi_cov_prop = np.einsum("ij,ijkl->kl", r_prop, xi_cov_basis)
+            base_xi_cov_prop = _compute_base_xi_cov(rho_vec, r_prop)
             chol_cur = chol_omega
-            chol_prop = _make_omega_chol(base_xi_cov_prop, omega_vec)
+            chol_prop = _make_omega_chol(base_xi_cov_prop, f_stack, omega_vec)
 
             v_cur = np.linalg.solve(chol_cur, res_vec)
             v_prop = np.linalg.solve(chol_prop, res_vec)
@@ -2459,10 +2614,49 @@ def _run_single_gibbs_chain(
             if math.log(float(rng.uniform(1e-15, 1.0))) < (loglik_prop - loglik_cur):
                 corr_r = r_prop
                 sigma_xi, l_xi = _build_sigma_xi(
-                    sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack
+                    sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack, rho_vec=rho_vec
                 )
                 base_xi_cov = base_xi_cov_prop
                 chol_omega = chol_prop
+
+            if n_outcomes == 2:
+                r_iw = float(
+                    np.clip(
+                        iw_scale[0, 1] / math.sqrt(max(iw_scale[0, 0] * iw_scale[1, 1], 1e-24)),
+                        -0.999999,
+                        0.999999,
+                    )
+                )
+                r_cur = float(np.clip(corr_r[0, 1], -0.999999, 0.999999))
+
+                def _logp_delta_iw(d_val: float) -> float:
+                    return -iw_df * math.log(max(math.cosh(d_val) - r_cur * r_iw, 1e-300))
+
+                d_tilde = _slice_sample_1d(_logp_delta_iw, 0.0, rng, width=0.6, max_steps=4, bounds=(-10.0, 10.0))
+                cosh_d = math.cosh(d_tilde)
+                z_cur = math.atanh(r_cur)
+
+                def _logp_z_corr(z_val: float) -> float:
+                    r_try = math.tanh(z_val)
+                    one_minus_r2 = max(1.0 - r_try * r_try, 1e-300)
+                    lp_iw = 0.5 * (iw_df - 1.0) * math.log(one_minus_r2) - iw_df * math.log(
+                        max(cosh_d - r_try * r_iw, 1e-300)
+                    )
+                    r_mat = np.array([[1.0, r_try], [r_try, 1.0]], dtype=np.float64)
+                    b_cov_try = _compute_base_xi_cov(rho_vec, r_mat)
+                    ch_try = _make_omega_chol(b_cov_try, f_stack, omega_vec)
+                    v_try = np.linalg.solve(ch_try, res_vec)
+                    ll_try = -float(np.sum(np.log(np.diag(ch_try)))) - 0.5 * float(np.dot(v_try, v_try))
+                    return lp_iw + ll_try
+
+                z_new = _slice_sample_1d(_logp_z_corr, z_cur, rng, width=0.5, max_steps=4, bounds=(-4.5, 4.5))
+                r_new = math.tanh(z_new)
+                corr_r = np.array([[1.0, r_new], [r_new, 1.0]], dtype=np.float64)
+                base_xi_cov = _compute_base_xi_cov(rho_vec, corr_r)
+                sigma_xi, l_xi = _build_sigma_xi(
+                    sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack, rho_vec=rho_vec
+                )
+                chol_omega = _make_omega_chol(base_xi_cov, f_stack, omega_vec)
 
         if record and ((it_idx + 1) % thin_eff == 0):
             rec_idx = it_idx // thin_eff
@@ -2471,6 +2665,8 @@ def _run_single_gibbs_chain(
             tr_kappa[rec_idx] = np.sqrt(np.maximum(kappa_sq, 1e-30))
             for m in range(n_outcomes):
                 tr_local[m][rec_idx] = local_scales[m]
+            tr_rho[rec_idx] = rho_vec
+            tr_phi[rec_idx] = phi_vec
             tr_omega[rec_idx] = omega_vec
             tr_flag[rec_idx] = flag_vec
             tr_corr[rec_idx] = corr_r
@@ -2483,6 +2679,8 @@ def _run_single_gibbs_chain(
         "a_kappa": a_kappa,
         "local_scales": local_scales,
         "b_local": b_local,
+        "rho_vec": rho_vec,
+        "phi_vec": phi_vec,
         "omega_vec": omega_vec,
         "flag_vec": flag_vec,
         "pi_mix": pi_mix,
@@ -2495,6 +2693,8 @@ def _run_single_gibbs_chain(
         "sigma": tr_sigma,
         "kappa": tr_kappa,
         "local": tr_local,
+        "rho": tr_rho,
+        "phi": tr_phi,
         "omega": tr_omega,
         "flag": tr_flag,
         "corr": tr_corr,
@@ -2599,6 +2799,10 @@ def _reconcile_joint_bayesian_core(
     x_rows: list[np.ndarray] = []
     g_rows: list[np.ndarray] = []
     f_blocks: list[np.ndarray] = []
+    w_f_list: list[np.ndarray] = []
+    winv_f_list: list[np.ndarray] = []
+    d_ratio_list: list[np.ndarray] = []
+    member_weights_list: list[np.ndarray] = []
     meas_index: dict[tuple[str, str, tuple[str, str]], int] = {}
 
     amk = n_arms * n_outcomes * k_dim
@@ -2612,11 +2816,21 @@ def _reconcile_joint_bayesian_core(
         member_indices: Sequence[int],
         y_q: np.ndarray,
         f_q: np.ndarray,
+        w_f_q: np.ndarray,
+        winv_f_q: np.ndarray,
+        d_ratio_q: np.ndarray,
     ) -> None:
         q_idx = len(f_blocks)
         meas_index[(kind, out_name, pair)] = q_idx
         y_blocks.append(y_q)
         f_blocks.append(f_q)
+        w_f_list.append(w_f_q)
+        winv_f_list.append(winv_f_q)
+        d_ratio_list.append(d_ratio_q)
+        mw = np.zeros(n_outcomes, dtype=np.float64)
+        for m_i in member_indices:
+            mw[m_i] = 1.0 / float(len(member_indices))
+        member_weights_list.append(mw)
 
         ia, ib = arm_to_idx[pair[0]], arm_to_idx[pair[1]]
         x_q = np.zeros((k_dim, d_total), dtype=np.float64)
@@ -2636,19 +2850,43 @@ def _reconcile_joint_bayesian_core(
     for m_i, m_name in enumerate(structural_outcomes):
         summ_m = struct_summaries[m_name]
         for pair in fitted_pairs:
-            _add_measurement("struct", m_name, pair, (m_i,), summ_m["y_by_pair"][pair], summ_m["f_by_pair"][pair])
+            _add_measurement(
+                "struct",
+                m_name,
+                pair,
+                (m_i,),
+                summ_m["y_by_pair"][pair],
+                summ_m["f_by_pair"][pair],
+                summ_m["w_f_by_pair"][pair],
+                summ_m["winv_f_by_pair"][pair],
+                summ_m["d_ratio_by_pair"][pair],
+            )
 
     m_name_to_idx = {m: idx for idx, m in enumerate(structural_outcomes)}
     for c_name, c_summ in comp_summaries.items():
         members = tuple(m_name_to_idx[m] for m in composite_outcomes[c_name])
         for pair in c_summ["pairs"]:
-            _add_measurement("comp", c_name, pair, members, c_summ["y_by_pair"][pair], c_summ["f_by_pair"][pair])
+            _add_measurement(
+                "comp",
+                c_name,
+                pair,
+                members,
+                c_summ["y_by_pair"][pair],
+                c_summ["f_by_pair"][pair],
+                c_summ["w_f_by_pair"][pair],
+                c_summ["winv_f_by_pair"][pair],
+                c_summ["d_ratio_by_pair"][pair],
+            )
 
     y_vec = np.concatenate(y_blocks, axis=0)
     x_des = np.vstack(x_rows)
     g_xi = np.vstack(g_rows)
     chol_f_blocks = [np.linalg.cholesky(_psd_clip(fq, floor=1e-14)) for fq in f_blocks]
     f_inv_blocks = [np.linalg.inv(_psd_clip(fq, floor=1e-13)) for fq in f_blocks]
+    w_f_stack = np.stack(w_f_list, axis=0)
+    winv_f_stack = np.stack(winv_f_list, axis=0)
+    d_ratio_stack = np.stack(d_ratio_list, axis=0)
+    q_member_weights = np.stack(member_weights_list, axis=0)
     sqrt_v_arms = [[_psd_sqrt(va) for va in struct_summaries[m]["v_arms"]] for m in structural_outcomes]
 
     # Build per-outcome cone prior specs and joint cone matrix
@@ -2698,7 +2936,16 @@ def _reconcile_joint_bayesian_core(
         r_init_mean = np.eye(n_outcomes, dtype=np.float64)
 
     # Compute cone-constrained posterior mode at nominal hyperparameters for chain initialization
-    sigma_xi_0, _ = _build_sigma_xi(sqrt_v_arms, r_init_mean, n_arms, n_outcomes, k_dim)
+    rho_init_val = _RHO_BETA_ALPHA / (_RHO_BETA_ALPHA + _RHO_BETA_BETA)
+    phi_init_val = _PHI_BETA_ALPHA / (_PHI_BETA_ALPHA + _PHI_BETA_BETA)
+    sigma_xi_0, _ = _build_sigma_xi(
+        sqrt_v_arms,
+        r_init_mean,
+        n_arms,
+        n_outcomes,
+        k_dim,
+        rho_vec=np.full(n_outcomes, rho_init_val, dtype=np.float64),
+    )
     omega_cov_0 = _build_omega_cov(g_xi, sigma_xi_0, f_blocks, np.ones(len(f_blocks)), k_dim)
     chol_w0 = np.linalg.cholesky(omega_cov_0)
     wx0 = np.linalg.solve(chol_w0, x_des)
@@ -2752,6 +2999,16 @@ def _reconcile_joint_bayesian_core(
             ],
             dtype=np.float64,
         )
+        rho_c = np.clip(
+            rng_c.beta(_RHO_BETA_ALPHA, _RHO_BETA_BETA, size=n_outcomes),
+            0.05,
+            0.95,
+        )
+        phi_c = np.clip(
+            rng_c.beta(_PHI_BETA_ALPHA, _PHI_BETA_BETA, size=n_outcomes),
+            0.02,
+            0.85,
+        )
         st_c = {
             "theta": theta_c,
             "sigma_sq": sig_sq_c,
@@ -2760,6 +3017,8 @@ def _reconcile_joint_bayesian_core(
             "a_kappa": np.array([s0_scales[m] ** 2 for m in range(n_outcomes)], dtype=np.float64),
             "local_scales": [np.ones(spec.n_edges, dtype=np.float64) for spec in prior_specs],
             "b_local": [np.ones(spec.n_edges, dtype=np.float64) for spec in prior_specs],
+            "rho_vec": rho_c,
+            "phi_vec": phi_c,
             "omega_vec": np.ones(len(f_blocks), dtype=np.float64),
             "flag_vec": np.zeros(len(f_blocks), dtype=np.float64),
             "pi_mix": 0.10,
@@ -2775,6 +3034,10 @@ def _reconcile_joint_bayesian_core(
             f_blocks=f_blocks,
             chol_f_blocks=chol_f_blocks,
             f_inv_blocks=f_inv_blocks,
+            w_f_stack=w_f_stack,
+            winv_f_stack=winv_f_stack,
+            d_ratio_stack=d_ratio_stack,
+            q_member_weights=q_member_weights,
             sqrt_v_arms=sqrt_v_arms,
             prior_specs=prior_specs,
             a_cone_joint=a_cone_joint,
@@ -2807,6 +3070,10 @@ def _reconcile_joint_bayesian_core(
             f_blocks=f_blocks,
             chol_f_blocks=chol_f_blocks,
             f_inv_blocks=f_inv_blocks,
+            w_f_stack=w_f_stack,
+            winv_f_stack=winv_f_stack,
+            d_ratio_stack=d_ratio_stack,
+            q_member_weights=q_member_weights,
             sqrt_v_arms=sqrt_v_arms,
             prior_specs=prior_specs,
             a_cone_joint=a_cone_joint,
@@ -2862,6 +3129,16 @@ def _reconcile_joint_bayesian_core(
             rhat_blocks["lambda"] = max(s[0] for s in l_stats)
             ess_blocks["lambda"] = min(s[1] for s in l_stats)
 
+        rho_stack = np.stack([t["rho"] for t in traces_list], axis=0)
+        rho_stats = [_split_rhat_and_ess_1d(rho_stack[:, :, m]) for m in range(n_outcomes)]
+        rhat_blocks["rho"] = max(s[0] for s in rho_stats)
+        ess_blocks["rho"] = min(s[1] for s in rho_stats)
+
+        phi_stack = np.stack([t["phi"] for t in traces_list], axis=0)
+        phi_stats = [_split_rhat_and_ess_1d(phi_stack[:, :, m]) for m in range(n_outcomes)]
+        rhat_blocks["phi"] = max(s[0] for s in phi_stats)
+        ess_blocks["phi"] = min(s[1] for s in phi_stats)
+
         if opts["robust_error"] == "t4":
             om_stack = np.stack([t["omega"] for t in traces_list], axis=0)
             o_stats = [_split_rhat_and_ess_1d(om_stack[:, :, q]) for q in range(om_stack.shape[2])]
@@ -2905,6 +3182,10 @@ def _reconcile_joint_bayesian_core(
                 f_blocks=f_blocks,
                 chol_f_blocks=chol_f_blocks,
                 f_inv_blocks=f_inv_blocks,
+                w_f_stack=w_f_stack,
+                winv_f_stack=winv_f_stack,
+                d_ratio_stack=d_ratio_stack,
+                q_member_weights=q_member_weights,
                 sqrt_v_arms=sqrt_v_arms,
                 prior_specs=prior_specs,
                 a_cone_joint=a_cone_joint,
@@ -2925,7 +3206,7 @@ def _reconcile_joint_bayesian_core(
             assert extra_tr is not None
             # Concatenate n_draws_chain + n_draws_chain at thin_stride and thin by 2 -> spacing 2 * thin_stride
             merged_c: dict[str, Any] = {}
-            for key in ("theta", "sigma", "kappa", "omega", "flag", "corr"):
+            for key in ("theta", "sigma", "kappa", "rho", "phi", "omega", "flag", "corr"):
                 cat = np.concatenate([chain_traces[c_i][key], extra_tr[key]], axis=0)
                 merged_c[key] = cat[1::2][:n_draws_chain]
             merged_local = []
@@ -2955,6 +3236,8 @@ def _reconcile_joint_bayesian_core(
     theta_all = np.concatenate([t["theta"] for t in chain_traces], axis=0)  # (S, M * (A-1) * K')
     sigma_all = np.concatenate([t["sigma"] for t in chain_traces], axis=0)  # (S, M)
     kappa_all = np.concatenate([t["kappa"] for t in chain_traces], axis=0)  # (S, M)
+    rho_all = np.concatenate([t["rho"] for t in chain_traces], axis=0)  # (S, M)
+    phi_all = np.concatenate([t["phi"] for t in chain_traces], axis=0)  # (S, M)
     omega_all = np.concatenate([t["omega"] for t in chain_traces], axis=0)  # (S, Q)
     flag_all = np.concatenate([t["flag"] for t in chain_traces], axis=0)  # (S, Q)
     corr_all = np.concatenate([t["corr"] for t in chain_traces], axis=0)  # (S, M, M)
@@ -2974,6 +3257,17 @@ def _reconcile_joint_bayesian_core(
     for c_name, members_names in composite_outcomes.items():
         theta_by_m[c_name] = sum(theta_by_m[m] for m in members_names)  # exact linear sum!
 
+    def _eval_f_by_pair_posterior_mean(
+        summ_d: dict[str, Any], rho_bar: float, phi_bar: float, pairs_seq: Sequence[tuple[str, str]]
+    ) -> dict[tuple[str, str], np.ndarray]:
+        out_f: dict[tuple[str, str], np.ndarray] = {}
+        for p in pairs_seq:
+            w_q = summ_d["w_f_by_pair"][p]
+            d_q = summ_d["d_ratio_by_pair"][p]
+            e_q = np.maximum(1.0 - rho_bar * d_q, phi_bar)
+            out_f[p] = (w_q * e_q[None, :]) @ w_q.T
+        return out_f
+
     # Compute composite PPC p-values where composite_results were provided
     comp_ppc_by_name: dict[str, float | None] = {}
     for c_name in composite_outcomes:
@@ -2981,12 +3275,25 @@ def _reconcile_joint_bayesian_core(
             c_pairs = comp_summaries[c_name]["pairs"]
             c_om = {p: omega_all[:, meas_index[("comp", c_name, p)]] for p in c_pairs}
             mem_names = composite_outcomes[c_name]
+            mem_idxs = [m_name_to_idx[m] for m in mem_names]
+            rho_bar_c = float(np.mean(rho_all[:, mem_idxs]))
+            phi_bar_c = float(np.mean(phi_all[:, mem_idxs]))
+            comp_f_post = _eval_f_by_pair_posterior_mean(comp_summaries[c_name], rho_bar_c, phi_bar_c, c_pairs)
+            struct_f_post_list = [
+                _eval_f_by_pair_posterior_mean(
+                    struct_summaries[m],
+                    float(np.mean(rho_all[:, m_name_to_idx[m]])),
+                    float(np.mean(phi_all[:, m_name_to_idx[m]])),
+                    c_pairs,
+                )
+                for m in mem_names
+            ]
             comp_ppc_by_name[c_name] = _compute_composite_ppc_pvalue(
                 comp_y_by_pair=comp_summaries[c_name]["y_by_pair"],
-                comp_f_by_pair=comp_summaries[c_name]["f_by_pair"],
+                comp_f_by_pair=comp_f_post,
                 comp_omega_draws=c_om,
                 struct_y_list=[struct_summaries[m]["y_by_pair"] for m in mem_names],
-                struct_f_list=[struct_summaries[m]["f_by_pair"] for m in mem_names],
+                struct_f_list=struct_f_post_list,
                 struct_omega_list=[
                     {p: omega_all[:, meas_index[("struct", m, p)]] for p in c_pairs}
                     for m in mem_names
@@ -3049,9 +3356,12 @@ def _reconcile_joint_bayesian_core(
             fl_dict = {p: flag_all[:, meas_index[("struct", out_name, p)]] for p in fitted_pairs}
             infl_dict = {p: float(np.mean(1.0 / np.maximum(om_dict[p], 1e-12))) for p in fitted_pairs}
             prob_dict = {p: float(np.mean(fl_dict[p])) for p in fitted_pairs}
+            f_post_o = _eval_f_by_pair_posterior_mean(
+                summ_o, float(np.mean(rho_all[:, m_i])), float(np.mean(phi_all[:, m_i])), fitted_pairs
+            )
             ppc_cyc = _compute_cycle_ppc_pvalue(
                 summ_o["y_by_pair"],
-                summ_o["f_by_pair"],
+                f_post_o,
                 om_dict,
                 fitted_pairs,
                 topo["n_cycle"],
@@ -3065,11 +3375,16 @@ def _reconcile_joint_bayesian_core(
             sig_draws_o = sigma_all[:, m_i]
             kap_draws_o = kappa_all[:, m_i]
             loc_draws_o = local_all[m_i]
+            rho_draws_o = rho_all[:, m_i]
+            phi_draws_o = phi_all[:, m_i]
             mono_o = bool(monotone_by_outcome[out_name])
             ps_o = prior_scale_by_outcome[out_name]
             s0_o = s0_scales[m_i]
         else:
             mem_names = composite_outcomes[out_name]
+            mem_idxs = [m_name_to_idx[m] for m in mem_names]
+            rho_draws_o = np.mean(rho_all[:, mem_idxs], axis=1)
+            phi_draws_o = np.mean(phi_all[:, mem_idxs], axis=1)
             if out_name in comp_summaries:
                 c_summ = comp_summaries[out_name]
                 c_pairs = c_summ["pairs"]
@@ -3077,10 +3392,13 @@ def _reconcile_joint_bayesian_core(
                 fl_dict = {p: flag_all[:, meas_index[("comp", out_name, p)]] for p in c_pairs}
                 infl_dict = {p: float(np.mean(1.0 / np.maximum(om_dict[p], 1e-12))) for p in c_pairs}
                 prob_dict = {p: float(np.mean(fl_dict[p])) for p in c_pairs}
+                f_post_c = _eval_f_by_pair_posterior_mean(
+                    c_summ, float(np.mean(rho_draws_o)), float(np.mean(phi_draws_o)), c_pairs
+                )
                 ppc_cyc = (
                     _compute_cycle_ppc_pvalue(
                         c_summ["y_by_pair"],
-                        c_summ["f_by_pair"],
+                        f_post_c,
                         om_dict,
                         fitted_pairs,
                         topo["n_cycle"],
@@ -3127,6 +3445,8 @@ def _reconcile_joint_bayesian_core(
             sigma_draws=sig_draws_o,
             kappa_draws=kap_draws_o,
             local_scale_draws=loc_draws_o,
+            rho_draws=rho_draws_o,
+            phi_draws=phi_draws_o,
             omega_draws=om_dict,
             tau_mu_draws=tau_mu_arr,
             tau_increment_draws=tau_inc,

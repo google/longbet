@@ -1660,6 +1660,7 @@ def _fit_rank_k_stochtree(
         "has_forecast": False,
         "dy_dm": dy_dm,
         "df_dm": df_dm,
+        "x_mod": x_mod,
         "obs": np.isfinite(y_arr),
         "ctrl": ctrl,
         "t0": t0_st,
@@ -1669,6 +1670,7 @@ def _fit_rank_k_stochtree(
         "w_units": w_units_st,
         "bayes_var_ctrl": bayes_var_ctrl,
         "bayes_var_trt": bayes_var_ctrl,
+        "treated_extra_variance": bool(cfg.treated_extra_variance),
     }
     return _finalize_result(
         mode_tau_draws_raw=mode_tau_draws,
@@ -1793,6 +1795,12 @@ def _build_stage1_arm_metadata(
     bayes_var_ctrl: list[float] = list(arm_meta_inputs["bayes_var_ctrl"])
     bayes_var_trt: list[float] = list(arm_meta_inputs["bayes_var_trt"])
 
+    x_mod_raw = arm_meta_inputs.get("x_mod")
+    x_mod = np.asarray(x_mod_raw, dtype=np.float64) if x_mod_raw is not None else None
+    if x_mod is not None and x_mod.ndim == 1:
+        x_mod = x_mod[:, None]
+    tev_enabled = bool(arm_meta_inputs.get("treated_extra_variance", True))
+
     n_units, n_periods = y_arr.shape
     theta_0 = float(theta_f_modes[0]) if len(theta_f_modes) > 0 else 0.0
 
@@ -1801,6 +1809,8 @@ def _build_stage1_arm_metadata(
     pre_masked = np.where(obs[:, :t0], pre_u, np.nan)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
+        unit_pre_mean = np.nanmean(pre_masked, axis=1)
+        unit_pre_mean = np.where(np.isfinite(unit_pre_mean), unit_pre_mean, 0.0)
         ctrl_pre_col = np.nanmean(pre_masked[ctrl], axis=0, keepdims=True)
         ctrl_pre_col = np.where(np.isfinite(ctrl_pre_col), ctrl_pre_col, 0.0)
         pre_dm = pre_masked - ctrl_pre_col
@@ -1829,69 +1839,83 @@ def _build_stage1_arm_metadata(
         b_post = np.zeros((t_post, 0), dtype=np.float64)
     k_use = int(b_post.shape[1])
 
-    if k_use >= 1:
-        q_basis, _ = np.linalg.qr(b_post, mode="reduced")
-        p_orth = np.eye(t_post, dtype=np.float64) - q_basis @ q_basis.T
-    else:
-        p_orth = np.eye(t_post, dtype=np.float64)
+    # Post-adoption outcomes adjusted for forecast and posterior mean treatment effect
+    y_adj = y_arr - (theta_0 * f_arr if has_forecast else 0.0) - np.where(ever[:, None], catt_hat, 0.0)
+    y_adj_obs = np.where(obs, y_adj, np.nan)
 
-    # Event-time residual panel for orthogonal out-of-basis covariance
-    u_panel = dy_dm - theta_0 * df_dm - catt_hat
-    u_panel_obs = np.where(obs, u_panel, np.nan)
-
-    def _event_time_rows(mask_a: np.ndarray, is_trt: bool) -> np.ndarray:
+    def _event_time_post_rows(mask_a: np.ndarray, is_trt: bool) -> tuple[np.ndarray, np.ndarray]:
         idx_a = np.nonzero(mask_a)[0]
         if not is_trt or len(waves) <= 1:
             end_t = min(t0 + t_post, n_periods)
-            sub = u_panel_obs[idx_a, t0:end_t]
+            sub = y_adj_obs[idx_a, t0:end_t]
             if sub.shape[1] < t_post:
                 pad = np.full((idx_a.size, t_post - sub.shape[1]), np.nan, dtype=np.float64)
                 sub = np.concatenate([sub, pad], axis=1)
-            return sub
+            return idx_a, sub
         out_u = np.full((idx_a.size, t_post), np.nan, dtype=np.float64)
         for r_i, u_i in enumerate(idx_a):
             g_i = int(cohorts_arr[u_i])
             len_i = min(t_post, max(n_periods - g_i, 0))
             if len_i > 0:
-                out_u[r_i, :len_i] = u_panel_obs[u_i, g_i : g_i + len_i]
-        return out_u
+                out_u[r_i, :len_i] = y_adj_obs[u_i, g_i : g_i + len_i]
+        return idx_a, out_u
 
-    def _arm_post_cov(mask_a: np.ndarray, b_vars: list[float], is_trt: bool) -> np.ndarray:
-        if k_use >= 1:
-            q_cols = np.zeros((n_units, k_use), dtype=np.float64)
-            diag_draw = np.zeros(k_use, dtype=np.float64)
-            v_floors = np.zeros(k_use, dtype=np.float64)
-            for k in range(k_use):
-                w_k = np.where(mask_a, np.maximum(np.asarray(w_units[k], dtype=np.float64), 0.0), 0.0)
-                w_sum = float(np.sum(w_k))
-                if w_sum <= 1e-12:
-                    continue
-                alpha_k = w_k / w_sum
-                rm_k = np.asarray(resid_means[k], dtype=np.float64)
-                rv_k = np.asarray(resid_vars[k], dtype=np.float64)
-                mean_r = float(np.sum(alpha_k * rm_k))
-                n_eff_k = 1.0 / max(float(np.sum(alpha_k**2)), 1e-12)
-                df_fac = math.sqrt(n_eff_k / max(n_eff_k - 1.0, 1.0))
-                q_cols[:, k] = np.where(w_k > 0.0, df_fac * alpha_k * (rm_k - mean_r), 0.0)
-                diag_draw[k] = float(np.sum((alpha_k**2) * rv_k))
-                if k < len(b_vars):
-                    v_floors[k] = max(float(b_vars[k]), 0.0) / w_sum
-            v_modes = (q_cols.T @ q_cols) + np.diag(diag_draw)
-            scales = np.ones(k_use, dtype=np.float64)
-            for k in range(k_use):
-                if v_floors[k] > v_modes[k, k]:
-                    if v_modes[k, k] > 1e-30:
-                        scales[k] = math.sqrt(v_floors[k] / v_modes[k, k])
-                    else:
-                        v_modes[k, k] = v_floors[k]
-            v_modes = (v_modes * scales[:, None]) * scales[None, :]
-            cov_span = b_post @ v_modes @ b_post.T
-        else:
-            cov_span = np.zeros((t_post, t_post), dtype=np.float64)
-        u_rows = _event_time_rows(mask_a, is_trt=is_trt)
-        cov_emp = _pairwise_mean_cov(u_rows)
-        cov_orth = p_orth @ cov_emp @ p_orth
-        return _psd_clip_matrix(cov_span + cov_orth, floor=0.0)
+    def _arm_unit_innovations(mask_a: np.ndarray, is_trt: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+        """Project out within-arm prognostic predictors ``[1, x_mod, y_pre_mean]`` from post-period cells."""
+        idx_a, post_a = _event_time_post_rows(mask_a, is_trt=is_trt)
+        n_a = int(idx_a.size)
+        finite_a = np.isfinite(post_a)
+        counts_a = np.sum(finite_a, axis=0).astype(np.float64)
+        if n_a <= 1 or t_post == 0:
+            return np.zeros((n_a, t_post), dtype=np.float64), finite_a, counts_a, 1
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            col_means = np.nanmean(post_a, axis=0, keepdims=True)
+        col_means = np.where(np.isfinite(col_means), col_means, 0.0)
+        post_fill = np.where(finite_a, post_a, col_means)
+
+        des_cols = [np.ones((n_a, 1), dtype=np.float64)]
+        if n_a >= 4:
+            des_cols.append(unit_pre_mean[idx_a, None])
+        if x_mod is not None and x_mod.shape[1] > 0 and n_a >= x_mod.shape[1] + 6:
+            des_cols.append(x_mod[idx_a])
+        des_a = np.hstack(des_cols)
+        coef_a, _, rank_d, _ = np.linalg.lstsq(des_a, post_fill, rcond=None)
+        err_a = np.where(finite_a, post_a - des_a @ coef_a, 0.0)
+        return err_a, finite_a, counts_a, max(int(rank_d), 1)
+
+    err_trt, fin_trt, cnt_trt, rank_trt = _arm_unit_innovations(ever, is_trt=True)
+    err_ctrl, fin_ctrl, cnt_ctrl, rank_ctrl = _arm_unit_innovations(ctrl, is_trt=False)
+
+    pair_n_trt = fin_trt.astype(np.float64).T @ fin_trt.astype(np.float64)
+    pair_n_ctrl = fin_ctrl.astype(np.float64).T @ fin_ctrl.astype(np.float64)
+    denom_trt = np.sqrt(np.maximum(cnt_trt[:, None], 1.0) * np.maximum(cnt_trt[None, :], 1.0))
+    denom_ctrl = np.sqrt(np.maximum(cnt_ctrl[:, None], 1.0) * np.maximum(cnt_ctrl[None, :], 1.0))
+
+    if tev_enabled:
+        unit_cov_ctrl = np.where(
+            pair_n_ctrl >= 2.0,
+            (err_ctrl.T @ err_ctrl) / np.maximum(pair_n_ctrl - float(rank_ctrl), 1.0),
+            0.0,
+        )
+        unit_cov_trt = np.where(
+            pair_n_trt >= 2.0,
+            (err_trt.T @ err_trt) / np.maximum(pair_n_trt - float(rank_trt), 1.0),
+            unit_cov_ctrl,
+        )
+        cov_ctrl = _psd_clip_matrix(unit_cov_ctrl / denom_ctrl, floor=0.0)
+        cov_trt = _psd_clip_matrix(unit_cov_trt / denom_trt, floor=0.0)
+    else:
+        pair_n_pool = pair_n_trt + pair_n_ctrl
+        df_pool = np.maximum(pair_n_pool - float(rank_trt + rank_ctrl), 1.0)
+        unit_cov_pool = np.where(
+            pair_n_pool >= 2.0,
+            (err_trt.T @ err_trt + err_ctrl.T @ err_ctrl) / df_pool,
+            0.0,
+        )
+        cov_ctrl = _psd_clip_matrix(unit_cov_pool / denom_ctrl, floor=0.0)
+        cov_trt = _psd_clip_matrix(unit_cov_pool / denom_trt, floor=0.0)
 
     trt_traj_draws = _extract_event_time_trt_trajectory(catt_draws, ever, cohorts_arr, waves, t0, t_post)
     return {
@@ -1899,8 +1923,8 @@ def _build_stage1_arm_metadata(
         "n_control": int(np.sum(ctrl)),
         "t0": t0,
         "t_post": t_post,
-        "post_residual_cov_treated": _arm_post_cov(ever, bayes_var_trt, is_trt=True),
-        "post_residual_cov_control": _arm_post_cov(ctrl, bayes_var_ctrl, is_trt=False),
+        "post_residual_cov_treated": cov_trt,
+        "post_residual_cov_control": cov_ctrl,
         "pre_residual_var_treated": pre_var_trt,
         "pre_residual_var_control": pre_var_ctrl,
         "trt_trajectory_draws": trt_traj_draws,
@@ -3614,6 +3638,7 @@ def _fit_rank_k_longbet(
             "has_forecast": has_forecast,
             "dy_dm": dy_dm,
             "df_dm": df_dm,
+            "x_mod": x_mod,
             "obs": obs,
             "ctrl": ctrl,
             "t0": t0,
@@ -3623,6 +3648,7 @@ def _fit_rank_k_longbet(
             "w_units": [w_units[k] for k in range(K_eff)],
             "bayes_var_ctrl": b_ctrl_et,
             "bayes_var_trt": b_trt_et,
+            "treated_extra_variance": bool(cfg.treated_extra_variance),
         }
         return _finalize_result(
             mode_tau_draws_raw=mode_tau_draws,
@@ -3790,6 +3816,7 @@ def _fit_rank_k_longbet(
         "has_forecast": has_forecast,
         "dy_dm": dy_dm,
         "df_dm": df_dm,
+        "x_mod": x_mod,
         "obs": obs,
         "ctrl": ctrl,
         "t0": t0,
@@ -3799,6 +3826,7 @@ def _fit_rank_k_longbet(
         "w_units": w_units_pc,
         "bayes_var_ctrl": b_ctrl_pc,
         "bayes_var_trt": b_trt_pc,
+        "treated_extra_variance": bool(cfg.treated_extra_variance),
     }
     return _finalize_result(
         mode_tau_draws_raw=mode_tau_draws,

@@ -293,6 +293,7 @@ def test_asis_interweaving_preserves_exact_2d_cone_posterior_stationarity() -> N
         monotone=True,
         period_positivity=True,
         scale_prior="global_halft",
+        use_local_scales=False,
     )
     s0 = 0.50
     y_obs = np.array([0.35, 0.08], dtype=np.float64)
@@ -345,7 +346,22 @@ def test_asis_interweaving_preserves_exact_2d_cone_posterior_stationarity() -> N
         theta = _sample_truncated_mvn(mean_post, prec_post, spec.a_cone, theta, interior_ray, rng, n_hmc_steps=1)
         w_res = wy - wx @ theta
         sig_sq, kap_sq, a_sig, a_kap, lam, b_loc = _update_scales_outcome(
-            theta, spec, sig_sq, kap_sq, a_sig, a_kap, lam, b_loc, s0, None, True, rng
+            theta_m=theta,
+            spec=spec,
+            sigma_sq=sig_sq,
+            kappa_sq=kap_sq,
+            a_sigma=a_sig,
+            a_kappa=a_kap,
+            local_scales=lam,
+            b_local=b_loc,
+            log_s0_eff=math.log(s0),
+            log_sk_eff=math.log(s0),
+            nu_sig=1.0,
+            nu_kap=3.0,
+            nu_loc=3.0,
+            fixed_sigma=None,
+            dynamic_shrinkage=True,
+            rng=rng,
         )
         sig_sq, kap_sq, a_sig, a_kap, w_res = _asis_interweave_outcome_scales(
             m_idx=0,
@@ -358,7 +374,11 @@ def test_asis_interweaving_preserves_exact_2d_cone_posterior_stationarity() -> N
             a_sigma_m=a_sig,
             a_kappa_m=a_kap,
             local_scales_m=lam,
-            s0_scale_m=s0,
+            log_s0_eff_m=math.log(s0),
+            log_sk_eff_m=math.log(s0),
+            nu_sig=1.0,
+            nu_kap=3.0,
+            nu_loc=3.0,
             fixed_sigma_m=None,
             dynamic_shrinkage=True,
             rng=rng,
@@ -548,3 +568,334 @@ def test_lapack_collapsed_gaussian_loglik_matches_scipy_logpdf() -> None:
     x_back = rkma_mod._solve_lower(chol, rkma_mod._solve_lower(chol, resid), transpose=True)
     np.testing.assert_allclose(omega_cov @ x_back, resid, atol=1e-10)
     np.testing.assert_allclose(rkma_mod._inv_lower(chol) @ chol, np.eye(n_q * k_dim), atol=1e-10)
+
+
+def test_iw2_marginal_z_slice_and_imh_matches_bartlett_correlation() -> None:
+    """Verify exact 1-D IW_2(nu, Psi) marginal z=atanh(r) log-density and IMH + z-slice stationarity."""
+    # 1. Quadrature check of _log_iw2_marginal_z across small and large df (no overflow at nu=90)
+    for df_iw, r_psi in ((5.0, 0.75), (25.0, -0.60), (90.0, 0.82)):
+        iw2_t2, iw2_w_vt = rkma_mod._precompute_iw2_quadrature(df_iw)
+        z_ref = 0.0
+        lp_ref = rkma_mod._log_iw2_marginal_z(z_ref, df_iw, r_psi, iw2_t2, iw2_w_vt)
+
+        def _exact_unnorm_logp_z(z_val: float) -> float:
+            r_val = math.tanh(z_val)
+            a_val = r_psi * r_val
+            log_1ma = math.log1p(-a_val)
+            integ, _ = integrate.quad(
+                lambda psi: math.exp(
+                    (df_iw - 1.0) * math.log(max(math.sin(psi), 1e-300))
+                    - df_iw * (math.log1p(-a_val * math.sin(psi)) - log_1ma)
+                ),
+                0.0,
+                math.pi,
+                epsabs=1e-13,
+                epsrel=1e-13,
+            )
+            # p(r) propto (1 - r^2)^{(df - 3)/2} * integ; |dr/dz| = 1 - r^2 => p(z) propto sech^{df - 1}(z) * integ
+            return (
+                -(df_iw - 1.0) * np.logaddexp(z_val, -z_val)
+                + (df_iw - 1.0) * math.log(2.0)
+                - df_iw * log_1ma
+                + math.log(integ)
+            )
+
+        q_ref = _exact_unnorm_logp_z(z_ref)
+        for z_test in (-1.35, -0.4, 0.55, 1.50):
+            diff_fast = rkma_mod._log_iw2_marginal_z(z_test, df_iw, r_psi, iw2_t2, iw2_w_vt) - lp_ref
+            diff_quad = _exact_unnorm_logp_z(z_test) - q_ref
+            assert abs(diff_fast - diff_quad) < 1e-10, (df_iw, r_psi, z_test, diff_fast, diff_quad)
+
+    # 2. Stationarity of IMH + z-slice kernel under both flat likelihood and tilted likelihood
+    rng = np.random.default_rng(20261030)
+    for df_iw, r_psi, tilt in ((6.0, 0.75, 0.0), (25.0, -0.60, 1.6)):
+        psi_mat = np.array([[4.0, 4.0 * r_psi * 1.5], [4.0 * r_psi * 1.5, 9.0]], dtype=np.float64)
+        chol_inv = np.linalg.cholesky(np.linalg.inv(psi_mat))
+        iw2_t2, iw2_w_vt = rkma_mod._precompute_iw2_quadrature(df_iw)
+
+        def _loglik_r(r_val: float) -> float:
+            return -tilt * ((r_val - 0.25) ** 2)
+
+        # Reference draws via Bartlett IW_2 + importance resampling
+        n_prop = 60_000
+        bart_r = np.array(
+            [rkma_mod._sample_iw_correlation(df_iw, psi_mat, rng, chol_inv=chol_inv)[0, 1] for _ in range(n_prop)]
+        )
+        bart_r = np.clip(bart_r, -math.tanh(6.5), math.tanh(6.5))
+        if tilt == 0.0:
+            ref_r = bart_r[:5000]
+        else:
+            lw = -tilt * ((bart_r - 0.25) ** 2)
+            lw -= np.max(lw)
+            w = np.exp(lw)
+            w /= np.sum(w)
+            ref_r = bart_r[rng.choice(n_prop, size=5000, replace=True, p=w)]
+
+        r_cur = 0.0
+        ll_cur = _loglik_r(r_cur)
+        chain_r = np.empty(3500, dtype=np.float64)
+        for step in range(3800):
+            # Exact Step 6a: IMH from IW prior
+            r_prop = float(rkma_mod._sample_iw_correlation(df_iw, psi_mat, rng, chol_inv=chol_inv)[0, 1])
+            ll_prop = _loglik_r(r_prop)
+            if math.log(max(float(rng.uniform()), 1e-300)) < ll_prop - ll_cur:
+                r_cur = r_prop
+                ll_cur = ll_prop
+            # Exact Step 6b: 1-D slice step on z = atanh(r)
+            z_cur = math.atanh(max(-1.0 + 1e-12, min(1.0 - 1e-12, r_cur)))
+
+            def _logp_z(z_val: float) -> float:
+                rv = math.tanh(z_val)
+                return rkma_mod._log_iw2_marginal_z(z_val, df_iw, r_psi, iw2_t2, iw2_w_vt) + _loglik_r(rv)
+
+            z_new, _ = rkma_mod._slice_sample_1d_with_logp(
+                _logp_z,
+                z_cur,
+                rng,
+                width=0.5,
+                max_steps=6,
+                bounds=(-6.5, 6.5),
+                logp_init=rkma_mod._log_iw2_marginal_z(z_cur, df_iw, r_psi, iw2_t2, iw2_w_vt) + ll_cur,
+            )
+            r_cur = math.tanh(z_new)
+            ll_cur = _loglik_r(r_cur)
+            if step >= 300:
+                chain_r[step - 300] = r_cur
+
+        ks_res = stats.ks_2samp(chain_r[::2], ref_r[::2])
+        assert ks_res.pvalue > 0.01, f"IW2 z-slice KS failed for df={df_iw}, r={r_psi}, tilt={tilt}: p={ks_res.pvalue:.4f}"
+
+
+def test_hierarchical_global_local_scale_prior_stationarity() -> None:
+    """Verify joint (tau, sigma_m, kappa_m = gamma_m * sigma_m, theta_m) transitions preserve exact posterior."""
+    rng = np.random.default_rng(20261031)
+    h_post = 4
+    psi = orthonormal_exposure_basis(h_post, 2) / math.sqrt(float(h_post))
+    c_cover = np.eye(2, dtype=np.float64)  # A = 3 (2 non-control increments, K' = 2, M = 2)
+    specs = [
+        _OutcomeConePriorSpec(
+            c_cover=c_cover,
+            psi=psi,
+            horizon=h_post,
+            monotone=True,
+            period_positivity=True,
+            scale_prior="global_halft",
+            use_local_scales=False,
+        )
+        for _ in range(2)
+    ]
+    s0_scales = [0.50, 0.80]
+    log_s0 = [math.log(s) for s in s0_scales]
+    d_m = 4
+    d_tot = 8
+    y_obs = np.array([0.30, 0.45, 0.05, -0.04, 0.15, 0.25, 0.02, 0.03], dtype=np.float64)
+    sd_obs = 0.40
+    wx = np.eye(d_tot, dtype=np.float64) / sd_obs
+    wy = y_obs / sd_obs
+    prec_lik = wx.T @ wx
+    h_lik = wx.T @ wy
+
+    a_cone = np.zeros((2 * specs[0].a_cone.shape[0], d_tot), dtype=np.float64)
+    nw = specs[0].a_cone.shape[0]
+    a_cone[:nw, :d_m] = specs[0].a_cone
+    a_cone[nw:, d_m:] = specs[1].a_cone
+    interior_ray = np.array([0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0], dtype=np.float64)
+
+    tau0 = rkma_mod._SCALE_PRIOR_TAU0
+    sd_eta = rkma_mod._SCALE_PRIOR_LOG_ETA_SD
+    nu_gamma = rkma_mod._SCALE_PRIOR_NU_GAMMA
+    gamma0 = rkma_mod._SCALE_PRIOR_GAMMA0
+    wt_b = rkma_mod._SCALE_PRIOR_W_TAU_BOUND
+    eta_b = rkma_mod._SCALE_PRIOR_ETA_BOUND
+    ug_b = rkma_mod._SCALE_PRIOR_U_GAMMA_BOUND
+    nu_loc = rkma_mod._SCALE_PRIOR_NU_LOCAL
+
+    # Verify normalized two-group global log-scale density integrates to 1
+    w_grid = np.linspace(-25.0, 25.0, 20001)
+    p_grid = np.array([math.exp(rkma_mod._log_global_tau_prior(float(w))) for w in w_grid])
+    assert abs(float(np.trapezoid(p_grid, w_grid)) - 1.0) < 1e-5
+
+    def _draw_box_halft(scale_val: float, nu: float, n_s: int, lo: float, hi: float) -> np.ndarray:
+        out = np.empty(n_s, dtype=np.float64)
+        rem = np.arange(n_s)
+        while rem.size > 0:
+            prop = scale_val * np.abs(rng.standard_t(df=nu, size=rem.size))
+            w_p = np.log(np.maximum(prop, 1e-300))
+            ok = (w_p > lo) & (w_p < hi)
+            out[rem[ok]] = prop[ok]
+            rem = rem[~ok]
+        return out
+
+    def _draw_box_global_tau(n_s: int) -> np.ndarray:
+        out = np.empty(n_s, dtype=np.float64)
+        rem = np.arange(n_s)
+        while rem.size > 0:
+            is_act = rng.random(rem.size) < rkma_mod._SCALE_PRIOR_PI_ACT
+            prop = np.empty(rem.size, dtype=np.float64)
+            n_act = int(np.sum(is_act))
+            if n_act > 0:
+                prop[is_act] = rkma_mod._SCALE_PRIOR_TAU0 * np.sqrt(
+                    np.maximum(
+                        rng.f(rkma_mod._SCALE_PRIOR_ALPHA_TAU, rkma_mod._SCALE_PRIOR_NU_TAU, size=n_act),
+                        1e-300,
+                    )
+                )
+            n_nul = rem.size - n_act
+            if n_nul > 0:
+                prop[~is_act] = rkma_mod._SCALE_PRIOR_TAU_NULL * np.sqrt(
+                    np.maximum(rng.f(1.0, rkma_mod._SCALE_PRIOR_NU_NULL, size=n_nul), 1e-300)
+                )
+            w_p = np.log(np.maximum(prop, 1e-300))
+            ok = (w_p > -wt_b) & (w_p < wt_b)
+            out[rem[ok]] = prop[ok]
+            rem = rem[~ok]
+        return out
+
+    def _draw_box_norm(sd_val: float, n_s: int, lo: float, hi: float) -> np.ndarray:
+        out = np.empty(n_s, dtype=np.float64)
+        rem = np.arange(n_s)
+        while rem.size > 0:
+            prop = sd_val * rng.standard_normal(rem.size)
+            ok = (prop > lo) & (prop < hi)
+            out[rem[ok]] = prop[ok]
+            rem = rem[~ok]
+        return out
+
+    # 1. Exact importance-sampled reference draws from joint posterior
+    n_prop = 220_000
+    tau_p = _draw_box_global_tau(n_prop)
+    eta_p = np.vstack([_draw_box_norm(sd_eta, n_prop, -eta_b, eta_b) for _ in range(2)])
+    sig_p = np.vstack([tau_p * s0_scales[m] * np.exp(eta_p[m]) for m in range(2)])
+    gam_p = np.vstack([_draw_box_halft(gamma0, nu_gamma, n_prop, -ug_b, ug_b) for _ in range(2)])
+    kap_p = sig_p * gam_p
+    th_p = np.zeros((n_prop, d_tot), dtype=np.float64)
+    scale_fac = math.sqrt(float(h_post) / specs[0].c_scale)
+    for m in range(2):
+        r_m = gam_p[m]
+        phi_lo = -np.arctan(1.0 / np.maximum(r_m * specs[m].m_plus, 1e-30))
+        phi_hi = np.arctan(1.0 / np.maximum(r_m * specs[m].m_minus, 1e-30))
+        for e in range(2):
+            rad = np.sqrt(-2.0 * np.log(np.clip(rng.uniform(size=n_prop), 1e-15, 1.0)))
+            ang = rng.uniform(phi_lo, phi_hi)
+            th_p[:, m * d_m + e] = rad * np.cos(ang) * sig_p[m] * scale_fac
+            th_p[:, m * d_m + 2 + e] = rad * np.sin(ang) * kap_p[m] * scale_fac
+
+    ll = -0.5 * np.sum(((th_p - y_obs[None, :]) / sd_obs) ** 2, axis=1)
+    ll -= np.max(ll)
+    w_is = np.exp(ll)
+    w_is /= np.sum(w_is)
+    ess_is = 1.0 / float(np.sum(w_is * w_is))
+    assert ess_is > 1500.0, f"Importance reference ESS too small: {ess_is:.1f}"
+    idx_ref = rng.choice(n_prop, size=3500, replace=True, p=w_is)
+
+    # 2. Run hierarchical MCMC transitions
+    theta = interior_ray.copy()
+    w_tau = math.log(tau0)
+    sigma_sq = np.array([(tau0 * s) ** 2 for s in s0_scales], dtype=np.float64)
+    kappa_sq = np.array([(tau0 * gamma0 * s) ** 2 for s in s0_scales], dtype=np.float64)
+    a_sig = sigma_sq.copy()
+    a_kap = kappa_sq.copy()
+    lam = [np.ones(2, dtype=np.float64), np.ones(2, dtype=np.float64)]
+    b_loc = [np.ones(2, dtype=np.float64), np.ones(2, dtype=np.float64)]
+
+    tr_tau = np.empty(3000, dtype=np.float64)
+    tr_sig0 = np.empty(3000, dtype=np.float64)
+    tr_sig1 = np.empty(3000, dtype=np.float64)
+    tr_kap0 = np.empty(3000, dtype=np.float64)
+    tr_th0 = np.empty(3000, dtype=np.float64)
+
+    for step in range(3400):
+        prec_prior = np.zeros((d_tot, d_tot), dtype=np.float64)
+        for m in range(2):
+            l0_m, _ = specs[m].precision_and_logdet(lam[m])
+            bm = m * d_m
+            prec_prior[bm : bm + 2, bm : bm + 2] = l0_m / (float(h_post) * sigma_sq[m])
+            prec_prior[bm + 2 : bm + 4, bm + 2 : bm + 4] = l0_m / (float(h_post) * kappa_sq[m])
+        prec_post = prec_lik + prec_prior
+        mean_post = np.linalg.solve(prec_post, h_lik)
+        theta = _sample_truncated_mvn(mean_post, prec_post, a_cone, theta, interior_ray, rng, n_hmc_steps=1)
+
+        w_res = wy - wx @ theta
+        w_tau = rkma_mod._update_global_tau(
+            w_tau=w_tau,
+            sigma_sq=sigma_sq,
+            kappa_sq=kappa_sq,
+            log_s0_scales=log_s0,
+            log_sk_scales=log_s0,
+            free_outcome_idxs=(0, 1),
+            dynamic_shrinkage=True,
+            rng=rng,
+            theta=theta,
+            prior_specs=specs,
+            local_scales=lam,
+            n_nonctrl=2,
+            k_dim=2,
+        )
+        w_tau, w_res = rkma_mod._asis_interweave_global_tau(
+            w_tau=w_tau,
+            theta=theta,
+            w_res=w_res,
+            wx=wx,
+            sigma_sq=sigma_sq,
+            kappa_sq=kappa_sq,
+            prior_specs=specs,
+            free_outcome_idxs=(0, 1),
+            n_nonctrl=2,
+            k_dim=2,
+            dynamic_shrinkage=True,
+            rng=rng,
+        )
+        for m in range(2):
+            ls_eff = log_s0[m] + w_tau
+            sigma_sq[m], kappa_sq[m], a_sig[m], a_kap[m], lam[m], b_loc[m] = _update_scales_outcome(
+                theta_m=theta[m * d_m : (m + 1) * d_m],
+                spec=specs[m],
+                sigma_sq=float(sigma_sq[m]),
+                kappa_sq=float(kappa_sq[m]),
+                a_sigma=float(a_sig[m]),
+                a_kappa=float(a_kap[m]),
+                local_scales=lam[m],
+                b_local=b_loc[m],
+                log_s0_eff=ls_eff,
+                log_sk_eff=log_s0[m],
+                nu_sig=3.0,
+                nu_kap=nu_gamma,
+                nu_loc=nu_loc,
+                fixed_sigma=None,
+                dynamic_shrinkage=True,
+                rng=rng,
+                coupled_p1=True,
+            )
+            sigma_sq[m], kappa_sq[m], a_sig[m], a_kap[m], w_res = _asis_interweave_outcome_scales(
+                m_idx=m,
+                theta=theta,
+                w_res=w_res,
+                wx=wx,
+                spec=specs[m],
+                sigma_sq_m=float(sigma_sq[m]),
+                kappa_sq_m=float(kappa_sq[m]),
+                a_sigma_m=float(a_sig[m]),
+                a_kappa_m=float(a_kap[m]),
+                local_scales_m=lam[m],
+                log_s0_eff_m=ls_eff,
+                log_sk_eff_m=log_s0[m],
+                nu_sig=3.0,
+                nu_kap=nu_gamma,
+                nu_loc=nu_loc,
+                fixed_sigma_m=None,
+                dynamic_shrinkage=True,
+                rng=rng,
+                coupled_p1=True,
+            )
+        if step >= 400:
+            tr_tau[step - 400] = math.exp(w_tau)
+            tr_sig0[step - 400] = math.sqrt(sigma_sq[0])
+            tr_sig1[step - 400] = math.sqrt(sigma_sq[1])
+            tr_kap0[step - 400] = math.sqrt(kappa_sq[0])
+            tr_th0[step - 400] = theta[0]
+
+    assert stats.ks_2samp(tr_tau[::2], tau_p[idx_ref][::2]).pvalue > 0.01
+    assert stats.ks_2samp(tr_sig0[::2], sig_p[0, idx_ref][::2]).pvalue > 0.01
+    assert stats.ks_2samp(tr_sig1[::2], sig_p[1, idx_ref][::2]).pvalue > 0.01
+    assert stats.ks_2samp(tr_kap0[::2], kap_p[0, idx_ref][::2]).pvalue > 0.01
+    assert stats.ks_2samp(tr_th0[::2], th_p[idx_ref, 0][::2]).pvalue > 0.01

@@ -618,7 +618,7 @@ def test_informative_tau_priors_and_catt_floor() -> None:
         RankKLongBetConfig(tau_clip=(2.0, -1.0))
 
     rng = np.random.default_rng(777)
-    N, T = 60, 6
+    N, T = 60, 7
     x = rng.normal(size=(N, 2))
     z = np.zeros((N, T), dtype=np.int32)
     z[:30, 1:] = 1

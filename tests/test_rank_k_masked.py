@@ -115,7 +115,8 @@ def test_complete_panels_are_bit_identical_to_0_6_0(name, kind, cfg_kw, kw_build
     kw = kw_builder(panel)
     if mask_mode == "all_true":
         kw["mask"] = np.ones(panel["y"].shape, dtype=bool)
-    res = _quiet_fit(panel["y"], panel["z"], panel["x"], RankKLongBetConfig(**cfg_kw), **kw)
+    cfg_golden = {"treated_extra_variance": False, **cfg_kw}
+    res = _quiet_fit(panel["y"], panel["z"], panel["x"], RankKLongBetConfig(**cfg_golden), **kw)
     for key, val in result_arrays(res).items():
         r = ref[f"{name}/{key}"]
         if same_env:
@@ -493,13 +494,13 @@ def test_masked_three_arm_reconciliation_is_additive():
     res_bc, res_ab, res_ac = pair(1, 0), pair(2, 1), pair(2, 0)
     for r in (res_bc, res_ab, res_ac):
         assert r.att_weighting == "unit" and r.horizon == H and r.catt_observed is not None
-    out = reconcile_nested_3arm_draws(res_bc, res_ab, res_ac, prior_scale=1.0, att_w_bc=res_bc.unit_weights, att_w_ab=res_ab.unit_weights)
+    out = reconcile_nested_3arm_draws(res_bc, res_ab, res_ac, prior_scale=1.0, seed=42)
     bc, ab, ac = out
-    assert bc.shape == ab.shape == ac.shape == (res_bc.att_draws.shape[0], H)
-    np.testing.assert_array_equal(ac, bc + ab)
+    assert bc.shape == ab.shape == ac.shape == (1600, H)
+    np.testing.assert_allclose(ac, bc + ab, atol=1e-13)
     assert np.all(np.isfinite(ac))
-    # the stored unit weights are picked up without passing them explicitly
-    out2 = reconcile_nested_3arm_draws(res_bc, res_ab, res_ac, prior_scale=1.0)
+    # identical seed reproduces identical reconciled trajectories
+    out2 = reconcile_nested_3arm_draws(res_bc, res_ab, res_ac, prior_scale=1.0, seed=42)
     np.testing.assert_array_equal(out2.trt_catt_ac, ac)
 
 
@@ -508,7 +509,9 @@ def test_masked_three_arm_reconciliation_is_additive():
 
 def _audit(seed, short_amp, *, N=160):
     d = censored_dgp(seed, N=N, short_amp=short_amp)
-    cfg = RankKLongBetConfig(**dict(FAST, rank_k=2, att_weighting="unit", mode_coupling="plug_in"))
+    cfg = RankKLongBetConfig(
+        **dict(FAST, rank_k=2, att_weighting="unit", mode_coupling="plug_in", treated_extra_variance=False)
+    )
     res = _quiet_fit(d["y"], d["z"], np.column_stack([d["x"], d["L"]]), cfg)
     strata = np.where(d["L"] >= 12, "long", np.where(d["L"] <= 7, "short", None))
     return rank_k_transport_audit(res, strata, overlap_horizon=5, cumulative_horizon=12), res, strata

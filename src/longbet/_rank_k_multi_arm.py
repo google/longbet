@@ -83,12 +83,17 @@ _ALLOWED_MODEL_OPTION_KEYS = frozenset({
 })
 
 # Precomputed Gauss-Hermite & Gauss-Legendre rules for deterministic integrals.
+_LOG_2 = math.log(2.0)
 _GH16_X, _GH16_W = np.polynomial.hermite.hermgauss(16)
 _GH16_Z = _GH16_X * math.sqrt(2.0)
 _GH16_PROB = _GH16_W / math.sqrt(math.pi)
 _GL16_X, _GL16_W = np.polynomial.legendre.leggauss(16)
 _GL8_X, _GL8_W = np.polynomial.legendre.leggauss(3)
 _GL8_P0_Z = sp_special.ndtri(np.clip(0.75 + 0.25 * _GL8_X, 0.5, 1.0 - 1e-15))
+_GL64_RAW_X, _GL64_RAW_W = np.polynomial.legendre.leggauss(64)
+_GL64_PSI_W = 0.5 * math.pi * _GL64_RAW_W
+_GL64_SIN = np.sin(0.25 * math.pi * (_GL64_RAW_X + 1.0))
+_GL64_LOG_SIN = np.log(_GL64_SIN)
 
 # Contamination-mixture log-normal inflation hyperparameters (R2: median 16x var = 4x SD).
 _R2_BETA_ALPHA = 1.0
@@ -102,6 +107,29 @@ _RHO_BETA_ALPHA = 5.0
 _RHO_BETA_BETA = 1.5
 _PHI_BETA_ALPHA = 2.0
 _PHI_BETA_BETA = 10.0
+
+# Hierarchical standardized poset-cone scale prior hyperparameters (P1 / "global_halft"):
+#   tau ~ (1 - pi_act) * Half-t_{nu_null}(tau_null)
+#         + pi_act * Scaled-F(alpha_tau, nu_tau, tau_0)             [two-group global Cohen's-d scale]
+#   log(sigma_m / (tau * s_{0,m})) ~ N(0, sd_eta^2)                [outcome scale dispersion]
+#   gamma_m = kappa_m / sigma_m ~ Half-t_{nu_gamma}(gamma_0)       [dimensionless dynamic tilt ratio]
+# where s_{0,m} = sqrt(median_a(sigma^2_{pre,m,a})) is the 100% pre-treatment outcome SD
+# (falling back to 2 * SE_{top,m} / tau_0 on synthetic mock inputs without pre-period metadata).
+_SCALE_PRIOR_PI_ACT = 0.90
+_SCALE_PRIOR_TAU_NULL = 0.035
+_SCALE_PRIOR_NU_NULL = 1.5
+_SCALE_PRIOR_ALPHA_TAU = 3.0
+_SCALE_PRIOR_NU_TAU = 3.0
+_SCALE_PRIOR_TAU0 = 0.40
+_SCALE_PRIOR_LOG_ETA_SD = 0.32
+_SCALE_PRIOR_NU_GAMMA = 3.0
+_SCALE_PRIOR_GAMMA0 = 0.55
+_SCALE_PRIOR_C0 = 1.0
+_SCALE_PRIOR_W_TAU_BOUND = 11.0
+_SCALE_PRIOR_ETA_BOUND = 8.0
+_SCALE_PRIOR_U_GAMMA_BOUND = 9.5
+_SCALE_PRIOR_TREE_LOCAL = False
+_SCALE_PRIOR_NU_LOCAL = 3.0
 
 # Process-level cache of 2,049-point P1 diamond log-normalizer lookup tables.
 _P1_LUT_CACHE: dict[tuple[Any, ...], list[float]] = {}
@@ -190,6 +218,7 @@ class MultiArmReconciliationResult:
     sampler_diagnostics: SamplerDiagnostics
     rho_draws: np.ndarray | None = None
     phi_draws: np.ndarray | None = None
+    tau_draws: np.ndarray | None = None
 
     @property
     def diagnostics(self) -> SamplerDiagnostics:
@@ -799,6 +828,33 @@ def _lookup_meta_cov(meta: Mapping[str, Any] | None, role: str) -> np.ndarray | 
     return None
 
 
+def _lookup_meta_pre_var(meta: Mapping[str, Any] | None, role: str) -> float | None:
+    """Read treated or control pre-period residual variance from ``arm_metadata``."""
+    if not isinstance(meta, Mapping):
+        return None
+    if role == "treated":
+        keys = ("pre_residual_var_treated", "treated_pre_var", "pre_var_treated")
+    else:
+        keys = ("pre_residual_var_control", "control_pre_var", "pre_var_control")
+    for k in keys:
+        if k in meta and meta[k] is not None:
+            try:
+                val = float(meta[k])
+            except (TypeError, ValueError):
+                val = float("nan")
+            if math.isfinite(val) and val > 0.0:
+                return val
+    nested = meta.get(role)
+    if isinstance(nested, Mapping) and nested.get("pre_var") is not None:
+        try:
+            val = float(nested["pre_var"])
+        except (TypeError, ValueError):
+            val = float("nan")
+        if math.isfinite(val) and val > 0.0:
+            return val
+    return None
+
+
 def _lookup_meta_n(res: RankKLongBetResult, role: str) -> float:
     """Read arm unit count from ``arm_metadata`` or infer from ``catt_draws``."""
     meta = getattr(res, "arm_metadata", None)
@@ -833,6 +889,7 @@ def _extract_outcome_summaries(
     traj_mean_by_pair: dict[tuple[str, str], np.ndarray] = {}
     traj_cov_by_pair: dict[tuple[str, str], np.ndarray] = {}
     v_candidates: list[list[np.ndarray]] = [[] for _ in range(n_arms)]
+    pre_var_candidates: list[list[float]] = [[] for _ in range(n_arms)]
     n_candidates: list[list[float]] = [[] for _ in range(n_arms)]
     fallback_ssq: list[list[float]] = [[] for _ in range(n_arms)]
 
@@ -868,6 +925,13 @@ def _extract_outcome_summaries(
             v_candidates[ia].append(_psd_clip(psi.T @ cov_trt[:horizon, :horizon] @ psi, floor=1e-12))
         if cov_ctrl is not None and cov_ctrl.shape[0] >= horizon:
             v_candidates[ib].append(_psd_clip(psi.T @ cov_ctrl[:horizon, :horizon] @ psi, floor=1e-12))
+
+        pre_trt = _lookup_meta_pre_var(meta, "treated")
+        pre_ctrl = _lookup_meta_pre_var(meta, "control")
+        if pre_trt is not None:
+            pre_var_candidates[ia].append(pre_trt)
+        if pre_ctrl is not None:
+            pre_var_candidates[ib].append(pre_ctrl)
 
         n_trt = _lookup_meta_n(res, "treated")
         n_ctrl = _lookup_meta_n(res, "control")
@@ -961,7 +1025,8 @@ def _extract_outcome_summaries(
         e0 = np.maximum(1.0 - rho0 * d_vals, phi0)
         f_by_pair[pair] = (w_q * e0[None, :]) @ w_q.T
 
-    # Realization-independent baseline scale s_{0,m}: 2x stage-1 posterior SD of top contrast window Mode-1
+    # Realization-independent baseline scale s_{0,m}: pre-period outcome SD when available in
+    # Stage-1 arm_metadata (falling back to 2x top-contrast Mode-1 SE on synthetic mock results).
     top_arm = arms[-1]
     ctrl_arm = arms[0]
     if (top_arm, ctrl_arm) in s_by_pair:
@@ -979,7 +1044,15 @@ def _extract_outcome_summaries(
         )
         top_row = b_pinv[-1]
         s0_var = float(sum((top_row[i] ** 2) * s_by_pair[p][0, 0] for i, p in enumerate(fitted_pairs))) / float(horizon)
-    s0_scale = max(2.0 * math.sqrt(max(s0_var, 1e-16)), 1e-6)
+    se_top_scale = max(2.0 * math.sqrt(max(s0_var, 1e-16)), 1e-6)
+
+    any_pre_vars = [float(np.mean(pv)) for pv in pre_var_candidates if pv]
+    if any_pre_vars:
+        pre_sd = math.sqrt(max(float(np.median(any_pre_vars)), 1e-16))
+        s0_scale = max(_SCALE_PRIOR_C0 * max(pre_sd, 0.5 * se_top_scale), 1e-6)
+    else:
+        s0_scale = max(_SCALE_PRIOR_C0 * se_top_scale / max(_SCALE_PRIOR_TAU0, 1e-6), 1e-6)
+    sk_scale = s0_scale
 
     return {
         "y_by_pair": y_by_pair,
@@ -993,6 +1066,8 @@ def _extract_outcome_summaries(
         "traj_mean_by_pair": traj_mean_by_pair,
         "traj_cov_by_pair": traj_cov_by_pair,
         "s0_scale": s0_scale,
+        "sk_scale": sk_scale,
+        "se_top_scale": se_top_scale,
     }
 
 
@@ -1065,6 +1140,7 @@ class _OutcomeConePriorSpec:
         monotone: bool,
         period_positivity: bool,
         scale_prior: str,
+        use_local_scales: bool | None = None,
     ) -> None:
         self.c_cover = np.asarray(c_cover, dtype=np.float64)
         self.n_edges, self.n_nonctrl = self.c_cover.shape
@@ -1091,6 +1167,17 @@ class _OutcomeConePriorSpec:
         self.c_cover_inv: np.ndarray | None = (
             np.linalg.inv(self.c_cover) if self.is_tree_poset else None
         )
+        if use_local_scales is None:
+            self.use_local_scales = bool(
+                self.n_edges > 0
+                and (
+                    self.scale_prior == "local_halft"
+                    or (self.scale_prior == "global_halft" and _SCALE_PRIOR_TREE_LOCAL and self.is_tree_poset)
+                )
+            )
+        else:
+            self.use_local_scales = bool(use_local_scales and self.n_edges > 0)
+
         # Detect standard 2x2 diamond (A-1 == 3, E_c == 4, arms 10 and 01 conditionally independent given 11)
         self.is_2x2_diamond = (
             self.n_nonctrl == 3
@@ -1123,7 +1210,7 @@ class _OutcomeConePriorSpec:
         self._qmc_z: np.ndarray | None = None
         self._p1_lut: list[float] | None = None
         if self.monotone and not self.is_tree_poset:
-            if self.scale_prior == "global_halft" and self.period_positivity and self.k_dim >= 2:
+            if not self.use_local_scales and self.period_positivity and self.k_dim >= 2:
                 self._p1_lut = self._build_p1_logz_lut()
 
     def _identify_diamond_edges(self) -> tuple[int, int, int, int] | None:
@@ -1145,10 +1232,13 @@ class _OutcomeConePriorSpec:
 
     def precision_and_logdet(self, local_scales: np.ndarray) -> tuple[np.ndarray, float]:
         """Return ``(Lambda_0(lambda), log det Lambda_0(lambda))``."""
-        if self.scale_prior == "global_halft":
+        if not self.use_local_scales:
             return self.lambda0_unit, self.logdet_unit
-        inv_sq = 1.0 / np.maximum(np.asarray(local_scales, dtype=np.float64) ** 2, 1e-24)
+        lam = np.maximum(np.asarray(local_scales, dtype=np.float64), 1e-12)
+        inv_sq = 1.0 / (lam * lam)
         prec = self.c_scale * ((self.c_cover.T * inv_sq[None, :]) @ self.c_cover)
+        if self.is_tree_poset:
+            return prec, self.logdet_unit - 2.0 * float(np.sum(np.log(lam)))
         sign, logdet = np.linalg.slogdet(prec)
         if sign <= 0:
             prec = _psd_clip(prec, floor=1e-12)
@@ -1322,9 +1412,9 @@ class _OutcomeConePriorSpec:
                     + math.atan(1.0 / (r_clamped * self.m_minus))
                 ) / (2.0 * math.pi)
                 return float(self.n_nonctrl) * math.log(max(p_edge, 1e-300))
-            return self._qmc_logz(r_clamped, local_scales)
+            return self._qmc_logz(r_clamped, np.ones(self.n_edges, dtype=np.float64))
 
-        if self.scale_prior == "global_halft":
+        if not self.use_local_scales:
             if not self.period_positivity or self.k_dim == 1:
                 if self._diamond_map is not None:
                     return self._diamond_logz_exact(0.0, np.ones(self.n_edges))
@@ -1722,6 +1812,63 @@ def _sample_invgamma(shape: float, scale: float, rng: np.random.Generator) -> fl
     return float(max(scale, 1e-30) / max(g, 1e-300))
 
 
+def _log_halft_unit(diff: float, nu: float) -> float:
+    """Exact log-density (up to constant in ``nu``) of ``diff = log(X / scale)`` for ``X ~ Half-t_nu(scale)``."""
+    z = 2.0 * diff - math.log(nu)
+    if z > 30.0:
+        return diff - 0.5 * (nu + 1.0) * z
+    return diff - 0.5 * (nu + 1.0) * math.log1p(math.exp(z))
+
+
+def _log_scaled_f_logscale(w_val: float, alpha: float, nu: float, log_scale: float) -> float:
+    """Exact normalized log-density of ``w = log(tau)`` where ``(tau / scale)^2 ~ F(alpha, nu)``."""
+    u = w_val - log_scale
+    log_ratio = math.log(alpha / nu)
+    log_norm = (
+        _LOG_2
+        + 0.5 * alpha * log_ratio
+        + math.lgamma(0.5 * (alpha + nu))
+        - math.lgamma(0.5 * alpha)
+        - math.lgamma(0.5 * nu)
+    )
+    z = 2.0 * u + log_ratio
+    if z > 30.0:
+        return log_norm + alpha * u - 0.5 * (alpha + nu) * z
+    return log_norm + alpha * u - 0.5 * (alpha + nu) * math.log1p(math.exp(z))
+
+
+def _log_global_tau_prior(w_tau: float) -> float:
+    """Normalized log-density of ``w_tau = log(tau)`` under the two-group global scale prior."""
+    pi_act = _SCALE_PRIOR_PI_ACT
+    lp_act = _log_scaled_f_logscale(
+        w_tau, _SCALE_PRIOR_ALPHA_TAU, _SCALE_PRIOR_NU_TAU, math.log(_SCALE_PRIOR_TAU0)
+    )
+    if pi_act >= 1.0:
+        return lp_act
+    lp_null = _log_scaled_f_logscale(
+        w_tau, 1.0, _SCALE_PRIOR_NU_NULL, math.log(_SCALE_PRIOR_TAU_NULL)
+    )
+    a0 = math.log(1.0 - pi_act) + lp_null
+    a1 = math.log(pi_act) + lp_act
+    m_top = a0 if a0 >= a1 else a1
+    return m_top + math.log(math.exp(a0 - m_top) + math.exp(a1 - m_top))
+
+
+def _sample_global_tau_prior(rng: np.random.Generator) -> float:
+    """Exact forward sample of ``tau`` on ``exp((-w_bound, w_bound))`` from the global scale prior."""
+    wt_b = _SCALE_PRIOR_W_TAU_BOUND
+    while True:
+        if float(rng.random()) < _SCALE_PRIOR_PI_ACT:
+            f_draw = float(rng.f(_SCALE_PRIOR_ALPHA_TAU, _SCALE_PRIOR_NU_TAU))
+            tau = _SCALE_PRIOR_TAU0 * math.sqrt(max(f_draw, 1e-300))
+        else:
+            f_draw = float(rng.f(1.0, _SCALE_PRIOR_NU_NULL))
+            tau = _SCALE_PRIOR_TAU_NULL * math.sqrt(max(f_draw, 1e-300))
+        w_val = math.log(max(tau, 1e-300))
+        if -wt_b < w_val < wt_b:
+            return tau
+
+
 def _update_scales_outcome(
     theta_m: np.ndarray,
     spec: _OutcomeConePriorSpec,
@@ -1731,52 +1878,54 @@ def _update_scales_outcome(
     a_kappa: float,
     local_scales: np.ndarray,
     b_local: np.ndarray,
-    s0_scale: float,
+    log_s0_eff: float,
+    log_sk_eff: float,
+    nu_sig: float,
+    nu_kap: float,
+    nu_loc: float,
     fixed_sigma: float | None,
     dynamic_shrinkage: bool,
     rng: np.random.Generator,
+    coupled_p1: bool = False,
 ) -> tuple[float, float, float, float, np.ndarray, np.ndarray]:
-    """Exact collapsed marginal Half-t_3 scale updates for ``(sigma_m^2, kappa_m^2, lambda_m)``.
+    """Exact collapsed marginal scale updates for ``(sigma_m^2, kappa_m^2, lambda_m)``.
 
-    Integrates out the Huang--Wand auxiliary variables ``(a_sigma, a_kappa, b_local)``
-    analytically via Liu (1994) Rao--Blackwellization so centered scale updates have zero
-    auxiliary-variable Gibbs lag while targeting the exact Half-t_3 marginal posterior.
+    Integrates out auxiliary variables analytically via Liu (1994) Rao--Blackwellization
+    so centered scale updates have zero auxiliary-variable Gibbs lag while targeting the
+    exact marginal posterior.
     """
     h_float = float(spec.horizon)
     n_nonctrl = spec.n_nonctrl
     k_dim = spec.k_dim
-    nu_sig = 1.0 if spec.scale_prior == "global_halft" else 3.0
-    half_nu_sig_p1 = 0.5 * (nu_sig + 1.0)
-    inv_nu_s0_sq = 1.0 / (nu_sig * (s0_scale**2))
-    inv_3s0_sq = 1.0 / (3.0 * (s0_scale**2))
-    inv_3_unit = 1.0 / 3.0
     theta_modes = theta_m.reshape(k_dim, n_nonctrl)
 
-    # 1. Local scales lambda_{m,e} under P2 ("local_halft")
+    # 1. Per-increment local scales lambda_{m,e} ~ Half-t_{nu_loc}(1) when active
     lam_cur = local_scales.copy()
-    if spec.scale_prior == "local_halft" and spec.n_edges > 0:
+    if spec.use_local_scales and spec.n_edges > 0:
         u_modes = theta_modes @ spec.c_cover.T  # (K', E_c)
         if spec.is_tree_poset:
-            coef_we = 1.0 - float(k_dim)
             for e_idx in range(spec.n_edges):
-                quad_e = float(u_modes[0, e_idx] ** 2) / max(sigma_sq, 1e-24)
+                quad_e = float(u_modes[0, e_idx] ** 2) / max(sigma_sq, 1e-80)
                 if k_dim > 1:
-                    quad_e += float(np.sum(u_modes[1:, e_idx] ** 2)) / max(kappa_sq, 1e-24)
+                    quad_e += float(np.sum(u_modes[1:, e_idx] ** 2)) / max(kappa_sq, 1e-80)
                 c_quad = 0.5 * spec.c_scale * quad_e / h_float
 
                 def _logp_we_tree(w_val: float, _cq: float = c_quad) -> float:
-                    e2w = math.exp(2.0 * w_val)
-                    return coef_we * w_val - 2.0 * math.log1p(e2w * inv_3_unit) - _cq / max(e2w, 1e-300)
+                    return (
+                        _log_halft_unit(w_val, nu_loc)
+                        - float(k_dim) * w_val
+                        - _cq * math.exp(-2.0 * w_val)
+                    )
 
-                w_init = math.log(max(float(lam_cur[e_idx]), 1e-8))
+                w_init = math.log(max(float(lam_cur[e_idx]), 1e-12))
                 w_new = _slice_sample_1d(_logp_we_tree, w_init, rng, bounds=(-9.0, 9.0))
                 lam_cur[e_idx] = math.exp(w_new)
         else:
-            ratio_cur = math.sqrt(max(kappa_sq, 1e-24) / max(sigma_sq, 1e-24))
+            ratio_cur = math.sqrt(max(kappa_sq, 1e-80) / max(sigma_sq, 1e-80))
             for e_idx in rng.permutation(spec.n_edges)[:2]:
-                quad_e = float(u_modes[0, e_idx] ** 2) / max(sigma_sq, 1e-24)
+                quad_e = float(u_modes[0, e_idx] ** 2) / max(sigma_sq, 1e-80)
                 if k_dim > 1:
-                    quad_e += float(np.sum(u_modes[1:, e_idx] ** 2)) / max(kappa_sq, 1e-24)
+                    quad_e += float(np.sum(u_modes[1:, e_idx] ** 2)) / max(kappa_sq, 1e-80)
                 c_quad = 0.5 * spec.c_scale * quad_e / h_float
 
                 def _logp_we_dag(w_val: float, _idx: int = int(e_idx), _cq: float = c_quad) -> float:
@@ -1784,39 +1933,60 @@ def _update_scales_outcome(
                     lam_try[_idx] = math.exp(w_val)
                     _, logdet_l0 = spec.precision_and_logdet(lam_try)
                     log_z = spec.log_normalizer(ratio_cur, lam_try)
-                    e2w = math.exp(2.0 * w_val)
                     return (
-                        w_val
-                        - 2.0 * math.log1p(e2w * inv_3_unit)
-                        - _cq / max(e2w, 1e-300)
+                        _log_halft_unit(w_val, nu_loc)
+                        - _cq * math.exp(-2.0 * w_val)
                         + 0.5 * float(k_dim) * logdet_l0
                         - log_z
                     )
 
-                w_init = math.log(max(float(lam_cur[e_idx]), 1e-8))
+                w_init = math.log(max(float(lam_cur[e_idx]), 1e-12))
                 w_new = _slice_sample_1d(_logp_we_dag, w_init, rng, bounds=(-9.0, 9.0))
                 lam_cur[e_idx] = math.exp(w_new)
 
         # Exact scale-ridge move (w_s + gamma, w_k + gamma, w_local - gamma) holding Sigma_0 invariant
         if fixed_sigma is None and (dynamic_shrinkage or k_dim == 1):
-            ws0 = 0.5 * math.log(max(sigma_sq, 1e-28))
-            wk0 = 0.5 * math.log(max(kappa_sq, 1e-28))
+            ws0 = 0.5 * math.log(max(sigma_sq, 1e-80))
+            wk0 = 0.5 * math.log(max(kappa_sq, 1e-80))
             w_loc0 = np.log(np.maximum(lam_cur, 1e-12))
             both_gk = bool(k_dim >= 2 and dynamic_shrinkage)
-            lin_g = (2.0 if both_gk else 1.0) - float(spec.n_edges)
+            if coupled_p1:
+                eta_b_r = _SCALE_PRIOR_ETA_BOUND
+                sd_eta_r = _SCALE_PRIOR_LOG_ETA_SD
+                g_lo = max(log_s0_eff - eta_b_r - ws0, float(np.max(w_loc0 - 9.0)))
+                g_hi = min(log_s0_eff + eta_b_r - ws0, float(np.min(w_loc0 + 9.0)))
+                if g_hi - g_lo > 1e-9 and (g_lo < 0.0 < g_hi):
+                    def _logp_gamma_p1(g_val: float) -> float:
+                        lp = -0.5 * (((ws0 + g_val - log_s0_eff) / sd_eta_r) ** 2)
+                        for e_i in range(spec.n_edges):
+                            lp += _log_halft_unit(float(w_loc0[e_i]) - g_val, nu_loc)
+                        return lp
 
-            def _logp_gamma(g_val: float) -> float:
-                lp = lin_g * g_val - half_nu_sig_p1 * math.log1p(math.exp(2.0 * (ws0 + g_val)) * inv_nu_s0_sq)
+                    g_new = _slice_sample_1d(_logp_gamma_p1, 0.0, rng, bounds=(g_lo, g_hi))
+                    sigma_sq = math.exp(2.0 * (ws0 + g_new))
+                    if both_gk:
+                        kappa_sq = math.exp(2.0 * (wk0 + g_new))
+                    lam_cur = np.exp(w_loc0 - g_new)
+            else:
+                g_lo = max(-13.0 - ws0, float(np.max(w_loc0 - 9.0)))
+                g_hi = min(13.0 - ws0, float(np.min(w_loc0 + 9.0)))
                 if both_gk:
-                    lp -= 2.0 * math.log1p(math.exp(2.0 * (wk0 + g_val)) * inv_3s0_sq)
-                lp -= 2.0 * float(np.sum(np.log1p(np.exp(2.0 * (w_loc0 - g_val)) * inv_3_unit)))
-                return lp
+                    g_lo = max(g_lo, -13.0 - wk0)
+                    g_hi = min(g_hi, 13.0 - wk0)
+                if g_hi - g_lo > 1e-9 and (g_lo < 0.0 < g_hi):
+                    def _logp_gamma(g_val: float) -> float:
+                        lp = _log_halft_unit(ws0 + g_val - log_s0_eff, nu_sig)
+                        if both_gk:
+                            lp += _log_halft_unit(wk0 + g_val - log_sk_eff, nu_kap)
+                        for e_i in range(spec.n_edges):
+                            lp += _log_halft_unit(float(w_loc0[e_i]) - g_val, nu_loc)
+                        return lp
 
-            g_new = _slice_sample_1d(_logp_gamma, 0.0, rng, bounds=(-8.0, 8.0))
-            sigma_sq = math.exp(2.0 * (ws0 + g_new))
-            if both_gk:
-                kappa_sq = math.exp(2.0 * (wk0 + g_new))
-            lam_cur = np.exp(w_loc0 - g_new)
+                    g_new = _slice_sample_1d(_logp_gamma, 0.0, rng, bounds=(g_lo, g_hi))
+                    sigma_sq = math.exp(2.0 * (ws0 + g_new))
+                    if both_gk:
+                        kappa_sq = math.exp(2.0 * (wk0 + g_new))
+                    lam_cur = np.exp(w_loc0 - g_new)
 
     prec_l0, _ = spec.precision_and_logdet(lam_cur)
     q0 = float(theta_modes[0] @ prec_l0 @ theta_modes[0])
@@ -1826,60 +1996,121 @@ def _update_scales_outcome(
     d0 = float(n_nonctrl)
     d_dyn = float(n_nonctrl * (k_dim - 1))
 
-    # 2. Global scale sigma_m^2 & dynamic scale kappa_m^2 via exact marginal Half-t conditionals
+    # 2. Global scale sigma_m^2 & dynamic scale kappa_m^2 via exact collapsed conditionals
     logz_depends_on_ratio = bool(spec.monotone and spec.period_positivity and k_dim >= 2 and spec.n_edges > 0)
 
-    ws_cur = math.log(float(fixed_sigma)) if fixed_sigma is not None else 0.5 * math.log(max(sigma_sq, 1e-28))
+    ws_cur = math.log(float(fixed_sigma)) if fixed_sigma is not None else 0.5 * math.log(max(sigma_sq, 1e-80))
     wk_cur = (
-        math.log(50.0 * s0_scale)
+        (math.log(50.0) + log_sk_eff)
         if not dynamic_shrinkage
-        else 0.5 * math.log(max(kappa_sq, 1e-28))
+        else 0.5 * math.log(max(kappa_sq, 1e-80))
     )
 
-    if fixed_sigma is None:
-        def _logp_ws(ws: float) -> float:
-            e2s = math.exp(2.0 * ws)
-            lp = (1.0 - d0) * ws - half_nu_sig_p1 * math.log1p(e2s * inv_nu_s0_sq) - c0 / max(e2s, 1e-300)
-            if logz_depends_on_ratio:
-                lp -= spec.log_normalizer(math.exp(wk_cur - ws), lam_cur)
-            return lp
+    if coupled_p1:
+        sd_eta = _SCALE_PRIOR_LOG_ETA_SD
+        log_gamma0 = math.log(_SCALE_PRIOR_GAMMA0)
+        nu_gamma = _SCALE_PRIOR_NU_GAMMA
+        eta_b = _SCALE_PRIOR_ETA_BOUND
+        ug_b = _SCALE_PRIOR_U_GAMMA_BOUND
 
-        ws_cur = _slice_sample_1d(_logp_ws, ws_cur, rng, bounds=(-13.0, 13.0))
+        if fixed_sigma is None:
+            ws_lo = log_s0_eff - eta_b
+            ws_hi = log_s0_eff + eta_b
+            if dynamic_shrinkage:
+                ws_lo = max(ws_lo, wk_cur - ug_b)
+                ws_hi = min(ws_hi, wk_cur + ug_b)
+            if ws_hi - ws_lo > 1e-9 and (ws_lo < ws_cur < ws_hi):
+                def _logp_ws_p1(ws: float) -> float:
+                    lp = -0.5 * (((ws - log_s0_eff) / sd_eta) ** 2) - d0 * ws - c0 * math.exp(-2.0 * ws)
+                    if dynamic_shrinkage:
+                        lp += _log_halft_unit(wk_cur - ws - log_gamma0, nu_gamma)
+                    if logz_depends_on_ratio:
+                        lp -= spec.log_normalizer(math.exp(wk_cur - ws), lam_cur)
+                    return lp
 
-    if dynamic_shrinkage:
-        if k_dim == 1:
-            def _logp_wk_prior(wk: float) -> float:
-                return wk - 2.0 * math.log1p(math.exp(2.0 * wk) * inv_3s0_sq)
+                ws_cur = _slice_sample_1d(_logp_ws_p1, ws_cur, rng, bounds=(ws_lo, ws_hi))
 
-            wk_cur = _slice_sample_1d(_logp_wk_prior, wk_cur, rng, bounds=(-13.0, 13.0))
-        else:
-            def _logp_wk(wk: float) -> float:
-                e2k = math.exp(2.0 * wk)
-                lp = (1.0 - d_dyn) * wk - 2.0 * math.log1p(e2k * inv_3s0_sq) - c_dyn / max(e2k, 1e-300)
+        if dynamic_shrinkage:
+            wk_lo = ws_cur - ug_b
+            wk_hi = ws_cur + ug_b
+            if k_dim == 1:
+                def _logp_wk_prior_p1(wk: float) -> float:
+                    return _log_halft_unit(wk - ws_cur - log_gamma0, nu_gamma)
+
+                wk_cur = _slice_sample_1d(_logp_wk_prior_p1, wk_cur, rng, bounds=(wk_lo, wk_hi))
+            else:
+                def _logp_wk_p1(wk: float) -> float:
+                    lp = (
+                        _log_halft_unit(wk - ws_cur - log_gamma0, nu_gamma)
+                        - d_dyn * wk
+                        - c_dyn * math.exp(-2.0 * wk)
+                    )
+                    if logz_depends_on_ratio:
+                        lp -= spec.log_normalizer(math.exp(wk - ws_cur), lam_cur)
+                    return lp
+
+                wk_cur = _slice_sample_1d(_logp_wk_p1, wk_cur, rng, bounds=(wk_lo, wk_hi))
+
+        # Constant-ratio joint radial scale step (ws, wk) = (ws, ws + u) where gamma = exp(u) & log Z_m(gamma) stay fixed
+        if fixed_sigma is None and dynamic_shrinkage and k_dim >= 2:
+            u_fixed = wk_cur - ws_cur
+            ws_lo_u = log_s0_eff - eta_b
+            ws_hi_u = log_s0_eff + eta_b
+            if ws_hi_u - ws_lo_u > 1e-9 and (ws_lo_u < ws_cur < ws_hi_u):
+                c_comb = c0 + c_dyn * math.exp(-2.0 * u_fixed)
+
+                def _logp_ws_const_u_p1(ws: float) -> float:
+                    return (
+                        -0.5 * (((ws - log_s0_eff) / sd_eta) ** 2)
+                        - (d0 + d_dyn) * ws
+                        - c_comb * math.exp(-2.0 * ws)
+                    )
+
+                ws_cur = _slice_sample_1d(_logp_ws_const_u_p1, ws_cur, rng, bounds=(ws_lo_u, ws_hi_u))
+                wk_cur = ws_cur + u_fixed
+    else:
+        if fixed_sigma is None:
+            def _logp_ws(ws: float) -> float:
+                lp = _log_halft_unit(ws - log_s0_eff, nu_sig) - d0 * ws - c0 * math.exp(-2.0 * ws)
                 if logz_depends_on_ratio:
-                    lp -= spec.log_normalizer(math.exp(wk - ws_cur), lam_cur)
+                    lp -= spec.log_normalizer(math.exp(wk_cur - ws), lam_cur)
                 return lp
 
-            wk_cur = _slice_sample_1d(_logp_wk, wk_cur, rng, bounds=(-13.0, 13.0))
+            ws_cur = _slice_sample_1d(_logp_ws, ws_cur, rng, bounds=(-13.0, 13.0))
 
-    # Constant-ratio joint radial scale step (ws, wk) = (ws, ws + u) where log Z_m(exp(u)) is constant
-    if fixed_sigma is None and dynamic_shrinkage and k_dim >= 2:
-        u_fixed = wk_cur - ws_cur
-        c_comb = c0 + c_dyn * math.exp(-2.0 * u_fixed)
-        lin_comb = 2.0 - d0 - d_dyn
+        if dynamic_shrinkage:
+            if k_dim == 1:
+                def _logp_wk_prior(wk: float) -> float:
+                    return _log_halft_unit(wk - log_sk_eff, nu_kap)
 
-        def _logp_ws_const_u(ws: float) -> float:
-            e2s = math.exp(2.0 * ws)
-            e2k = math.exp(2.0 * (ws + u_fixed))
-            return (
-                lin_comb * ws
-                - half_nu_sig_p1 * math.log1p(e2s * inv_nu_s0_sq)
-                - 2.0 * math.log1p(e2k * inv_3s0_sq)
-                - c_comb / max(e2s, 1e-300)
-            )
+                wk_cur = _slice_sample_1d(_logp_wk_prior, wk_cur, rng, bounds=(-13.0, 13.0))
+            else:
+                def _logp_wk(wk: float) -> float:
+                    lp = _log_halft_unit(wk - log_sk_eff, nu_kap) - d_dyn * wk - c_dyn * math.exp(-2.0 * wk)
+                    if logz_depends_on_ratio:
+                        lp -= spec.log_normalizer(math.exp(wk - ws_cur), lam_cur)
+                    return lp
 
-        ws_cur = _slice_sample_1d(_logp_ws_const_u, ws_cur, rng, bounds=(-13.0, 13.0))
-        wk_cur = ws_cur + u_fixed
+                wk_cur = _slice_sample_1d(_logp_wk, wk_cur, rng, bounds=(-13.0, 13.0))
+
+        # Constant-ratio joint radial scale step (ws, wk) = (ws, ws + u) where log Z_m(exp(u)) is constant
+        if fixed_sigma is None and dynamic_shrinkage and k_dim >= 2:
+            u_fixed = wk_cur - ws_cur
+            ws_lo_u = max(-13.0, -13.0 - u_fixed)
+            ws_hi_u = min(13.0, 13.0 - u_fixed)
+            if ws_hi_u - ws_lo_u > 1e-9 and (ws_lo_u < ws_cur < ws_hi_u):
+                c_comb = c0 + c_dyn * math.exp(-2.0 * u_fixed)
+
+                def _logp_ws_const_u(ws: float) -> float:
+                    return (
+                        _log_halft_unit(ws - log_s0_eff, nu_sig)
+                        + _log_halft_unit(ws + u_fixed - log_sk_eff, nu_kap)
+                        - (d0 + d_dyn) * ws
+                        - c_comb * math.exp(-2.0 * ws)
+                    )
+
+                ws_cur = _slice_sample_1d(_logp_ws_const_u, ws_cur, rng, bounds=(ws_lo_u, ws_hi_u))
+                wk_cur = ws_cur + u_fixed
 
     new_sigma_sq = math.exp(2.0 * ws_cur)
     new_kappa_sq = math.exp(2.0 * wk_cur)
@@ -2031,6 +2262,36 @@ def _sample_iw_correlation(
     return r_mat
 
 
+def _precompute_iw2_quadrature(df_iw: float) -> tuple[np.ndarray, np.ndarray]:
+    """Precompute 64-point Gauss-Legendre log-sine terms and weights for ``IW_2(df_iw, Psi)``."""
+    nu_eff = max(float(df_iw), 1.0 + 1e-9)
+    return (nu_eff - 1.0) * _GL64_LOG_SIN, _GL64_PSI_W
+
+
+def _log_iw2_marginal_z(
+    z_val: float,
+    df_iw: float,
+    r_iw: float,
+    iw2_log_sin_pow: np.ndarray,
+    iw2_psi_w: np.ndarray,
+) -> float:
+    """Exact log-density (up to additive constant) of ``z = atanh(r)`` under ``IW_2(df_iw, Psi)``.
+
+    Integrates out ``(sigma_1, sigma_2)`` analytically to obtain
+    ``p(z) propto (1 - r^2)^{(nu - 1)/2} int_0^{pi/2} (sin psi)^{nu - 1} (1 - a sin psi)^{-nu} d psi``
+    with ``a = r_iw * tanh(z)``. Factoring out the exact peak ``-nu * log(1 - a)`` at ``psi = pi/2``
+    bounds every Gauss-Legendre summand in ``(0, 1]``, preventing overflow/underflow for all ``nu``.
+    """
+    r_val = math.tanh(z_val)
+    a_val = r_val * r_iw
+    az = abs(z_val)
+    log_1mr2 = -2.0 * (az + math.log1p(math.exp(-2.0 * az)) - _LOG_2)
+    log_1ma = math.log1p(-a_val)
+    log_terms = iw2_log_sin_pow - df_iw * (np.log1p(-a_val * _GL64_SIN) - log_1ma)
+    quad = float(np.dot(iw2_psi_w, np.exp(log_terms)))
+    return 0.5 * (df_iw - 1.0) * log_1mr2 - df_iw * log_1ma + math.log(max(quad, 1e-300))
+
+
 # ---- Posterior predictive checks (cycle, composite, basis) ---------------------------------------
 
 
@@ -2141,6 +2402,160 @@ def _compute_composite_ppc_pvalue(
 # ---- Joint Bayesian multi-chain reconciliation core ---------------------------------------------
 
 
+def _update_global_tau(
+    *,
+    w_tau: float,
+    sigma_sq: np.ndarray,
+    kappa_sq: np.ndarray,
+    log_s0_scales: list[float],
+    log_sk_scales: list[float],
+    free_outcome_idxs: tuple[int, ...],
+    dynamic_shrinkage: bool,
+    rng: np.random.Generator,
+    theta: np.ndarray | None = None,
+    prior_specs: list[_OutcomeConePriorSpec] | None = None,
+    local_scales: list[np.ndarray] | None = None,
+    n_nonctrl: int = 0,
+    k_dim: int = 1,
+) -> float:
+    """Centered slice + joint hierarchy translation update for global ``w_tau = log(tau)``."""
+    if not free_outcome_idxs:
+        return 0.0
+    del log_sk_scales
+    sd_eta = _SCALE_PRIOR_LOG_ETA_SD
+    wt_b = _SCALE_PRIOR_W_TAU_BOUND
+    eta_b = _SCALE_PRIOR_ETA_BOUND
+
+    ws_free = [0.5 * math.log(max(float(sigma_sq[m]), 1e-80)) for m in free_outcome_idxs]
+    wk_free = (
+        [0.5 * math.log(max(float(kappa_sq[m]), 1e-80)) for m in free_outcome_idxs]
+        if dynamic_shrinkage
+        else []
+    )
+
+    wt_lo = max([-wt_b] + [ws_free[i] - log_s0_scales[m] - eta_b for i, m in enumerate(free_outcome_idxs)])
+    wt_hi = min([wt_b] + [ws_free[i] - log_s0_scales[m] + eta_b for i, m in enumerate(free_outcome_idxs)])
+    if wt_hi - wt_lo > 1e-9 and (wt_lo < w_tau < wt_hi):
+        def _logp_wt(wt: float) -> float:
+            lp = _log_global_tau_prior(wt)
+            for idx_f, m in enumerate(free_outcome_idxs):
+                lp -= 0.5 * (((ws_free[idx_f] - wt - log_s0_scales[m]) / sd_eta) ** 2)
+            return lp
+
+        w_tau = _slice_sample_1d(_logp_wt, w_tau, rng, width=3.0, bounds=(wt_lo, wt_hi))
+
+    # Centered joint global translation (w_tau + d, ws_m + d, wk_m + d | theta) keeping eta_m & gamma_m fixed
+    if theta is not None and prior_specs is not None and local_scales is not None and n_nonctrl > 0:
+        any_logz_dep = any(
+            prior_specs[m].monotone and prior_specs[m].period_positivity and k_dim >= 2 and prior_specs[m].n_edges > 0
+            for m in free_outcome_idxs
+        )
+        if dynamic_shrinkage or k_dim == 1 or not any_logz_dep:
+            d_per_m = n_nonctrl * k_dim
+            h_float = float(prior_specs[free_outcome_idxs[0]].horizon)
+            quad_tot = 0.0
+            d_tot_free = 0.0
+            for idx_f, m in enumerate(free_outcome_idxs):
+                l0_m, _ = prior_specs[m].precision_and_logdet(local_scales[m])
+                tm = theta[m * d_per_m : (m + 1) * d_per_m].reshape(k_dim, n_nonctrl)
+                quad_tot += (0.5 * float(tm[0] @ l0_m @ tm[0]) / h_float) * math.exp(-2.0 * ws_free[idx_f])
+                d_tot_free += float(n_nonctrl)
+                if k_dim >= 2 and dynamic_shrinkage:
+                    cdyn_m = 0.5 * float(sum(tm[k] @ l0_m @ tm[k] for k in range(1, k_dim))) / h_float
+                    quad_tot += cdyn_m * math.exp(-2.0 * wk_free[idx_f])
+                    d_tot_free += float(n_nonctrl * (k_dim - 1))
+            dc_lo = -wt_b - w_tau
+            dc_hi = wt_b - w_tau
+            if dc_hi - dc_lo > 1e-9 and (dc_lo < 0.0 < dc_hi):
+                def _logp_dc(delta: float) -> float:
+                    return (
+                        _log_global_tau_prior(w_tau + delta)
+                        - d_tot_free * delta
+                        - quad_tot * math.exp(-2.0 * delta)
+                    )
+
+                d_c = _slice_sample_1d(_logp_dc, 0.0, rng, width=3.0, bounds=(dc_lo, dc_hi))
+                w_tau = w_tau + d_c
+                for idx_f, m in enumerate(free_outcome_idxs):
+                    sigma_sq[m] = math.exp(2.0 * (ws_free[idx_f] + d_c))
+                    if dynamic_shrinkage:
+                        kappa_sq[m] = math.exp(2.0 * (wk_free[idx_f] + d_c))
+
+    return w_tau
+
+
+def _asis_interweave_global_tau(
+    *,
+    w_tau: float,
+    theta: np.ndarray,
+    w_res: np.ndarray,
+    wx: np.ndarray,
+    sigma_sq: np.ndarray,
+    kappa_sq: np.ndarray,
+    prior_specs: list[_OutcomeConePriorSpec],
+    free_outcome_idxs: tuple[int, ...],
+    n_nonctrl: int,
+    k_dim: int,
+    dynamic_shrinkage: bool,
+    rng: np.random.Generator,
+) -> tuple[float, np.ndarray]:
+    """Yu & Meng (2011) global non-centered scale interweaving step for ``tau`` across free outcomes."""
+    if not free_outcome_idxs:
+        return w_tau, w_res
+    d_per_m = n_nonctrl * k_dim
+    any_logz_dep = any(
+        prior_specs[m].monotone and prior_specs[m].period_positivity and k_dim >= 2 and prior_specs[m].n_edges > 0
+        for m in free_outcome_idxs
+    )
+    if k_dim >= 2 and (not dynamic_shrinkage) and any_logz_dep:
+        return w_tau, w_res
+
+    scale_mode1_only = bool(k_dim >= 2 and not dynamic_shrinkage)
+    d_th = np.zeros_like(theta)
+    ws_free: list[float] = []
+    wk_free: list[float] = []
+    wt_b = _SCALE_PRIOR_W_TAU_BOUND
+    dt_lo = -wt_b - w_tau
+    dt_hi = wt_b - w_tau
+    for m in free_outcome_idxs:
+        base_m = m * d_per_m
+        if scale_mode1_only:
+            d_th[base_m : base_m + n_nonctrl] = theta[base_m : base_m + n_nonctrl]
+        else:
+            d_th[base_m : base_m + d_per_m] = theta[base_m : base_m + d_per_m]
+        ws_m = 0.5 * math.log(max(float(sigma_sq[m]), 1e-80))
+        ws_free.append(ws_m)
+        if dynamic_shrinkage:
+            wk_m = 0.5 * math.log(max(float(kappa_sq[m]), 1e-80))
+            wk_free.append(wk_m)
+
+    if float(np.dot(d_th, d_th)) <= 1e-50 or dt_hi - dt_lo <= 1e-9 or not (dt_lo < 0.0 < dt_hi):
+        return w_tau, w_res
+
+    u_wx = wx @ d_th
+    r_base = w_res + u_wx
+    d1 = float(np.dot(r_base, u_wx))
+    d2 = float(np.dot(u_wx, u_wx))
+    def _logp_dt(delta: float) -> float:
+        s = math.exp(delta)
+        return _log_global_tau_prior(w_tau + delta) + s * d1 - 0.5 * (s * s) * d2
+
+    d_new = _slice_sample_1d(_logp_dt, 0.0, rng, width=3.0, bounds=(dt_lo, dt_hi))
+    s_new = math.exp(d_new)
+    w_tau_new = w_tau + d_new
+    for idx_f, m in enumerate(free_outcome_idxs):
+        base_m = m * d_per_m
+        if scale_mode1_only:
+            theta[base_m : base_m + n_nonctrl] = s_new * d_th[base_m : base_m + n_nonctrl]
+        else:
+            theta[base_m : base_m + d_per_m] = s_new * d_th[base_m : base_m + d_per_m]
+        sigma_sq[m] = math.exp(2.0 * (ws_free[idx_f] + d_new))
+        if dynamic_shrinkage:
+            kappa_sq[m] = math.exp(2.0 * (wk_free[idx_f] + d_new))
+    w_res_new = r_base - s_new * u_wx
+    return w_tau_new, w_res_new
+
+
 def _asis_interweave_outcome_scales(
     *,
     m_idx: int,
@@ -2153,50 +2568,61 @@ def _asis_interweave_outcome_scales(
     a_sigma_m: float,
     a_kappa_m: float,
     local_scales_m: np.ndarray,
-    s0_scale_m: float,
+    log_s0_eff_m: float,
+    log_sk_eff_m: float,
+    nu_sig: float,
+    nu_kap: float,
+    nu_loc: float,
     fixed_sigma_m: float | None,
     dynamic_shrinkage: bool,
     rng: np.random.Generator,
+    coupled_p1: bool = False,
 ) -> tuple[float, float, float, float, np.ndarray]:
-    """Yu & Meng (2011) Ancillary Augmentation interweaving step for ``(sigma_m, kappa_m)``.
+    """Yu & Meng (2011) Ancillary Augmentation interweaving step for ``(sigma_m, kappa_m, lambda_m)``.
 
-    Eliminates centered-Gibbs funnel slow-mixing when dynamic modes ``theta_{m,1..K'-1}`` or
-    the global level ``theta_{m,0}`` concentrate near zero, while preserving exact detailed
-    balance of the marginal Half-t_3 cone prior + collapsed likelihood.
+    Eliminates centered-Gibbs funnel slow-mixing when dynamic modes ``theta_{m,1..K'-1}``,
+    the global level ``theta_{m,0}``, or individual tree increments concentrate near zero,
+    while preserving exact detailed balance of the marginal cone prior + collapsed likelihood.
     """
     n_nonctrl = spec.n_nonctrl
     k_dim = spec.k_dim
     d_per_m = n_nonctrl * k_dim
     base_m = m_idx * d_per_m
     sl_m = slice(base_m, base_m + d_per_m)
-    nu_sig = 1.0 if spec.scale_prior == "global_halft" else 3.0
-    half_nu_sig_p1 = 0.5 * (nu_sig + 1.0)
-    inv_nu_s0_sq = 1.0 / (nu_sig * (s0_scale_m**2))
-    inv_3s0_sq = 1.0 / (3.0 * (s0_scale_m**2))
     logz_dep = bool(spec.monotone and spec.period_positivity and k_dim >= 2 and spec.n_edges > 0)
 
-    skip_expensive_ratio_aa = bool(spec.scale_prior == "local_halft" and not spec.is_tree_poset)
+    skip_expensive_ratio_aa = bool(spec.use_local_scales and not spec.is_tree_poset)
+    sd_eta = _SCALE_PRIOR_LOG_ETA_SD
+    log_gamma0 = math.log(_SCALE_PRIOR_GAMMA0)
+    nu_gamma = _SCALE_PRIOR_NU_GAMMA
+    eta_b = _SCALE_PRIOR_ETA_BOUND
+    ug_b = _SCALE_PRIOR_U_GAMMA_BOUND
 
     # AA-0: Non-centered Mode-1 scale interweaving holding eta_0 = theta_0 / sigma_m fixed
     if fixed_sigma_m is None and k_dim >= 2 and dynamic_shrinkage and not skip_expensive_ratio_aa:
         sl_0 = slice(base_m, base_m + n_nonctrl)
         sl_dyn = slice(base_m + n_nonctrl, base_m + d_per_m)
-        sig_0 = math.sqrt(max(sigma_sq_m, 1e-28))
-        kap_0 = math.sqrt(max(kappa_sq_m, 1e-28))
+        sig_0 = math.sqrt(max(sigma_sq_m, 1e-80))
+        kap_0 = math.sqrt(max(kappa_sq_m, 1e-80))
+        wk_0_log = math.log(kap_0)
         eta_0 = theta[sl_0] / sig_0
         if float(np.dot(eta_0, eta_0)) > 1e-50:
-            ws_lo, ws_hi = -13.0, 13.0
+            if coupled_p1:
+                ws_lo = max(log_s0_eff_m - eta_b, wk_0_log - ug_b)
+                ws_hi = min(log_s0_eff_m + eta_b, wk_0_log + ug_b)
+            else:
+                ws_lo, ws_hi = -13.0, 13.0
             if spec.a_cone.shape[0] > 0:
                 a0 = spec.a_cone_dyn @ theta[sl_dyn]
                 a1 = spec.a_cone_0 @ eta_0
                 neg_mask = a1 < -1e-15
                 if np.any(neg_mask):
                     sig_max = float(np.min(-a0[neg_mask] / a1[neg_mask]))
-                    ws_hi = min(ws_hi, math.log(max(sig_max, 1e-28)) - 1e-12)
+                    ws_hi = min(ws_hi, math.log(max(sig_max, 1e-80)) - 1e-12)
                 pos_neg = (a1 > 1e-15) & (a0 < 0.0)
                 if np.any(pos_neg):
                     sig_min = float(np.max(-a0[pos_neg] / a1[pos_neg]))
-                    ws_lo = max(ws_lo, math.log(max(sig_min, 1e-28)) + 1e-12)
+                    ws_lo = max(ws_lo, math.log(max(sig_min, 1e-80)) + 1e-12)
 
             ws_cur = math.log(sig_0)
             if ws_hi - ws_lo > 1e-9 and (ws_lo < ws_cur < ws_hi):
@@ -2207,8 +2633,15 @@ def _asis_interweave_outcome_scales(
 
                 def _logp_aa_ws(ws: float) -> float:
                     sig = math.exp(ws)
-                    sig2 = sig * sig
-                    lp = ws - half_nu_sig_p1 * math.log1p(sig2 * inv_nu_s0_sq) + sig * c1_0 - 0.5 * sig2 * c2_0
+                    if coupled_p1:
+                        lp = (
+                            -0.5 * (((ws - log_s0_eff_m) / sd_eta) ** 2)
+                            + _log_halft_unit(wk_0_log - ws - log_gamma0, nu_gamma)
+                            + sig * c1_0
+                            - 0.5 * (sig * sig) * c2_0
+                        )
+                    else:
+                        lp = _log_halft_unit(ws - log_s0_eff_m, nu_sig) + sig * c1_0 - 0.5 * (sig * sig) * c2_0
                     if logz_dep:
                         lp -= spec.log_normalizer(kap_0 / sig, local_scales_m)
                     return lp
@@ -2223,22 +2656,26 @@ def _asis_interweave_outcome_scales(
     if dynamic_shrinkage and k_dim >= 2 and not skip_expensive_ratio_aa:
         sl_0 = slice(base_m, base_m + n_nonctrl)
         sl_dyn = slice(base_m + n_nonctrl, base_m + d_per_m)
-        kap_0 = math.sqrt(max(kappa_sq_m, 1e-28))
-        sig_0 = math.sqrt(max(sigma_sq_m, 1e-28))
+        kap_0 = math.sqrt(max(kappa_sq_m, 1e-80))
+        sig_0 = math.sqrt(max(sigma_sq_m, 1e-80))
+        ws_0_log = math.log(sig_0)
         eta_dyn = theta[sl_dyn] / kap_0
         if float(np.dot(eta_dyn, eta_dyn)) > 1e-50:
-            w_lo, w_hi = -13.0, 13.0
+            if coupled_p1:
+                w_lo, w_hi = ws_0_log - ug_b, ws_0_log + ug_b
+            else:
+                w_lo, w_hi = -13.0, 13.0
             if spec.a_cone.shape[0] > 0:
                 a0 = spec.a_cone_0 @ theta[sl_0]
                 a1 = spec.a_cone_dyn @ eta_dyn
                 neg_mask = a1 < -1e-15
                 if np.any(neg_mask):
                     kap_max = float(np.min(-a0[neg_mask] / a1[neg_mask]))
-                    w_hi = min(w_hi, math.log(max(kap_max, 1e-28)) - 1e-12)
+                    w_hi = min(w_hi, math.log(max(kap_max, 1e-80)) - 1e-12)
                 pos_neg = (a1 > 1e-15) & (a0 < 0.0)
                 if np.any(pos_neg):
                     kap_min = float(np.max(-a0[pos_neg] / a1[pos_neg]))
-                    w_lo = max(w_lo, math.log(max(kap_min, 1e-28)) + 1e-12)
+                    w_lo = max(w_lo, math.log(max(kap_min, 1e-80)) + 1e-12)
 
             wk_cur = math.log(kap_0)
             if w_hi - w_lo > 1e-9 and (w_lo < wk_cur < w_hi):
@@ -2249,8 +2686,10 @@ def _asis_interweave_outcome_scales(
 
                 def _logp_aa_wk(wk: float) -> float:
                     kap = math.exp(wk)
-                    kap2 = kap * kap
-                    lp = wk - 2.0 * math.log1p(kap2 * inv_3s0_sq) + kap * c1 - 0.5 * kap2 * c2
+                    if coupled_p1:
+                        lp = _log_halft_unit(wk - ws_0_log - log_gamma0, nu_gamma) + kap * c1 - 0.5 * (kap * kap) * c2
+                    else:
+                        lp = _log_halft_unit(wk - log_sk_eff_m, nu_kap) + kap * c1 - 0.5 * (kap * kap) * c2
                     if logz_dep:
                         lp -= spec.log_normalizer(kap / sig_0, local_scales_m)
                     return lp
@@ -2265,61 +2704,80 @@ def _asis_interweave_outcome_scales(
     if fixed_sigma_m is None and (dynamic_shrinkage or k_dim == 1 or not logz_dep):
         th_m_cur = theta[sl_m].copy()
         if float(np.dot(th_m_cur, th_m_cur)) > 1e-50:
+            ws0 = 0.5 * math.log(max(sigma_sq_m, 1e-80))
             if k_dim >= 2 and not dynamic_shrinkage:
                 # Only scale Mode-1 (theta_{m,0}, sigma_m) when log Z_m does not depend on ratio
                 sl_0 = slice(base_m, base_m + n_nonctrl)
                 th0_cur = theta[sl_0].copy()
-                u_wx = wx[:, sl_0] @ th0_cur
-                r_base = w_res + u_wx
-                d1 = float(np.dot(r_base, u_wx))
-                d2 = float(np.dot(u_wx, u_wx))
-                sig0_sq = max(sigma_sq_m, 1e-28)
+                if coupled_p1:
+                    d_lo = log_s0_eff_m - eta_b - ws0
+                    d_hi = log_s0_eff_m + eta_b - ws0
+                else:
+                    d_lo = -13.0 - ws0
+                    d_hi = 13.0 - ws0
+                if float(np.dot(th0_cur, th0_cur)) > 1e-50 and d_hi - d_lo > 1e-9 and (d_lo < 0.0 < d_hi):
+                    u_wx = wx[:, sl_0] @ th0_cur
+                    r_base = w_res + u_wx
+                    d1 = float(np.dot(r_base, u_wx))
+                    d2 = float(np.dot(u_wx, u_wx))
 
-                def _logp_aa_d0(delta: float) -> float:
-                    s = math.exp(delta)
-                    s2 = s * s
-                    return delta - half_nu_sig_p1 * math.log1p(s2 * sig0_sq * inv_nu_s0_sq) + s * d1 - 0.5 * s2 * d2
+                    def _logp_aa_d0(delta: float) -> float:
+                        s = math.exp(delta)
+                        if coupled_p1:
+                            return -0.5 * (((ws0 + delta - log_s0_eff_m) / sd_eta) ** 2) + s * d1 - 0.5 * (s * s) * d2
+                        return _log_halft_unit(ws0 + delta - log_s0_eff_m, nu_sig) + s * d1 - 0.5 * (s * s) * d2
 
-                d_new = _slice_sample_1d(_logp_aa_d0, 0.0, rng, bounds=(-12.0, 12.0))
-                s_new = math.exp(d_new)
-                theta[sl_0] = s_new * th0_cur
-                w_res = r_base - s_new * u_wx
-                sigma_sq_m = (s_new * s_new) * sig0_sq
+                    d_new = _slice_sample_1d(_logp_aa_d0, 0.0, rng, bounds=(d_lo, d_hi))
+                    s_new = math.exp(d_new)
+                    theta[sl_0] = s_new * th0_cur
+                    w_res = r_base - s_new * u_wx
+                    sigma_sq_m = math.exp(2.0 * (ws0 + d_new))
             else:
                 # Scale entire outcome vector theta_m -> s * theta_m (cone-invariant & ratio-invariant!)
-                u_wx = wx[:, sl_m] @ th_m_cur
-                r_base = w_res + u_wx
-                d1 = float(np.dot(r_base, u_wx))
-                d2 = float(np.dot(u_wx, u_wx))
-                sig0_sq = max(sigma_sq_m, 1e-28)
-                kap0_sq = max(kappa_sq_m, 1e-28)
-                both_scales = bool(k_dim >= 2 and dynamic_shrinkage)
+                wk0 = 0.5 * math.log(max(kappa_sq_m, 1e-80))
+                if coupled_p1:
+                    shift_wk = bool(dynamic_shrinkage)
+                    d_lo = log_s0_eff_m - eta_b - ws0
+                    d_hi = log_s0_eff_m + eta_b - ws0
+                else:
+                    shift_wk = bool(k_dim >= 2 and dynamic_shrinkage)
+                    d_lo = max(-13.0 - ws0, -13.0 - wk0) if shift_wk else (-13.0 - ws0)
+                    d_hi = min(13.0 - ws0, 13.0 - wk0) if shift_wk else (13.0 - ws0)
+                if d_hi - d_lo > 1e-9 and (d_lo < 0.0 < d_hi):
+                    u_wx = wx[:, sl_m] @ th_m_cur
+                    r_base = w_res + u_wx
+                    d1 = float(np.dot(r_base, u_wx))
+                    d2 = float(np.dot(u_wx, u_wx))
 
-                def _logp_aa_joint(delta: float) -> float:
-                    s = math.exp(delta)
-                    s2 = s * s
-                    lp = delta - half_nu_sig_p1 * math.log1p(s2 * sig0_sq * inv_nu_s0_sq) + s * d1 - 0.5 * s2 * d2
-                    if both_scales:
-                        lp += delta - 2.0 * math.log1p(s2 * kap0_sq * inv_3s0_sq)
-                    return lp
+                    def _logp_aa_joint(delta: float) -> float:
+                        s = math.exp(delta)
+                        if coupled_p1:
+                            return -0.5 * (((ws0 + delta - log_s0_eff_m) / sd_eta) ** 2) + s * d1 - 0.5 * (s * s) * d2
+                        lp = _log_halft_unit(ws0 + delta - log_s0_eff_m, nu_sig) + s * d1 - 0.5 * (s * s) * d2
+                        if shift_wk:
+                            lp += _log_halft_unit(wk0 + delta - log_sk_eff_m, nu_kap)
+                        return lp
 
-                d_new = _slice_sample_1d(_logp_aa_joint, 0.0, rng, bounds=(-12.0, 12.0))
-                s_new = math.exp(d_new)
-                s2_new = s_new * s_new
-                theta[sl_m] = s_new * th_m_cur
-                w_res = r_base - s_new * u_wx
-                sigma_sq_m = s2_new * sig0_sq
-                if both_scales:
-                    kappa_sq_m = s2_new * kap0_sq
+                    d_new = _slice_sample_1d(_logp_aa_joint, 0.0, rng, bounds=(d_lo, d_hi))
+                    s_new = math.exp(d_new)
+                    theta[sl_m] = s_new * th_m_cur
+                    w_res = r_base - s_new * u_wx
+                    sigma_sq_m = math.exp(2.0 * (ws0 + d_new))
+                    if shift_wk:
+                        kappa_sq_m = math.exp(2.0 * (wk0 + d_new))
 
-    # AA-3: Per-edge non-centered scale interweaving on tree posets under P2 ("local_halft")
-    if spec.scale_prior == "local_halft" and spec.is_tree_poset and spec.c_cover_inv is not None:
+    # AA-3: Per-edge non-centered scale interweaving on tree posets when local scales are active
+    if spec.use_local_scales and spec.is_tree_poset and spec.c_cover_inv is not None:
         c_inv = spec.c_cover_inv
-        inv_3_unit = 1.0 / 3.0
         for e_idx in range(spec.n_edges):
             th_modes = theta[sl_m].reshape(k_dim, n_nonctrl)
             u_e = th_modes @ spec.c_cover[e_idx]  # (K',)
             if float(np.dot(u_e, u_e)) <= 1e-50:
+                continue
+            w_e0 = math.log(max(float(local_scales_m[e_idx]), 1e-12))
+            de_lo = -9.0 - w_e0
+            de_hi = 9.0 - w_e0
+            if de_hi - de_lo <= 1e-9 or not (de_lo < 0.0 < de_hi):
                 continue
             col_e = c_inv[:, e_idx]  # (A - 1,)
             d_th_e = np.concatenate([u_e[k] * col_e for k in range(k_dim)])
@@ -2327,21 +2785,18 @@ def _asis_interweave_outcome_scales(
             r_base_e = w_res + u_wx_e
             d1_e = float(np.dot(r_base_e, u_wx_e))
             d2_e = float(np.dot(u_wx_e, u_wx_e))
-            lam_e0 = max(float(local_scales_m[e_idx]), 1e-14)
-            lam_e0_sq = lam_e0 * lam_e0
 
             def _logp_aa_edge(
-                delta: float, _l2: float = lam_e0_sq, _d1: float = d1_e, _d2: float = d2_e
+                delta: float, _we0: float = w_e0, _d1: float = d1_e, _d2: float = d2_e
             ) -> float:
                 s = math.exp(delta)
-                s2 = s * s
-                return delta - 2.0 * math.log1p(s2 * _l2 * inv_3_unit) + s * _d1 - 0.5 * s2 * _d2
+                return _log_halft_unit(_we0 + delta, nu_loc) + s * _d1 - 0.5 * (s * s) * _d2
 
-            de_new = _slice_sample_1d(_logp_aa_edge, 0.0, rng, bounds=(-9.0, 9.0))
+            de_new = _slice_sample_1d(_logp_aa_edge, 0.0, rng, bounds=(de_lo, de_hi))
             se_new = math.exp(de_new)
             theta[sl_m] = theta[sl_m] + (se_new - 1.0) * d_th_e
             w_res = r_base_e - se_new * u_wx_e
-            local_scales_m[e_idx] = se_new * lam_e0
+            local_scales_m[e_idx] = math.exp(w_e0 + de_new)
 
     return sigma_sq_m, kappa_sq_m, a_sigma_m, a_kappa_m, w_res
 
@@ -2367,7 +2822,9 @@ def _run_single_gibbs_chain(
     a_cone_joint: np.ndarray,
     interior_ray_joint: np.ndarray,
     s0_scales: list[float],
+    sk_scales: list[float],
     fixed_sigmas: list[float | None],
+    use_hier_tau: bool,
     n_arms: int,
     n_outcomes: int,
     k_dim: int,
@@ -2389,6 +2846,7 @@ def _run_single_gibbs_chain(
     total_iters = int(n_steps) * thin_eff
 
     theta = state["theta"].copy()
+    w_tau = float(state["w_tau"])
     sigma_sq = state["sigma_sq"].copy()
     kappa_sq = state["kappa_sq"].copy()
     a_sigma = state["a_sigma"].copy()
@@ -2402,8 +2860,16 @@ def _run_single_gibbs_chain(
     pi_mix = float(state["pi_mix"])
     corr_r = state["corr_r"].copy()
 
+    free_outcome_idxs = tuple(m for m in range(n_outcomes) if fixed_sigmas[m] is None)
+    log_s0_scales = [math.log(max(float(s0_scales[m]), 1e-16)) for m in range(n_outcomes)]
+    log_sk_scales = [
+        math.log(max(float(fixed_sigmas[m]) if fixed_sigmas[m] is not None else float(sk_scales[m]), 1e-16))
+        for m in range(n_outcomes)
+    ]
+
     if record:
         tr_theta = np.empty((n_steps, d_total), dtype=np.float64)
+        tr_tau = np.empty(n_steps, dtype=np.float64)
         tr_sigma = np.empty((n_steps, n_outcomes), dtype=np.float64)
         tr_kappa = np.empty((n_steps, n_outcomes), dtype=np.float64)
         tr_local = [np.empty((n_steps, spec.n_edges), dtype=np.float64) for spec in prior_specs]
@@ -2413,7 +2879,7 @@ def _run_single_gibbs_chain(
         tr_flag = np.empty((n_steps, n_q), dtype=np.float64)
         tr_corr = np.empty((n_steps, n_outcomes, n_outcomes), dtype=np.float64)
     else:
-        tr_theta = tr_sigma = tr_kappa = tr_rho = tr_phi = tr_omega = tr_flag = tr_corr = None  # type: ignore[assignment]
+        tr_theta = tr_tau = tr_sigma = tr_kappa = tr_rho = tr_phi = tr_omega = tr_flag = tr_corr = None  # type: ignore[assignment]
         tr_local = []
 
     mk = n_outcomes * k_dim
@@ -2460,8 +2926,22 @@ def _run_single_gibbs_chain(
     if sample_corr and n_outcomes >= 2:
         inv_iw_scale = np.linalg.inv(_psd_clip(iw_scale, floor=1e-12))
         chol_iw_inv = _fast_cholesky(inv_iw_scale, floor=1e-12)
+        if n_outcomes == 2:
+            r_iw_2 = float(
+                np.clip(
+                    iw_scale[0, 1] / math.sqrt(max(iw_scale[0, 0] * iw_scale[1, 1], 1e-24)),
+                    -0.99999999,
+                    0.99999999,
+                )
+            )
+            iw2_t2, iw2_w_vt = _precompute_iw2_quadrature(iw_df)
+        else:
+            r_iw_2 = 0.0
+            iw2_t2 = iw2_w_vt = None  # type: ignore[assignment]
     else:
         chol_iw_inv = None
+        r_iw_2 = 0.0
+        iw2_t2 = iw2_w_vt = None  # type: ignore[assignment]
 
     def _compute_base_xi_cov(rv: np.ndarray, cr: np.ndarray) -> np.ndarray:
         if n_outcomes == 1:
@@ -2515,10 +2995,10 @@ def _run_single_gibbs_chain(
             l0_m, _ = prior_specs[m].precision_and_logdet(local_scales[m])
             base_m = m * d_per_m
             sl0 = slice(base_m, base_m + n_nonctrl)
-            prec_prior[sl0, sl0] = l0_m / max(h_float * float(sigma_sq[m]), 1e-24)
+            prec_prior[sl0, sl0] = l0_m / max(h_float * float(sigma_sq[m]), 1e-80)
             for k in range(1, k_dim):
                 slk = slice(base_m + k * n_nonctrl, base_m + (k + 1) * n_nonctrl)
-                prec_prior[slk, slk] = l0_m / max(h_float * float(kappa_sq[m]), 1e-24)
+                prec_prior[slk, slk] = l0_m / max(h_float * float(kappa_sq[m]), 1e-80)
 
         prec_post = prec_lik + prec_prior
         chol_post = _fast_cholesky(prec_post, floor=1e-12)
@@ -2536,39 +3016,88 @@ def _run_single_gibbs_chain(
             chol_prec=chol_post,
         )
 
-        # 4. Exact collapsed Half-t SA + Yu & Meng (2011) ASIS scale updates per outcome
+        # 4. Exact collapsed SA + Yu & Meng (2011) ASIS scale updates (global tau + per-outcome)
         w_res = wy - wx @ theta
+        if use_hier_tau:
+            w_tau = _update_global_tau(
+                w_tau=w_tau,
+                sigma_sq=sigma_sq,
+                kappa_sq=kappa_sq,
+                log_s0_scales=log_s0_scales,
+                log_sk_scales=log_sk_scales,
+                free_outcome_idxs=free_outcome_idxs,
+                dynamic_shrinkage=dynamic_shrinkage,
+                rng=rng,
+                theta=theta,
+                prior_specs=prior_specs,
+                local_scales=local_scales,
+                n_nonctrl=n_nonctrl,
+                k_dim=k_dim,
+            )
+            w_tau, w_res = _asis_interweave_global_tau(
+                w_tau=w_tau,
+                theta=theta,
+                w_res=w_res,
+                wx=wx,
+                sigma_sq=sigma_sq,
+                kappa_sq=kappa_sq,
+                prior_specs=prior_specs,
+                free_outcome_idxs=free_outcome_idxs,
+                n_nonctrl=n_nonctrl,
+                k_dim=k_dim,
+                dynamic_shrinkage=dynamic_shrinkage,
+                rng=rng,
+            )
         for m in range(n_outcomes):
+            spec_m = prior_specs[m]
+            is_p1 = spec_m.scale_prior == "global_halft"
+            wt_shift = w_tau if (use_hier_tau and fixed_sigmas[m] is None) else 0.0
+            log_s0_eff_m = log_s0_scales[m] + wt_shift
+            log_sk_eff_m = log_sk_scales[m] + (wt_shift if (dynamic_shrinkage and not is_p1) else 0.0)
+            nu_sig_m = 3.0
+            nu_kap_m = _SCALE_PRIOR_NU_GAMMA if is_p1 else 3.0
+            nu_loc_m = _SCALE_PRIOR_NU_LOCAL if is_p1 else 3.0
+
             theta_m = theta[m * d_per_m : (m + 1) * d_per_m]
             s_sq_m, k_sq_m, as_m, ak_m, lam_m, bl_m = _update_scales_outcome(
                 theta_m=theta_m,
-                spec=prior_specs[m],
+                spec=spec_m,
                 sigma_sq=float(sigma_sq[m]),
                 kappa_sq=float(kappa_sq[m]),
                 a_sigma=float(a_sigma[m]),
                 a_kappa=float(a_kappa[m]),
                 local_scales=local_scales[m],
                 b_local=b_local[m],
-                s0_scale=s0_scales[m],
+                log_s0_eff=log_s0_eff_m,
+                log_sk_eff=log_sk_eff_m,
+                nu_sig=nu_sig_m,
+                nu_kap=nu_kap_m,
+                nu_loc=nu_loc_m,
                 fixed_sigma=fixed_sigmas[m],
                 dynamic_shrinkage=dynamic_shrinkage,
                 rng=rng,
+                coupled_p1=is_p1,
             )
             s_sq_m, k_sq_m, as_m, ak_m, w_res = _asis_interweave_outcome_scales(
                 m_idx=m,
                 theta=theta,
                 w_res=w_res,
                 wx=wx,
-                spec=prior_specs[m],
+                spec=spec_m,
                 sigma_sq_m=s_sq_m,
                 kappa_sq_m=k_sq_m,
                 a_sigma_m=as_m,
                 a_kappa_m=ak_m,
                 local_scales_m=lam_m,
-                s0_scale_m=s0_scales[m],
+                log_s0_eff_m=log_s0_eff_m,
+                log_sk_eff_m=log_sk_eff_m,
+                nu_sig=nu_sig_m,
+                nu_kap=nu_kap_m,
+                nu_loc=nu_loc_m,
                 fixed_sigma_m=fixed_sigmas[m],
                 dynamic_shrinkage=dynamic_shrinkage,
                 rng=rng,
+                coupled_p1=is_p1,
             )
             sigma_sq[m] = s_sq_m
             kappa_sq[m] = k_sq_m
@@ -2698,7 +3227,7 @@ def _run_single_gibbs_chain(
                 )
             chol_omega = _make_omega_chol(base_xi_cov, f_stack, omega_vec)
 
-        # 6. Pre-period IW independence-MH + collapsed (delta_tilde, z) slice update for correlation R
+        # 6. Pre-period IW independence-MH + exact marginal IW_2 z-slice update for correlation R
         if sample_corr and n_outcomes >= 2:
             r_prop = _sample_iw_correlation(iw_df, iw_scale, rng, chol_inv=chol_iw_inv)
             base_xi_cov_prop = _compute_base_xi_cov(rho_vec, r_prop)
@@ -2716,28 +3245,8 @@ def _run_single_gibbs_chain(
                 loglik_cur = loglik_prop
 
             if n_outcomes == 2:
-                r_iw = float(
-                    np.clip(
-                        iw_scale[0, 1] / math.sqrt(max(iw_scale[0, 0] * iw_scale[1, 1], 1e-24)),
-                        -0.999999,
-                        0.999999,
-                    )
-                )
-                r_cur = float(np.clip(corr_r[0, 1], -0.999999, 0.999999))
-
-                def _logp_delta_iw(d_val: float) -> float:
-                    return -iw_df * math.log(max(math.cosh(d_val) - r_cur * r_iw, 1e-300))
-
-                d_tilde = _slice_sample_1d(_logp_delta_iw, 0.0, rng, width=0.6, max_steps=4, bounds=(-10.0, 10.0))
-                cosh_d = math.cosh(d_tilde)
+                r_cur = float(np.clip(corr_r[0, 1], -0.999995, 0.999995))
                 z_cur = math.atanh(r_cur)
-
-                def _log_iw_kernel_z(r_try: float) -> float:
-                    one_minus_r2 = max(1.0 - r_try * r_try, 1e-300)
-                    return 0.5 * (iw_df - 1.0) * math.log(one_minus_r2) - iw_df * math.log(
-                        max(cosh_d - r_try * r_iw, 1e-300)
-                    )
-
                 chol_by_z: dict[float, np.ndarray] = {}
                 # For M = 2, Omega(r) = Omega_fixed + r * B_off is affine in r = tanh(z).
                 sr_z = np.sqrt(np.maximum(rho_vec, 1e-12))
@@ -2753,16 +3262,16 @@ def _run_single_gibbs_chain(
                     chol_by_z[z_val] = ch_try
                     v_try = _solve_lower(ch_try, res_vec)
                     ll_try = -float(np.sum(np.log(np.diag(ch_try)))) - 0.5 * float(np.dot(v_try, v_try))
-                    return _log_iw_kernel_z(r_try) + ll_try
+                    return _log_iw2_marginal_z(z_val, iw_df, r_iw_2, iw2_t2, iw2_w_vt) + ll_try
 
                 z_new, _ = _slice_sample_1d_with_logp(
                     _logp_z_corr,
                     z_cur,
                     rng,
                     width=0.5,
-                    max_steps=4,
-                    bounds=(-4.5, 4.5),
-                    logp_init=_log_iw_kernel_z(math.tanh(z_cur)) + loglik_cur,
+                    max_steps=6,
+                    bounds=(-6.5, 6.5),
+                    logp_init=_log_iw2_marginal_z(z_cur, iw_df, r_iw_2, iw2_t2, iw2_w_vt) + loglik_cur,
                 )
                 r_new = math.tanh(z_new)
                 corr_r = np.array([[1.0, r_new], [r_new, 1.0]], dtype=np.float64)
@@ -2777,8 +3286,9 @@ def _run_single_gibbs_chain(
         if record and ((it_idx + 1) % thin_eff == 0):
             rec_idx = it_idx // thin_eff
             tr_theta[rec_idx] = theta
-            tr_sigma[rec_idx] = np.sqrt(np.maximum(sigma_sq, 1e-30))
-            tr_kappa[rec_idx] = np.sqrt(np.maximum(kappa_sq, 1e-30))
+            tr_tau[rec_idx] = math.exp(w_tau)
+            tr_sigma[rec_idx] = np.sqrt(np.maximum(sigma_sq, 1e-80))
+            tr_kappa[rec_idx] = np.sqrt(np.maximum(kappa_sq, 1e-80))
             for m in range(n_outcomes):
                 tr_local[m][rec_idx] = local_scales[m]
             tr_rho[rec_idx] = rho_vec
@@ -2789,6 +3299,7 @@ def _run_single_gibbs_chain(
 
     new_state = {
         "theta": theta,
+        "w_tau": w_tau,
         "sigma_sq": sigma_sq,
         "kappa_sq": kappa_sq,
         "a_sigma": a_sigma,
@@ -2806,6 +3317,7 @@ def _run_single_gibbs_chain(
         return new_state, None
     traces: dict[str, Any] = {
         "theta": tr_theta,
+        "tau": tr_tau,
         "sigma": tr_sigma,
         "kappa": tr_kappa,
         "local": tr_local,
@@ -3008,11 +3520,13 @@ def _reconcile_joint_bayesian_core(
     # Build per-outcome cone prior specs and joint cone matrix
     prior_specs: list[_OutcomeConePriorSpec] = []
     s0_scales: list[float] = []
+    sk_scales: list[float] = []
     fixed_sigmas: list[float | None] = []
     cone_blocks: list[np.ndarray] = []
     ray_parts: list[np.ndarray] = []
 
     for m_name in structural_outcomes:
+        fixed_m = prior_scale_by_outcome[m_name]
         spec_m = _OutcomeConePriorSpec(
             c_cover=topo["c_cover"],
             psi=psi,
@@ -3020,16 +3534,22 @@ def _reconcile_joint_bayesian_core(
             monotone=bool(monotone_by_outcome[m_name]),
             period_positivity=bool(opts["period_positivity"]),
             scale_prior=str(opts["scale_prior"]),
+            use_local_scales=False if (opts["scale_prior"] == "global_halft" and fixed_m is not None) else None,
         )
         prior_specs.append(spec_m)
         s0_m = float(struct_summaries[m_name]["s0_scale"])
+        sk_m = float(struct_summaries[m_name]["sk_scale"])
         s0_scales.append(s0_m)
-        fixed_sigmas.append(prior_scale_by_outcome[m_name])
+        sk_scales.append(sk_m)
+        fixed_sigmas.append(fixed_m)
         cone_blocks.append(spec_m.a_cone)
 
+        ray_scale_m = fixed_m if fixed_m is not None else (_SCALE_PRIOR_TAU0 * s0_m)
         ray_m = np.zeros(d_per_m, dtype=np.float64)
-        ray_m[:n_nonctrl] = math.sqrt(float(h_eff)) * s0_m * topo["interior_heights"]
+        ray_m[:n_nonctrl] = math.sqrt(float(h_eff)) * ray_scale_m * topo["interior_heights"]
         ray_parts.append(ray_m)
+
+    use_hier_tau = bool(opts["scale_prior"] == "global_halft" and any(fs is None for fs in fixed_sigmas))
 
     total_walls = sum(cb.shape[0] for cb in cone_blocks)
     a_cone_joint = np.zeros((total_walls, d_total), dtype=np.float64)
@@ -3067,10 +3587,17 @@ def _reconcile_joint_bayesian_core(
     wx0 = np.linalg.solve(chol_w0, x_des)
     wy0 = np.linalg.solve(chol_w0, y_vec)
     prec_init = wx0.T @ wx0
+    tau_init_nom = _SCALE_PRIOR_TAU0 if use_hier_tau else 1.0
+    is_p1_global = bool(opts["scale_prior"] == "global_halft")
     for m_i in range(n_outcomes):
         l0_m, _ = prior_specs[m_i].precision_and_logdet(np.ones(prior_specs[m_i].n_edges))
-        s_init = fixed_sigmas[m_i] if fixed_sigmas[m_i] is not None else s0_scales[m_i]
-        k_init = (50.0 * s0_scales[m_i]) if not opts["dynamic_shrinkage"] else s0_scales[m_i]
+        s_init = fixed_sigmas[m_i] if fixed_sigmas[m_i] is not None else (tau_init_nom * s0_scales[m_i])
+        if not opts["dynamic_shrinkage"]:
+            k_init = 50.0 * (fixed_sigmas[m_i] if fixed_sigmas[m_i] is not None else sk_scales[m_i])
+        elif is_p1_global:
+            k_init = _SCALE_PRIOR_GAMMA0 * s_init
+        else:
+            k_init = fixed_sigmas[m_i] if fixed_sigmas[m_i] is not None else (tau_init_nom * sk_scales[m_i])
         base_m = m_i * d_per_m
         prec_init[base_m : base_m + n_nonctrl, base_m : base_m + n_nonctrl] += l0_m / (float(h_eff) * s_init**2)
         for k in range(1, k_dim):
@@ -3097,20 +3624,29 @@ def _reconcile_joint_bayesian_core(
         theta_c = theta_mode + 0.05 * jitter * interior_ray_joint
         if a_cone_joint.shape[0] > 0 and float(np.min(a_cone_joint @ theta_c)) <= 1e-6:
             theta_c = theta_mode + 0.1 * interior_ray_joint
-        sig_sq_c = np.array(
-            [
-                (fixed_sigmas[m] ** 2)
-                if fixed_sigmas[m] is not None
-                else ((s0_scales[m] * float(rng_c.uniform(0.6, 1.6))) ** 2)
-                for m in range(n_outcomes)
-            ],
-            dtype=np.float64,
-        )
+        tau_c = (_SCALE_PRIOR_TAU0 * float(rng_c.uniform(0.6, 1.6))) if use_hier_tau else 1.0
+        sig_c_list = [
+            float(fixed_sigmas[m])
+            if fixed_sigmas[m] is not None
+            else (tau_c * s0_scales[m] * float(rng_c.uniform(0.6, 1.6)))
+            for m in range(n_outcomes)
+        ]
+        sig_sq_c = np.array([sc * sc for sc in sig_c_list], dtype=np.float64)
         kap_sq_c = np.array(
             [
-                ((50.0 * s0_scales[m]) ** 2)
+                ((50.0 * (fixed_sigmas[m] if fixed_sigmas[m] is not None else sk_scales[m])) ** 2)
                 if not opts["dynamic_shrinkage"]
-                else ((s0_scales[m] * float(rng_c.uniform(0.6, 1.6))) ** 2)
+                else (
+                    (sig_c_list[m] * _SCALE_PRIOR_GAMMA0 * float(rng_c.uniform(0.6, 1.6))) ** 2
+                    if is_p1_global
+                    else (
+                        (
+                            (fixed_sigmas[m] if fixed_sigmas[m] is not None else tau_c * sk_scales[m])
+                            * float(rng_c.uniform(0.6, 1.6))
+                        )
+                        ** 2
+                    )
+                )
                 for m in range(n_outcomes)
             ],
             dtype=np.float64,
@@ -3127,10 +3663,11 @@ def _reconcile_joint_bayesian_core(
         )
         st_c = {
             "theta": theta_c,
+            "w_tau": math.log(max(tau_c, 1e-12)) if use_hier_tau else 0.0,
             "sigma_sq": sig_sq_c,
             "kappa_sq": kap_sq_c,
             "a_sigma": np.array([s0_scales[m] ** 2 for m in range(n_outcomes)], dtype=np.float64),
-            "a_kappa": np.array([s0_scales[m] ** 2 for m in range(n_outcomes)], dtype=np.float64),
+            "a_kappa": np.array([sk_scales[m] ** 2 for m in range(n_outcomes)], dtype=np.float64),
             "local_scales": [np.ones(spec.n_edges, dtype=np.float64) for spec in prior_specs],
             "b_local": [np.ones(spec.n_edges, dtype=np.float64) for spec in prior_specs],
             "rho_vec": rho_c,
@@ -3159,7 +3696,9 @@ def _reconcile_joint_bayesian_core(
             a_cone_joint=a_cone_joint,
             interior_ray_joint=interior_ray_joint,
             s0_scales=s0_scales,
+            sk_scales=sk_scales,
             fixed_sigmas=fixed_sigmas,
+            use_hier_tau=use_hier_tau,
             n_arms=n_arms,
             n_outcomes=n_outcomes,
             k_dim=k_dim,
@@ -3195,7 +3734,9 @@ def _reconcile_joint_bayesian_core(
             a_cone_joint=a_cone_joint,
             interior_ray_joint=interior_ray_joint,
             s0_scales=s0_scales,
+            sk_scales=sk_scales,
             fixed_sigmas=fixed_sigmas,
+            use_hier_tau=use_hier_tau,
             n_arms=n_arms,
             n_outcomes=n_outcomes,
             k_dim=k_dim,
@@ -3220,6 +3761,12 @@ def _reconcile_joint_bayesian_core(
         ess_blocks["theta"] = min(s[1] for s in th_stats)
         ess_tail_min = min(s[2] for s in th_stats)
 
+        if use_hier_tau:
+            tau_stack = np.stack([t["tau"] for t in traces_list], axis=0)
+            t_rh, t_ess, _ = _split_rhat_and_ess_1d(tau_stack)
+            rhat_blocks["tau"] = t_rh
+            ess_blocks["tau"] = t_ess
+
         if any(fs is None for fs in fixed_sigmas):
             sig_stack = np.stack([t["sigma"] for t in traces_list], axis=0)
             s_stats = [
@@ -3236,14 +3783,17 @@ def _reconcile_joint_bayesian_core(
             rhat_blocks["kappa"] = max(s[0] for s in k_stats)
             ess_blocks["kappa"] = min(s[1] for s in k_stats)
 
-        if opts["scale_prior"] == "local_halft" and prior_specs[0].n_edges > 0:
+        if any(spec.use_local_scales and spec.n_edges > 0 for spec in prior_specs):
             l_stats = []
             for m in range(n_outcomes):
+                if not (prior_specs[m].use_local_scales and prior_specs[m].n_edges > 0):
+                    continue
                 loc_m = np.stack([t["local"][m] for t in traces_list], axis=0)
                 for e_i in range(prior_specs[m].n_edges):
                     l_stats.append(_split_rhat_and_ess_1d(loc_m[:, :, e_i]))
-            rhat_blocks["lambda"] = max(s[0] for s in l_stats)
-            ess_blocks["lambda"] = min(s[1] for s in l_stats)
+            if l_stats:
+                rhat_blocks["lambda"] = max(s[0] for s in l_stats)
+                ess_blocks["lambda"] = min(s[1] for s in l_stats)
 
         rho_stack = np.stack([t["rho"] for t in traces_list], axis=0)
         rho_stats = [_split_rhat_and_ess_1d(rho_stack[:, :, m]) for m in range(n_outcomes)]
@@ -3307,7 +3857,9 @@ def _reconcile_joint_bayesian_core(
                 a_cone_joint=a_cone_joint,
                 interior_ray_joint=interior_ray_joint,
                 s0_scales=s0_scales,
+                sk_scales=sk_scales,
                 fixed_sigmas=fixed_sigmas,
+                use_hier_tau=use_hier_tau,
                 n_arms=n_arms,
                 n_outcomes=n_outcomes,
                 k_dim=k_dim,
@@ -3322,7 +3874,7 @@ def _reconcile_joint_bayesian_core(
             assert extra_tr is not None
             # Concatenate n_draws_chain + n_draws_chain at thin_stride and thin by 2 -> spacing 2 * thin_stride
             merged_c: dict[str, Any] = {}
-            for key in ("theta", "sigma", "kappa", "rho", "phi", "omega", "flag", "corr"):
+            for key in ("theta", "tau", "sigma", "kappa", "rho", "phi", "omega", "flag", "corr"):
                 cat = np.concatenate([chain_traces[c_i][key], extra_tr[key]], axis=0)
                 merged_c[key] = cat[1::2][:n_draws_chain]
             merged_local = []
@@ -3350,6 +3902,7 @@ def _reconcile_joint_bayesian_core(
 
     # Pool chains into (S, ...) posterior arrays
     theta_all = np.concatenate([t["theta"] for t in chain_traces], axis=0)  # (S, M * (A-1) * K')
+    tau_all = np.concatenate([t["tau"] for t in chain_traces], axis=0)  # (S,)
     sigma_all = np.concatenate([t["sigma"] for t in chain_traces], axis=0)  # (S, M)
     kappa_all = np.concatenate([t["kappa"] for t in chain_traces], axis=0)  # (S, M)
     rho_all = np.concatenate([t["rho"] for t in chain_traces], axis=0)  # (S, M)
@@ -3563,6 +4116,7 @@ def _reconcile_joint_bayesian_core(
             local_scale_draws=loc_draws_o,
             rho_draws=rho_draws_o,
             phi_draws=phi_draws_o,
+            tau_draws=tau_all,
             omega_draws=om_dict,
             tau_mu_draws=tau_mu_arr,
             tau_increment_draws=tau_inc,

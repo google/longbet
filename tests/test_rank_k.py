@@ -105,9 +105,9 @@ def test_reconcile_nested_3arm_draws_additivity_and_dominance() -> None:
     res_ac = fit_rank_k_longbet(y_ac, z_ac, x_ac, cfg=cfg)
 
     trt_bc, trt_ab, trt_ac = reconcile_nested_3arm_draws(res_bc, res_ab, res_ac, prior_scale=2.0, seed=2026)
-    assert trt_bc.shape == (80, t_periods - 1)
-    assert trt_ab.shape == (80, t_periods - 1)
-    assert trt_ac.shape == (80, t_periods - 1)
+    assert trt_bc.shape == (1600, t_periods - 1)
+    assert trt_ab.shape == (1600, t_periods - 1)
+    assert trt_ac.shape == (1600, t_periods - 1)
 
     cum_bc = trt_bc.sum(axis=1)
     cum_ab = trt_ab.sum(axis=1)

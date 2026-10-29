@@ -1417,12 +1417,37 @@ def _univariate_tn_gibbs_sweep(
     return z_cur
 
 
+_LAPACK_DPOTRF = sp_linalg.lapack.dpotrf
+_LAPACK_DTRTRS = sp_linalg.lapack.dtrtrs
+_LAPACK_DTRTRI = sp_linalg.lapack.dtrtri
+
+# Fixed (state-independent) wall-bounce budget per Pakman--Paninski trajectory; trajectories
+# exceeding it are rejected (the chain stays put), which preserves exact reversibility.
+_PP_HMC_MAX_BOUNCES = 48
+
+
 def _fast_cholesky(mat: np.ndarray, *, floor: float = 1e-12) -> np.ndarray:
-    """Fast-path Cholesky factorization falling back to eigendecomposition clipping only if needed."""
-    try:
-        return np.linalg.cholesky(mat)
-    except np.linalg.LinAlgError:
-        return np.linalg.cholesky(_psd_clip(mat, floor=floor))
+    """Lower Cholesky factor via direct LAPACK ``dpotrf``, eigenvalue-clipping only on failure.
+
+    ``mat`` must be symmetric, so its transpose (an F-contiguous view of a C-contiguous
+    array) is passed to LAPACK to avoid a layout copy.
+    """
+    chol, info = _LAPACK_DPOTRF(mat.T, lower=1, clean=1)
+    if info == 0:
+        return chol
+    return np.linalg.cholesky(_psd_clip(mat, floor=floor))
+
+
+def _solve_lower(chol: np.ndarray, rhs: np.ndarray, *, transpose: bool = False) -> np.ndarray:
+    """Solve ``L x = rhs`` (or ``L^T x = rhs`` if ``transpose``) for lower-triangular ``L``."""
+    sol, _ = _LAPACK_DTRTRS(chol, rhs, lower=1, trans=1 if transpose else 0)
+    return sol
+
+
+def _inv_lower(chol: np.ndarray) -> np.ndarray:
+    """Inverse of a lower-triangular Cholesky factor via LAPACK ``dtrtri``."""
+    inv, _ = _LAPACK_DTRTRI(chol, lower=1)
+    return inv
 
 
 def _pakman_paninski_hmc_whitened(
@@ -1443,7 +1468,7 @@ def _pakman_paninski_hmc_whitened(
     m_walls, d_dim = f_walls.shape
     if m_walls == 0:
         return rng.standard_normal(d_dim)
-    eff_max_events = max(256, 16 * m_walls) if max_events is None else int(max_events)
+    eff_max_events = _PP_HMC_MAX_BOUNCES if max_events is None else int(max_events)
 
     z = z_init.copy()
     # Ensure strict interior feasibility up to machine epsilon
@@ -1522,8 +1547,11 @@ def _pakman_paninski_hmc_whitened(
             bounced_cleanly = False
 
         if not bounced_cleanly or float(np.min(f_walls @ z + g_walls)) < -1e-9:
-            # Reject rare grazing corner trajectory (detailed balance preserved) + exact Gibbs sweep
-            z = _univariate_tn_gibbs_sweep(z_saved, f_walls, g_walls, rng)
+            # Reject trajectories exceeding the fixed bounce budget (or numerically leaving K) and
+            # stay at z_saved. The bounce count is invariant under the time-reversal involution
+            # (z, v) -> (z', -v'), so the accept set is symmetric and the move is exactly
+            # pi-reversible. (A state-dependent fallback move on rejection would not be.)
+            z = z_saved
 
     return z
 
@@ -1544,7 +1572,7 @@ def _sample_truncated_mvn(
     if chol_prec is None:
         chol_prec = _fast_cholesky(precision, floor=1e-12)
     # precision = L L^T => cov = L^{-T} L^{-1}; set M_cov = L^{-T}
-    m_cov = np.linalg.inv(chol_prec).T
+    m_cov = _inv_lower(chol_prec).T
     if a_cone.shape[0] == 0:
         return mean + m_cov @ rng.standard_normal(d_dim)
 
@@ -1587,7 +1615,7 @@ def _cone_qp_mode(
     if a_cone.shape[0] == 0 or float(np.min(a_cone @ mean)) >= 1e-5:
         return mean.copy()
     chol_prec = _fast_cholesky(precision, floor=1e-12)
-    m_cov = np.linalg.inv(chol_prec).T
+    m_cov = _inv_lower(chol_prec).T
     f_raw = a_cone @ m_cov
     g_raw = a_cone @ mean
     norms = np.linalg.norm(f_raw, axis=1)
@@ -1633,11 +1661,33 @@ def _slice_sample_1d(
     bounds: tuple[float, float] = (-14.0, 14.0),
 ) -> float:
     """Exact Neal (2003) stepping-out + shrinkage 1-D slice sampler on ``bounds``."""
+    x_new, _ = _slice_sample_1d_with_logp(
+        log_prob_fn, x_init, rng, width=width, max_steps=max_steps, bounds=bounds
+    )
+    return x_new
+
+
+def _slice_sample_1d_with_logp(
+    log_prob_fn: Any,
+    x_init: float,
+    rng: np.random.Generator,
+    *,
+    width: float = 1.5,
+    max_steps: int = 12,
+    bounds: tuple[float, float] = (-14.0, 14.0),
+    logp_init: float | None = None,
+) -> tuple[float, float]:
+    """Neal (2003) slice sampler returning ``(x_new, log_prob_fn(x_new))``.
+
+    ``logp_init``, if given, must equal ``log_prob_fn(x_init)``; it is reused instead of
+    re-evaluating the (possibly expensive) log density at the current state. The step-out
+    width and step budget are fixed constants, so the transition is exactly invariant.
+    """
     lo_b, hi_b = bounds
     x_f = float(x_init)
     x0 = lo_b + 1e-9 if x_f < lo_b + 1e-9 else (hi_b - 1e-9 if x_f > hi_b - 1e-9 else x_f)
     rand = rng.random
-    fx0 = float(log_prob_fn(x0))
+    fx0 = float(logp_init) if (logp_init is not None and x0 == x_f) else float(log_prob_fn(x0))
     log_y = fx0 - float(rng.standard_exponential())
 
     left = max(lo_b, x0 - float(rand()) * width)
@@ -1654,15 +1704,16 @@ def _slice_sample_1d(
 
     for _ in range(128):
         x_prop = left + float(rand()) * (right - left)
-        if float(log_prob_fn(x_prop)) >= log_y:
-            return x_prop
+        f_prop = float(log_prob_fn(x_prop))
+        if f_prop >= log_y:
+            return x_prop, f_prop
         if x_prop < x0:
             left = x_prop
         else:
             right = x_prop
         if right - left < 1e-13:
             break
-    return x0
+    return x0, fx0
 
 
 def _sample_invgamma(shape: float, scale: float, rng: np.random.Generator) -> float:
@@ -2372,6 +2423,13 @@ def _run_single_gibbs_chain(
             d_arms_stack[a, m * k_dim : (m + 1) * k_dim, m * k_dim : (m + 1) * k_dim] = sqrt_v_arms[m][a]
 
     q_arange = np.arange(n_q)
+    # Flat indices of the (q, i, q, j) block-diagonal entries of the (n_q * K')^2 matrix Omega.
+    k_arange = np.arange(k_dim)
+    blockdiag_flat_idx = (
+        (q_arange[:, None, None] * k_dim + k_arange[None, :, None]) * (n_q * k_dim)
+        + q_arange[:, None, None] * k_dim
+        + k_arange[None, None, :]
+    ).reshape(-1)
     xy_des = np.column_stack([x_des, y_vec])
     g_xi_t = np.ascontiguousarray(g_xi.T)
 
@@ -2390,6 +2448,15 @@ def _run_single_gibbs_chain(
             if m1 != m2:
                 xi_cov_basis[m2, m1] = b_12.T
 
+    xi_cov_basis_flat = xi_cov_basis.reshape(n_outcomes * n_outcomes, n_meas * n_meas)
+
+    # Linear map from per-mode forest variance shares e_{q,k} / omega_q to the stacked block-diagonal
+    # entries of blkdiag(F_q / omega_q), with F_q = W_q diag(e_q) W_q^T (rows ordered like
+    # blockdiag_flat_idx), so Omega(rho, phi, omega, R) is assembled with two small GEMVs.
+    f_design_5d = np.zeros((n_q, k_dim, k_dim, n_q, k_dim), dtype=np.float64)
+    f_design_5d[q_arange, :, :, q_arange, :] = np.einsum("qik,qjk->qijk", w_f_stack, w_f_stack)
+    f_design = f_design_5d.reshape(n_q * k_dim * k_dim, n_q * k_dim)
+
     if sample_corr and n_outcomes >= 2:
         inv_iw_scale = np.linalg.inv(_psd_clip(iw_scale, floor=1e-12))
         chol_iw_inv = _fast_cholesky(inv_iw_scale, floor=1e-12)
@@ -2401,7 +2468,7 @@ def _run_single_gibbs_chain(
             return float(rv[0]) * xi_cov_basis[0, 0]
         sr = np.sqrt(np.maximum(rv, 1e-12))
         rs = (sr[:, None] * cr) * sr[None, :]
-        return np.einsum("ij,ijkl->kl", rs, xi_cov_basis)
+        return (rs.reshape(-1) @ xi_cov_basis_flat).reshape(n_meas, n_meas)
 
     def _compute_f_stacks(rv: np.ndarray, pv: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         rho_q = q_member_weights @ rv
@@ -2416,8 +2483,7 @@ def _run_single_gibbs_chain(
 
     def _make_omega_chol(base_cov: np.ndarray, f_st: np.ndarray, om_vec: np.ndarray) -> np.ndarray:
         om_mat = base_cov.copy()
-        om_4d = om_mat.reshape(n_q, k_dim, n_q, k_dim)
-        om_4d[q_arange, :, q_arange, :] += f_st / np.maximum(om_vec, 1e-12)[:, None, None]
+        om_mat.reshape(-1)[blockdiag_flat_idx] += (f_st / np.maximum(om_vec, 1e-12)[:, None, None]).reshape(-1)
         return _fast_cholesky(om_mat, floor=1e-13)
 
     sigma_xi_unit, l_xi_unit = _build_sigma_xi(
@@ -2437,7 +2503,7 @@ def _run_single_gibbs_chain(
 
     for it_idx in range(total_iters):
         # 1. Collapsed likelihood precision & mean marginalizing shared arm noise xi
-        wxy = np.linalg.solve(chol_omega, xy_des)
+        wxy = _solve_lower(chol_omega, xy_des)
         wx = wxy[:, :-1]
         wy = wxy[:, -1]
         prec_lik = wx.T @ wx
@@ -2456,7 +2522,7 @@ def _run_single_gibbs_chain(
 
         prec_post = prec_lik + prec_prior
         chol_post = _fast_cholesky(prec_post, floor=1e-12)
-        mean_post = np.linalg.solve(prec_post, h_lik)
+        mean_post = _solve_lower(chol_post, _solve_lower(chol_post, h_lik), transpose=True)
 
         # 3. Exact Pakman--Paninski wall-reflecting HMC on cone K
         theta = _sample_truncated_mvn(
@@ -2515,16 +2581,28 @@ def _run_single_gibbs_chain(
 
         # 4b. Hierarchical Bayesian variance share updates (rho_m, phi_m) against collapsed marginal likelihood
         inv_om_vec = 1.0 / np.maximum(omega_vec, 1e-12)
+        last_eval: dict[str, Any] = {"key": None, "chol": None}
 
-        def _loglik_from_eq(b_cov: np.ndarray, eq_mat: np.ndarray) -> float:
-            cf_st = w_f_stack * np.sqrt(eq_mat)[:, None, :]
-            f_st = cf_st @ np.swapaxes(cf_st, 1, 2)
-            om_mat = b_cov.copy()
-            om_4d = om_mat.reshape(n_q, k_dim, n_q, k_dim)
-            om_4d[q_arange, :, q_arange, :] += f_st * inv_om_vec[:, None, None]
-            ch = _fast_cholesky(om_mat, floor=1e-13)
-            v_sol = np.linalg.solve(ch, res_vec)
+        def _collapsed_loglik(rv: np.ndarray, eq_mat: np.ndarray, key: tuple[Any, ...]) -> float:
+            """log N(res_vec; 0, Omega(rv, eq_mat, omega, R)) up to a constant; caches the factor."""
+            sr = np.sqrt(np.maximum(rv, 1e-12))
+            om_flat = ((sr[:, None] * corr_r) * sr[None, :]).reshape(-1) @ xi_cov_basis_flat
+            om_flat[blockdiag_flat_idx] += f_design @ (eq_mat * inv_om_vec[:, None]).reshape(-1)
+            ch = _fast_cholesky(om_flat.reshape(n_meas, n_meas), floor=1e-13)
+            v_sol = _solve_lower(ch, res_vec)
+            last_eval["key"] = key
+            last_eval["chol"] = ch
             return -float(np.sum(np.log(np.diag(ch)))) - 0.5 * float(np.dot(v_sol, v_sol))
+
+        # Collapsed log-likelihood at the current (rho, phi, omega, R): chol_omega is current here,
+        # so it is reused instead of refactorizing Omega at the slice sampler's starting point.
+        v_cur_4b = _solve_lower(chol_omega, res_vec)
+        ll_cur = -float(np.sum(np.log(np.diag(chol_omega)))) - 0.5 * float(np.dot(v_cur_4b, v_cur_4b))
+
+        def _log_beta_kernel(x_val: float, alpha: float, beta: float) -> float:
+            return (alpha - 1.0) * math.log(max(x_val, 1e-300)) + (beta - 1.0) * math.log(
+                max(1.0 - x_val, 1e-300)
+            )
 
         for m in range(n_outcomes):
             phi_q_cur = q_member_weights @ phi_vec
@@ -2532,42 +2610,57 @@ def _run_single_gibbs_chain(
             def _logp_rho(rho_try: float, _m: int = m) -> float:
                 rv_try = rho_vec.copy()
                 rv_try[_m] = rho_try
-                b_cov_try = _compute_base_xi_cov(rv_try, corr_r)
                 rho_q_try = q_member_weights @ rv_try
                 eq_try = np.maximum(1.0 - rho_q_try[:, None] * d_ratio_stack, phi_q_cur[:, None])
-                lp_prior = (_RHO_BETA_ALPHA - 1.0) * math.log(max(rho_try, 1e-300)) + (
-                    _RHO_BETA_BETA - 1.0
-                ) * math.log(max(1.0 - rho_try, 1e-300))
-                return lp_prior + _loglik_from_eq(b_cov_try, eq_try)
+                lp_prior = _log_beta_kernel(rho_try, _RHO_BETA_ALPHA, _RHO_BETA_BETA)
+                return lp_prior + _collapsed_loglik(rv_try, eq_try, ("rho", _m, rho_try))
 
-            rho_vec[m] = _slice_sample_1d(
-                _logp_rho, float(rho_vec[m]), rng, width=0.35, max_steps=3, bounds=(1e-5, 1.0 - 1e-5)
+            rho_old = float(rho_vec[m])
+            rho_new, lp_rho_new = _slice_sample_1d_with_logp(
+                _logp_rho,
+                rho_old,
+                rng,
+                width=0.35,
+                max_steps=3,
+                bounds=(1e-5, 1.0 - 1e-5),
+                logp_init=_log_beta_kernel(rho_old, _RHO_BETA_ALPHA, _RHO_BETA_BETA) + ll_cur,
             )
+            rho_vec[m] = rho_new
+            ll_cur = lp_rho_new - _log_beta_kernel(rho_new, _RHO_BETA_ALPHA, _RHO_BETA_BETA)
 
-            b_cov_after_rho = _compute_base_xi_cov(rho_vec, corr_r)
             rho_q_after = q_member_weights @ rho_vec
             min_unclipped = 1.0 - rho_q_after[:, None] * d_ratio_stack
             eq_base = np.maximum(min_unclipped, (q_member_weights @ phi_vec)[:, None])
-            ll_base = _loglik_from_eq(b_cov_after_rho, eq_base)
+            ll_base = ll_cur
+            rho_vec_after = rho_vec.copy()
 
             def _logp_phi(phi_try: float, _m: int = m) -> float:
                 pv_try = phi_vec.copy()
                 pv_try[_m] = phi_try
                 phi_q_try = q_member_weights @ pv_try
                 eq_try = np.maximum(min_unclipped, phi_q_try[:, None])
-                lp_prior = (_PHI_BETA_ALPHA - 1.0) * math.log(max(phi_try, 1e-300)) + (
-                    _PHI_BETA_BETA - 1.0
-                ) * math.log(max(1.0 - phi_try, 1e-300))
+                lp_prior = _log_beta_kernel(phi_try, _PHI_BETA_ALPHA, _PHI_BETA_BETA)
                 if np.array_equal(eq_try, eq_base):
                     return lp_prior + ll_base
-                return lp_prior + _loglik_from_eq(b_cov_after_rho, eq_try)
+                return lp_prior + _collapsed_loglik(rho_vec_after, eq_try, ("phi", _m, phi_try))
 
-            phi_vec[m] = _slice_sample_1d(
-                _logp_phi, float(phi_vec[m]), rng, width=0.25, max_steps=3, bounds=(1e-5, 1.0 - 1e-5)
+            phi_old = float(phi_vec[m])
+            phi_new, lp_phi_new = _slice_sample_1d_with_logp(
+                _logp_phi,
+                phi_old,
+                rng,
+                width=0.25,
+                max_steps=3,
+                bounds=(1e-5, 1.0 - 1e-5),
+                logp_init=_log_beta_kernel(phi_old, _PHI_BETA_ALPHA, _PHI_BETA_BETA) + ll_cur,
             )
+            phi_vec[m] = phi_new
+            ll_cur = lp_phi_new - _log_beta_kernel(phi_new, _PHI_BETA_ALPHA, _PHI_BETA_BETA)
 
         f_stack, chol_f_stack, f_inv_stack = _compute_f_stacks(rho_vec, phi_vec)
         base_xi_cov = _compute_base_xi_cov(rho_vec, corr_r)
+        # (sigma_xi, l_xi) are consumed only by Step 5 below, so they are rebuilt here once per
+        # sweep from the current (rho, R) rather than after every R update in Step 6.
         if n_outcomes == 1:
             r0_f = max(float(rho_vec[0]), 1e-12)
             sigma_xi = r0_f * sigma_xi_unit
@@ -2576,7 +2669,12 @@ def _run_single_gibbs_chain(
             sigma_xi, l_xi = _build_sigma_xi(
                 sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack, rho_vec=rho_vec
             )
-        chol_omega = _make_omega_chol(base_xi_cov, f_stack, omega_vec)
+        # The slice sampler's accepted point is the last density it evaluated, so the factor of
+        # Omega at the final (rho, phi) is usually already available.
+        if last_eval["key"] == ("phi", n_outcomes - 1, float(phi_vec[n_outcomes - 1])):
+            chol_omega = last_eval["chol"]
+        else:
+            chol_omega = _make_omega_chol(base_xi_cov, f_stack, omega_vec)
 
         # 5. Exact conditional draw of shared arm noise xi | theta, omega, R, y via Matheron's identity
         if robust_error != "gaussian":
@@ -2591,7 +2689,7 @@ def _run_single_gibbs_chain(
                 ).reshape(-1)
                 r_0 = g_xi @ xi_0 + eta_0
                 delta_r = res_vec - r_0
-                alpha_sol = np.linalg.solve(chol_omega.T, np.linalg.solve(chol_omega, delta_r))
+                alpha_sol = _solve_lower(chol_omega, _solve_lower(chol_omega, delta_r), transpose=True)
                 xi_draw = xi_0 + sigma_xi @ (g_xi_t @ alpha_sol)
                 eta_vec = res_vec - g_xi @ xi_draw
                 eta_blocks = eta_vec.reshape(n_q, k_dim)
@@ -2607,17 +2705,15 @@ def _run_single_gibbs_chain(
             chol_cur = chol_omega
             chol_prop = _make_omega_chol(base_xi_cov_prop, f_stack, omega_vec)
 
-            v_cur = np.linalg.solve(chol_cur, res_vec)
-            v_prop = np.linalg.solve(chol_prop, res_vec)
+            v_cur = _solve_lower(chol_cur, res_vec)
+            v_prop = _solve_lower(chol_prop, res_vec)
             loglik_cur = -float(np.sum(np.log(np.diag(chol_cur)))) - 0.5 * float(np.dot(v_cur, v_cur))
             loglik_prop = -float(np.sum(np.log(np.diag(chol_prop)))) - 0.5 * float(np.dot(v_prop, v_prop))
             if math.log(float(rng.uniform(1e-15, 1.0))) < (loglik_prop - loglik_cur):
                 corr_r = r_prop
-                sigma_xi, l_xi = _build_sigma_xi(
-                    sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack, rho_vec=rho_vec
-                )
                 base_xi_cov = base_xi_cov_prop
                 chol_omega = chol_prop
+                loglik_cur = loglik_prop
 
             if n_outcomes == 2:
                 r_iw = float(
@@ -2636,27 +2732,47 @@ def _run_single_gibbs_chain(
                 cosh_d = math.cosh(d_tilde)
                 z_cur = math.atanh(r_cur)
 
-                def _logp_z_corr(z_val: float) -> float:
-                    r_try = math.tanh(z_val)
+                def _log_iw_kernel_z(r_try: float) -> float:
                     one_minus_r2 = max(1.0 - r_try * r_try, 1e-300)
-                    lp_iw = 0.5 * (iw_df - 1.0) * math.log(one_minus_r2) - iw_df * math.log(
+                    return 0.5 * (iw_df - 1.0) * math.log(one_minus_r2) - iw_df * math.log(
                         max(cosh_d - r_try * r_iw, 1e-300)
                     )
-                    r_mat = np.array([[1.0, r_try], [r_try, 1.0]], dtype=np.float64)
-                    b_cov_try = _compute_base_xi_cov(rho_vec, r_mat)
-                    ch_try = _make_omega_chol(b_cov_try, f_stack, omega_vec)
-                    v_try = np.linalg.solve(ch_try, res_vec)
-                    ll_try = -float(np.sum(np.log(np.diag(ch_try)))) - 0.5 * float(np.dot(v_try, v_try))
-                    return lp_iw + ll_try
 
-                z_new = _slice_sample_1d(_logp_z_corr, z_cur, rng, width=0.5, max_steps=4, bounds=(-4.5, 4.5))
+                chol_by_z: dict[float, np.ndarray] = {}
+                # For M = 2, Omega(r) = Omega_fixed + r * B_off is affine in r = tanh(z).
+                sr_z = np.sqrt(np.maximum(rho_vec, 1e-12))
+                om_fixed_z = (sr_z[0] * sr_z[0]) * xi_cov_basis[0, 0] + (sr_z[1] * sr_z[1]) * xi_cov_basis[1, 1]
+                om_fixed_z.reshape(-1)[blockdiag_flat_idx] += (
+                    f_stack / np.maximum(omega_vec, 1e-12)[:, None, None]
+                ).reshape(-1)
+                b_off_z = (sr_z[0] * sr_z[1]) * (xi_cov_basis[0, 1] + xi_cov_basis[1, 0])
+
+                def _logp_z_corr(z_val: float) -> float:
+                    r_try = math.tanh(z_val)
+                    ch_try = _fast_cholesky(om_fixed_z + r_try * b_off_z, floor=1e-13)
+                    chol_by_z[z_val] = ch_try
+                    v_try = _solve_lower(ch_try, res_vec)
+                    ll_try = -float(np.sum(np.log(np.diag(ch_try)))) - 0.5 * float(np.dot(v_try, v_try))
+                    return _log_iw_kernel_z(r_try) + ll_try
+
+                z_new, _ = _slice_sample_1d_with_logp(
+                    _logp_z_corr,
+                    z_cur,
+                    rng,
+                    width=0.5,
+                    max_steps=4,
+                    bounds=(-4.5, 4.5),
+                    logp_init=_log_iw_kernel_z(math.tanh(z_cur)) + loglik_cur,
+                )
                 r_new = math.tanh(z_new)
                 corr_r = np.array([[1.0, r_new], [r_new, 1.0]], dtype=np.float64)
                 base_xi_cov = _compute_base_xi_cov(rho_vec, corr_r)
-                sigma_xi, l_xi = _build_sigma_xi(
-                    sqrt_v_arms, corr_r, n_arms, n_outcomes, k_dim, d_arms_stack=d_arms_stack, rho_vec=rho_vec
+                cached_chol = chol_by_z.get(z_new)
+                chol_omega = (
+                    cached_chol
+                    if cached_chol is not None
+                    else _make_omega_chol(base_xi_cov, f_stack, omega_vec)
                 )
-                chol_omega = _make_omega_chol(base_xi_cov, f_stack, omega_vec)
 
         if record and ((it_idx + 1) % thin_eff == 0):
             rec_idx = it_idx // thin_eff

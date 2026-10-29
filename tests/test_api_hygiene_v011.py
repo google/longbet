@@ -466,3 +466,85 @@ def test_polar_tree_and_diamond_prior_sampler_match_rejection() -> None:
         assert stats.ks_2samp(rej_diam[:, j], hmc_diam[:, j]).pvalue > 0.01
 
 
+
+def test_pakman_paninski_bounce_cap_rejection_keeps_exact_truncated_normal() -> None:
+    """A tiny fixed bounce budget forces frequent rejections; reject-and-stay must stay exact."""
+    rng = np.random.default_rng(20261029)
+    # Narrow wedge {z : f_j . z + g_j >= 0} around the +z_1 axis with apex at (-0.5, 0):
+    # trajectories bounce between its two walls many times, so max_events=3 rejects often.
+    half_angle = 0.15
+    f_walls = np.array(
+        [
+            [math.sin(half_angle), math.cos(half_angle)],
+            [math.sin(half_angle), -math.cos(half_angle)],
+        ],
+        dtype=np.float64,
+    )
+    g_walls = np.full(2, 0.5 * math.sin(half_angle), dtype=np.float64)
+
+    raw = rng.standard_normal((2_000_000, 2))
+    exact = raw[np.all(raw @ f_walls.T + g_walls >= 0.0, axis=1)][:20_000]
+    assert exact.shape[0] == 20_000
+
+    z_cur = np.array([1.0, 0.0], dtype=np.float64)
+    n_keep = 30_000
+    chain = np.empty((n_keep, 2), dtype=np.float64)
+    n_stay = 0
+    for s in range(n_keep + 500):
+        z_new = rkma_mod._pakman_paninski_hmc_whitened(z_cur, f_walls, g_walls, rng, n_steps=1, max_events=3)
+        n_stay += int(np.array_equal(z_new, z_cur))
+        z_cur = z_new
+        if s >= 500:
+            chain[s - 500] = z_cur
+
+    reject_frac = n_stay / float(n_keep + 500)
+    assert 0.05 < reject_frac < 0.95, f"bounce cap should bind for a meaningful test; got {reject_frac:.3f}"
+    assert np.all(chain @ f_walls.T + g_walls >= -1e-12)
+    np.testing.assert_allclose(chain.mean(axis=0), exact.mean(axis=0), atol=0.03)
+    np.testing.assert_allclose(chain.std(axis=0), exact.std(axis=0), atol=0.03)
+    for j in range(2):
+        assert stats.ks_2samp(chain[::10, j], exact[::7, j]).pvalue > 0.01
+
+
+def test_slice_sampler_logp_reuse_is_bitwise_identical_to_reevaluation() -> None:
+    def log_prob(x: float) -> float:
+        return -0.5 * (x - 0.3) ** 2 / 0.04 + 2.0 * math.log(max(x, 1e-300)) if x > 0 else -math.inf
+
+    for seed in range(25):
+        x0 = 0.05 + 0.04 * seed
+        x_plain = rkma_mod._slice_sample_1d(log_prob, x0, np.random.default_rng(seed), width=0.35, max_steps=3, bounds=(1e-5, 2.0))
+        x_reuse, lp_reuse = rkma_mod._slice_sample_1d_with_logp(
+            log_prob,
+            x0,
+            np.random.default_rng(seed),
+            width=0.35,
+            max_steps=3,
+            bounds=(1e-5, 2.0),
+            logp_init=log_prob(x0),
+        )
+        assert x_plain == x_reuse
+        assert lp_reuse == log_prob(x_reuse)
+
+
+def test_lapack_collapsed_gaussian_loglik_matches_scipy_logpdf() -> None:
+    """dpotrf/dtrtrs collapsed log-likelihood (used for cached slice log densities) is exact."""
+    rng = np.random.default_rng(7)
+    n_q, k_dim, n_xi = 9, 2, 8
+    g_xi = rng.standard_normal((n_q * k_dim, n_xi))
+    a_xi = rng.standard_normal((n_xi, n_xi))
+    sigma_xi = a_xi @ a_xi.T / n_xi
+    f_blocks = np.stack([np.diag(rng.uniform(0.05, 0.4, k_dim)) for _ in range(n_q)])
+    omega = rng.gamma(2.0, 0.5, n_q)
+    omega_cov = rkma_mod._build_omega_cov(g_xi, sigma_xi, f_blocks, omega, k_dim)
+    resid = rng.standard_normal(n_q * k_dim)
+
+    chol = rkma_mod._fast_cholesky(omega_cov, floor=1e-13)
+    v_sol = rkma_mod._solve_lower(chol, resid)
+    loglik = -float(np.sum(np.log(np.diag(chol)))) - 0.5 * float(v_sol @ v_sol)
+    ref = float(stats.multivariate_normal(mean=np.zeros(n_q * k_dim), cov=omega_cov).logpdf(resid))
+    ref += 0.5 * (n_q * k_dim) * math.log(2.0 * math.pi)
+    assert abs(loglik - ref) < 1e-10
+
+    x_back = rkma_mod._solve_lower(chol, rkma_mod._solve_lower(chol, resid), transpose=True)
+    np.testing.assert_allclose(omega_cov @ x_back, resid, atol=1e-10)
+    np.testing.assert_allclose(rkma_mod._inv_lower(chol) @ chol, np.eye(n_q * k_dim), atol=1e-10)

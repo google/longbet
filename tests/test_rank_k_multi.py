@@ -116,6 +116,11 @@ def test_multi_outcome_reconciliation_with_composite_and_iw_correlation() -> Non
     assert mres.posterior_correlation_draws.shape == (1600, 2, 2)
     assert mres.posterior_correlation_mean.shape == (2, 2)
     assert mres.ppc_composite_pvalue["total"] is not None
+    assert mres.ppc_composite_pvalue["paid"] is None
+    assert mres.ppc_composite_pvalue["organic"] is None
+    assert mres.by_outcome["paid"].ppc_composite_pvalue is None
+    assert mres.by_outcome["organic"].ppc_composite_pvalue is None
+    assert mres.by_outcome["total"].ppc_composite_pvalue == mres.ppc_composite_pvalue["total"]
 
     # Paid is monotone-constrained; organic is unconstrained and recovers negative A vs B
     assert np.min(mres.contrast_trajectory_draws["paid"][("A", "B")]) >= -1e-12
@@ -151,3 +156,42 @@ def test_multi_outcome_reconciliation_with_composite_and_iw_correlation() -> Non
     assert list(dt["arm"]) == ["C", "B", "A"]
     roi_df = roi_break_even_table(mres, cost_grid=(0.5, 1.0), alpha_grid=(0.5, 1.0))
     assert not roi_df.empty and not roi_df.isna().any().any()
+
+
+def test_estimate_cross_outcome_correlation_y_param_alias_and_staggered_nan_rows() -> None:
+    import warnings
+
+    rng = np.random.default_rng(707)
+    n_u, t_pre = 80, 6
+    panel_a = rng.normal(0.0, 1.0, size=(n_u, t_pre))
+    panel_b = 0.6 * panel_a + rng.normal(0.0, 0.8, size=(n_u, t_pre))
+    # Inject all-NaN staggered rows on units 0..4 and partial NaNs on units 5..10
+    panel_a[:5, :] = np.nan
+    panel_b[:3, :] = np.nan
+    panel_a[5:11, :3] = np.nan
+    x_covs = rng.normal(0.0, 1.0, size=(n_u, 2))
+    x_covs[12, 0] = np.nan
+    arms = np.repeat(["C", "B", "A", "D"], 20)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res_y = estimate_cross_outcome_correlation(
+            y={"m1": panel_a, "m2": panel_b}, x_covs=x_covs, arm_labels=arms
+        )
+        res_alias = estimate_cross_outcome_correlation(
+            y_post={"m1": panel_a, "m2": panel_b}, x_covs=x_covs, arm_labels=arms
+        )
+    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert res_y.n_units == n_u - 6  # units 0..4 and unit 12 masked cleanly
+    np.testing.assert_allclose(res_y.correlation, res_alias.correlation, atol=1e-14)
+    np.testing.assert_allclose(res_y.scatter_matrix, res_alias.scatter_matrix, atol=1e-14)
+    assert 0.25 < res_y.correlation[0, 1] < 0.85
+
+    with pytest.raises(ValueError, match="not both"):
+        estimate_cross_outcome_correlation(y={"m1": panel_a, "m2": panel_b}, y_post={"m1": panel_a, "m2": panel_b})
+    with pytest.raises(ValueError, match="Must supply"):
+        estimate_cross_outcome_correlation()
+    with pytest.raises(ValueError, match="complete finite units"):
+        estimate_cross_outcome_correlation(
+            y={"m1": np.full((10, 3), np.nan), "m2": np.ones((10, 3))}
+        )

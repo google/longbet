@@ -229,33 +229,80 @@ def ge_revenue_draws(
     return total
 
 
+def _unit_row_means(mat: np.ndarray, label: str) -> np.ndarray:
+    """Compute per-unit means across columns without empty-slice RuntimeWarnings."""
+    if mat.ndim == 1:
+        return mat.reshape(-1)
+    if mat.ndim != 2:
+        raise ValueError(f"{label} array must be 1-D or 2-D; got shape {mat.shape}")
+    has_inf = np.any(np.isinf(mat), axis=1)
+    fin_mask = np.isfinite(mat)
+    counts = np.sum(fin_mask, axis=1)
+    sums = np.sum(np.where(fin_mask, mat, 0.0), axis=1)
+    out = np.full(mat.shape[0], np.nan, dtype=np.float64)
+    ok = (counts > 0) & (~has_inf)
+    out[ok] = sums[ok] / counts[ok]
+    return out
+
+
 def estimate_cross_outcome_correlation(
-    y_post: Mapping[str, np.ndarray] | np.ndarray,
+    y: Mapping[str, np.ndarray] | np.ndarray | None = None,
     y_pre: Mapping[str, np.ndarray] | np.ndarray | None = None,
     *,
+    y_post: Mapping[str, np.ndarray] | np.ndarray | None = None,
     x_covs: np.ndarray | None = None,
     arm_labels: Sequence[Any] | np.ndarray | None = None,
     outcomes: Sequence[str] | None = None,
     min_eigenvalue: float = 1e-4,
 ) -> CrossOutcomeCorrelationResult:
-    """Extract covariate-adjusted within-unit residual scatter and conjugate IW correlation summary."""
+    """Extract covariate-adjusted within-unit residual scatter and conjugate IW correlation summary.
+
+    Args:
+      y: Primary unit-by-outcome panel mapping ``{outcome: (N,) or (N, T)}`` or
+        matrix ``(N, M)`` (typically pre-treatment baseline outcomes).
+      y_pre: Optional secondary pre-period outcome mapping or matrix for additional
+        within-outcome baseline adjustment.
+      y_post: Backward-compatible keyword alias for ``y`` (cannot be passed alongside ``y``).
+      x_covs: Optional ``(N, P)`` baseline covariates to partial out before computing scatter.
+      arm_labels: Optional length-``N`` arm assignment labels (for arm fixed effects and
+        per-arm correlation diagnostics).
+      outcomes: Optional explicit ordering of outcome names.
+      min_eigenvalue: Minimum eigenvalue floor in ``(0, 1)`` for the returned correlation matrix.
+
+    Returns:
+      :class:`CrossOutcomeCorrelationResult`.
+    """
+    if y is not None and y_post is not None:
+        raise ValueError("Pass either 'y' or 'y_post' (backward-compatible alias), not both")
+    y_target = y if y is not None else y_post
+    if y_target is None:
+        raise ValueError("Must supply 'y' (or alias 'y_post') to estimate_cross_outcome_correlation")
+
     min_eig = float(min_eigenvalue)
     if not (math.isfinite(min_eig) and 0.0 < min_eig < 1.0):
         raise ValueError(f"min_eigenvalue must lie in (0, 1); got {min_eigenvalue!r}")
 
-    if isinstance(y_post, Mapping):
-        if not y_post:
-            raise ValueError("y_post mapping must be non-empty")
-        out_names = tuple(str(k) for k in (outcomes if outcomes is not None else y_post.keys()))
-        cols_post = []
+    if isinstance(y_target, Mapping):
+        if not y_target:
+            raise ValueError("y mapping must be non-empty")
+        out_names = tuple(str(k) for k in (outcomes if outcomes is not None else y_target.keys()))
+        if len(out_names) < 2:
+            raise ValueError(f"Need at least M >= 2 outcomes; got {len(out_names)}")
+        cols_y = []
+        n_raw: int | None = None
         for k in out_names:
-            v = np.asarray(y_post[k], dtype=np.float64)
-            cols_post.append(np.nanmean(v, axis=1) if v.ndim == 2 else v.reshape(-1))
-        ymat = np.column_stack(cols_post)
+            v = np.asarray(y_target[k], dtype=np.float64)
+            col_k = _unit_row_means(v, f"y[{k!r}]")
+            if n_raw is None:
+                n_raw = int(col_k.shape[0])
+            elif int(col_k.shape[0]) != n_raw:
+                raise ValueError(f"y[{k!r}] has {col_k.shape[0]} units; expected {n_raw}")
+            cols_y.append(col_k)
+        ymat = np.column_stack(cols_y)
     else:
-        arr = np.asarray(y_post, dtype=np.float64)
+        arr = np.asarray(y_target, dtype=np.float64)
         if arr.ndim != 2 or arr.shape[1] < 2:
-            raise ValueError(f"y_post array must have shape (N, M) with M >= 2; got {arr.shape}")
+            raise ValueError(f"y array must have shape (N, M) with M >= 2; got {arr.shape}")
         ymat = arr
         out_names = (
             tuple(str(k) for k in outcomes)
@@ -265,28 +312,23 @@ def estimate_cross_outcome_correlation(
         if len(out_names) != ymat.shape[1]:
             raise ValueError(f"outcomes length {len(out_names)} != {ymat.shape[1]}")
 
-    n_units, m_dim = ymat.shape
-    if n_units < m_dim + 2:
-        raise ValueError(f"Need at least M + 2 = {m_dim + 2} units; got {n_units}")
+    n_total_rows, m_dim = ymat.shape
+    if n_total_rows < m_dim + 2:
+        raise ValueError(f"Need at least M + 2 = {m_dim + 2} units; got {n_total_rows}")
 
-    design_cols = [np.ones((n_units, 1), dtype=np.float64)]
+    x_arr: np.ndarray | None = None
     if x_covs is not None:
         x_arr = np.asarray(x_covs, dtype=np.float64)
         if x_arr.ndim == 1:
             x_arr = x_arr[:, None]
-        if x_arr.shape[0] != n_units:
-            raise ValueError(f"x_covs has {x_arr.shape[0]} rows; expected {n_units}")
-        design_cols.append(x_arr)
+        if x_arr.ndim != 2 or x_arr.shape[0] != n_total_rows:
+            raise ValueError(f"x_covs has shape {x_arr.shape}; expected ({n_total_rows}, P)")
+
+    arms_arr: np.ndarray | None = None
     if arm_labels is not None:
         arms_arr = np.asarray(arm_labels)
-        if arms_arr.shape[0] != n_units:
-            raise ValueError(f"arm_labels length {arms_arr.shape[0]} != {n_units}")
-        uniq = list(dict.fromkeys(arms_arr.tolist()))
-        if len(uniq) > 1:
-            dummies = np.column_stack([(arms_arr == u).astype(np.float64) for u in uniq[1:]])
-            design_cols.append(dummies)
-    else:
-        arms_arr = None
+        if arms_arr.shape[0] != n_total_rows:
+            raise ValueError(f"arm_labels length {arms_arr.shape[0]} != {n_total_rows}")
 
     pre_mat: np.ndarray | None = None
     if y_pre is not None:
@@ -294,12 +336,44 @@ def estimate_cross_outcome_correlation(
             pcols = []
             for k in out_names:
                 pv = np.asarray(y_pre[k], dtype=np.float64)
-                pcols.append(np.nanmean(pv, axis=1) if pv.ndim == 2 else pv.reshape(-1))
+                pcol_k = _unit_row_means(pv, f"y_pre[{k!r}]")
+                if int(pcol_k.shape[0]) != n_total_rows:
+                    raise ValueError(f"y_pre[{k!r}] has {pcol_k.shape[0]} units; expected {n_total_rows}")
+                pcols.append(pcol_k)
             pre_mat = np.column_stack(pcols)
         else:
             pre_mat = np.asarray(y_pre, dtype=np.float64)
             if pre_mat.shape != ymat.shape:
-                raise ValueError(f"y_pre shape {pre_mat.shape} != y_post shape {ymat.shape}")
+                raise ValueError(f"y_pre shape {pre_mat.shape} != y shape {ymat.shape}")
+
+    valid = np.all(np.isfinite(ymat), axis=1)
+    if pre_mat is not None:
+        valid &= np.all(np.isfinite(pre_mat), axis=1)
+    if x_arr is not None:
+        valid &= np.all(np.isfinite(x_arr), axis=1)
+
+    ymat = ymat[valid]
+    if pre_mat is not None:
+        pre_mat = pre_mat[valid]
+    if x_arr is not None:
+        x_arr = x_arr[valid]
+    if arms_arr is not None:
+        arms_arr = arms_arr[valid]
+
+    n_units = int(ymat.shape[0])
+    if n_units < m_dim + 2:
+        raise ValueError(
+            f"Need at least M + 2 = {m_dim + 2} complete finite units after masking NaN/Inf; got {n_units}"
+        )
+
+    design_cols = [np.ones((n_units, 1), dtype=np.float64)]
+    if x_arr is not None and x_arr.shape[1] > 0:
+        design_cols.append(x_arr)
+    if arms_arr is not None:
+        uniq = list(dict.fromkeys(arms_arr.tolist()))
+        if len(uniq) > 1:
+            dummies = np.column_stack([(arms_arr == u).astype(np.float64) for u in uniq[1:]])
+            design_cols.append(dummies)
 
     resid = np.zeros_like(ymat)
     base_x = np.hstack(design_cols)
@@ -309,6 +383,12 @@ def estimate_cross_outcome_correlation(
         p_rank = max(p_rank, int(np.linalg.matrix_rank(xm)))
         coef, *_ = np.linalg.lstsq(xm, ymat[:, m_i], rcond=None)
         resid[:, m_i] = ymat[:, m_i] - xm @ coef
+
+    min_required = max(m_dim + 2, p_rank + 2)
+    if n_units < min_required:
+        raise ValueError(
+            f"Need at least max(M + 2, p_rank + 2) = {min_required} complete finite units; got {n_units}"
+        )
 
     df_eff = max(int(n_units - p_rank), 1)
 

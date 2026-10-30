@@ -59,6 +59,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field as dc_field, fields as dc_fields, replace as dc_replace
 import math
+import os
 import sys
 import time
 from typing import Any, NoReturn
@@ -99,7 +100,7 @@ def _get_rhat_ess():
     try:
         from longbet._diagnostics import compute_ess, compute_rhat
         return compute_rhat, compute_ess
-    except Exception:
+    except ImportError:
         import arviz as az
 
         def _rhat(x: np.ndarray) -> float:
@@ -867,6 +868,11 @@ class RankKLongBetResult:
     post_window_length: np.ndarray | None = None
     cohorts: np.ndarray | None = None
     arm_metadata: dict[str, Any] | None = None
+    rank_k: int = 0
+
+    def __post_init__(self) -> None:
+        if self.rank_k <= 0:
+            self.rank_k = max(len(self.mode_tau_draws), 1)
 
     @property
     def treated_units(self) -> np.ndarray:
@@ -1478,7 +1484,7 @@ def _mode1_diagnostics(chains_proj: np.ndarray, compute_rhat: Any, compute_ess: 
                 rhat[i] = float(compute_rhat(x))
                 ess_bulk[i] = float(compute_ess(x, method="bulk"))
                 ess_tail[i] = float(compute_ess(x, method="tail"))
-            except Exception:  # pragma: no cover - diagnostic only
+            except (ArithmeticError, ValueError, np.linalg.LinAlgError):  # pragma: no cover - diagnostic only
                 pass
     return {"rhat_unit": rhat, "ess_bulk_unit": ess_bulk, "ess_tail_unit": ess_tail}
 
@@ -2085,30 +2091,32 @@ def _finalize_result(
         variant=variant,
         basis_spec=cfg.resolved_basis_spec,
         active_units=active_units,
+        rank_k=int(len(mode_tau_draws)),
         **extra,
     )
 
 
-def _warn_rank_k(message: str, category: type[Warning] = RankKConfigWarning) -> None:
-    """Issue a warning attributed to the first caller outside the ``longbet`` package.
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-    Walks up the stack past every ``longbet`` frame, so the warning points at the
-    user's line whether :func:`fit_rank_k_longbet` was called directly or through
-    :func:`rank_k_placebo_audit`.
+
+def _warn_rank_k(
+    message: str,
+    category: type[Warning] = RankKConfigWarning,
+    *,
+    stacklevel: int = 3,
+) -> None:
+    """Issue a warning attributed to the first caller outside the ``longbet`` package.
 
     Args:
       message: Warning text.
       category: Warning class (default :class:`RankKConfigWarning`).
+      stacklevel: Fallback caller stack depth on Python < 3.12 where
+        ``skip_file_prefixes`` is unavailable.
     """
-    frame = sys._getframe(1)
-    stacklevel = 2
-    while frame is not None:
-        module = frame.f_globals.get("__name__", "")
-        if module != "longbet" and not module.startswith("longbet."):
-            break
-        frame = frame.f_back
-        stacklevel += 1
-    warnings.warn(message, category, stacklevel=stacklevel)
+    if sys.version_info >= (3, 12):
+        warnings.warn(message, category, skip_file_prefixes=(_PACKAGE_DIR,))
+    else:  # pragma: no cover
+        warnings.warn(message, category, stacklevel=stacklevel)
 
 
 def _as_float_array(value: Any, name: str) -> np.ndarray:

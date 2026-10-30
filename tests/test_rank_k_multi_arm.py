@@ -198,6 +198,94 @@ def test_bipartite_star_without_arm_metadata_emits_design_warning() -> None:
     assert rec.max_cycle_discrepancy < 1e-13
 
 
+def test_bipartite_star_with_arm_metadata_is_quiet() -> None:
+    rng = np.random.default_rng(304)
+    h_post = 5
+    arms = ("C", "T1", "T2", "T3")
+    poset = (("T1", "C"), ("T2", "C"), ("T3", "C"))
+    results = {
+        ("T1", "C"): _make_stage1_fit(rng, np.full(h_post, 0.3), include_arm_metadata=True),
+        ("T2", "C"): _make_stage1_fit(rng, np.full(h_post, 0.5), include_arm_metadata=True),
+        ("T3", "C"): _make_stage1_fit(rng, np.full(h_post, 0.7), include_arm_metadata=True),
+    }
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        rec = reconcile_multi_arm_draws(results, arms=arms, poset=poset, seed=42)
+    design_warnings = [w for w in caught if issubclass(w.category, RankKDesignWarning)]
+    assert not design_warnings
+    assert rec.sampler_diagnostics.converged
+
+
+def test_mixed_rank_stage1_partial_mode_observation_preserves_dynamic_slope() -> None:
+    rng = np.random.default_rng(505)
+    h_post = 6
+    traj_b = np.linspace(0.25, 0.75, h_post)
+    traj_a = np.linspace(0.60, 1.30, h_post)
+
+    # Fit ("B", "C") at rank_k=1 (constant draws in Mode 0 only), while ("A", "B") and ("A", "C") are rank_k=2
+    fit_bc = _make_stage1_fit(rng, traj_b, sigma_arm_trt=0.03, sigma_arm_ctrl=0.03, sigma_forest=0.02)
+    bc_mean_draws = np.mean(fit_bc.arm_metadata["trt_trajectory_draws"], axis=1, keepdims=True)
+    bc_rank1_draws = np.repeat(bc_mean_draws, h_post, axis=1)
+    fit_bc.arm_metadata["trt_trajectory_draws"] = bc_rank1_draws
+    fit_bc.catt_draws[:, :50, 4:] = bc_rank1_draws[:, None, :]
+    fit_bc.mode_tau_draws = (fit_bc.mode_tau_draws[0],)
+    fit_bc.rank_k = 1
+
+    fit_ab = _make_stage1_fit(rng, traj_a - traj_b, sigma_arm_trt=0.03, sigma_arm_ctrl=0.03, sigma_forest=0.02)
+    fit_ac = _make_stage1_fit(rng, traj_a, sigma_arm_trt=0.03, sigma_arm_ctrl=0.03, sigma_forest=0.02)
+    fit_ab.rank_k = 2
+    fit_ac.rank_k = 2
+
+    results = {("B", "C"): fit_bc, ("A", "B"): fit_ab, ("A", "C"): fit_ac}
+    rec = reconcile_multi_arm_draws(results, arms=("C", "B", "A"), order=("C", "B", "A"), n_modes=2, seed=91)
+    assert rec.sampler_diagnostics.converged
+    assert rec.max_cycle_discrepancy < 1e-13
+    assert rec.ppc_cycle_pvalue is not None and 0.0 <= rec.ppc_cycle_pvalue <= 1.0
+
+    # Dynamic slope on ("B", "C") is recovered via ("A", "C") - ("A", "B") instead of clamped to zero!
+    bc_post_mean = np.mean(rec.contrast_trajectory_draws[("B", "C")], axis=0)
+    assert float(bc_post_mean[-1] - bc_post_mean[0]) > 0.20
+
+
+def test_basis_ppc_returns_none_when_draws_lie_in_col_psi_and_s0_is_leak_free() -> None:
+    rng = np.random.default_rng(606)
+    h_post = 6
+    psi = orthonormal_exposure_basis(h_post, 2) / np.sqrt(float(h_post))
+
+    def _in_subspace_fit(level: float, post_noise_mult: float = 1.0) -> types.SimpleNamespace:
+        fit = _make_stage1_fit(
+            rng,
+            np.linspace(level, level + 0.2, h_post),
+            sigma_arm_trt=0.04 * post_noise_mult,
+            sigma_arm_ctrl=0.04 * post_noise_mult,
+            sigma_forest=0.03 * post_noise_mult,
+        )
+        # Fix pre-period variances to an exact constant independent of post_noise_mult
+        fit.arm_metadata["pre_residual_var_treated"] = 0.25
+        fit.arm_metadata["pre_residual_var_control"] = 0.25
+        # Project draws strictly onto col(Psi)
+        raw_d = fit.arm_metadata["trt_trajectory_draws"]
+        in_col = (raw_d @ psi) @ psi.T
+        fit.arm_metadata["trt_trajectory_draws"] = in_col
+        fit.catt_draws[:, :50, 4:] = in_col[:, None, :]
+        return fit
+
+    res_low_noise = {
+        ("B", "C"): _in_subspace_fit(0.3, 1.0),
+        ("A", "B"): _in_subspace_fit(0.4, 1.0),
+        ("A", "C"): _in_subspace_fit(0.7, 1.0),
+    }
+    res_high_post_noise = {
+        ("B", "C"): _in_subspace_fit(0.3, 50.0),
+        ("A", "B"): _in_subspace_fit(0.4, 50.0),
+        ("A", "C"): _in_subspace_fit(0.7, 50.0),
+    }
+    rec_lo = reconcile_multi_arm_draws(res_low_noise, arms=("C", "B", "A"), order=("C", "B", "A"), seed=12)
+    rec_hi = reconcile_multi_arm_draws(res_high_post_noise, arms=("C", "B", "A"), order=("C", "B", "A"), seed=12)
+    assert rec_lo.ppc_basis_pvalue is None
+    assert rec_lo.s0_scale == rec_hi.s0_scale == pytest.approx(0.5)
+
+
 def test_unconstrained_and_horizon_truncation() -> None:
     rng = np.random.default_rng(404)
     h_post = 6

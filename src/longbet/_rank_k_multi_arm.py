@@ -33,7 +33,9 @@ single-outcome (:func:`reconcile_multi_arm_draws`) and multi-outcome
    generalized-horseshoe prior ``(sigma_m / s_{0,m})^2 ~ BetaPrime(1/4, 1/4)`` on
    the level scale and a Huang--Wand Half-t_3 prior on the dynamic-to-level
    ratio ``kappa_m / sigma_m`` (``P1``, shipped), or local per-cover Half-t_3
-   scales (``P2``, ablation only).
+   scales (``P2``: not shipped; it failed simulation-based calibration, see the
+   companion pre-registration section 5, and is reachable only through the
+   private ``_model_options``).
 4. **Exact Pakman--Paninski (2014) truncated-Gaussian HMC**: Wall-reflecting
    harmonic HMC in posterior-whitened coordinates across 4 chains with
    unconditional auto-continuation until ``split-Rhat <= 1.01`` and

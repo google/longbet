@@ -106,10 +106,13 @@ reports the share of the cumulative effect that rests on unobserved cells.
    censoring and dynamics) to `x` yourself.
 5. **Weights.** `att_weighting="cell"` keeps the paper's `L_i / sum_j L_j`
    (observed cells); `"unit"` is `1 / N_trt`. `res.unit_weights` stores them and
-   `reconcile_nested_3arm_draws` picks them up automatically.
+   `res.arm_metadata` carries the treated-average trajectory draws and the arm
+   residual covariances that `reconcile_nested_3arm_draws` and
+   `reconcile_multi_arm_draws` read (they never consume `att_draws`).
 6. **Cell draws.** `res.catt_draws[:, i, t0 + s - 1]` is filled for every post
-   cell `s <= H` of every treated unit, observed or not; `catt_floor` /
-   `tau_clip` act on the full horizon as before.
+   cell `s <= H` of every treated unit, observed or not; the Stage-1 options
+   `catt_floor` / `tau_clip` act on the full horizon as before (the multi-arm
+   reconciliation applies no projection of its own).
 
 ## Assumptions
 

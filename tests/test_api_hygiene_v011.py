@@ -944,3 +944,81 @@ def test_sample_truncated_mvn_ultrasubmicro_scale_invariance() -> None:
     assert stats.ks_2samp(draws[:, 1], ref[:, 1]).pvalue > 0.05
 
 
+def test_zero_kwarg_call_is_the_shipped_configuration() -> None:
+    """Plan v3.1 §4.4 done-criterion: the zero-keyword call *is* the shipped full model.
+
+    The private ``_model_options`` mapping exists only for candidate comparisons and
+    ablations; ``None`` must resolve to the full Bayesian model (P1 generalized-horseshoe
+    scale prior, Student-t_4 forest error, per-period positivity, SUR block, dynamic
+    shrinkage, 4 chains x 400 draws after 200 warm-up sweeps, at most 4 continuation
+    rounds) and the zero-keyword call must reproduce the explicit full configuration
+    bit for bit on both public entry points.
+    """
+    shipped = {
+        "scale_prior": "global_halft",
+        "robust_error": "t4",
+        "period_positivity": True,
+        "use_sur": True,
+        "dynamic_shrinkage": True,
+        "n_chains": 4,
+        "n_warmup": 200,
+        "n_draws_per_chain": 400,
+        "max_continuation_rounds": 4,
+    }
+    assert rkma_mod._parse_model_options(None) == shipped
+    assert set(shipped) == set(rkma_mod._ALLOWED_MODEL_OPTION_KEYS)
+    with pytest.raises(ValueError, match="_model_options"):
+        rkma_mod._parse_model_options({"composite_mode": "coherent_total"})
+    with pytest.raises(ValueError, match="scale_prior"):
+        rkma_mod._parse_model_options({"scale_prior": "empirical_bayes"})
+    with pytest.raises(ValueError, match="robust_error"):
+        rkma_mod._parse_model_options({"robust_error": "huber"})
+
+    rng = np.random.default_rng(20261107)
+    h_post = 5
+    traj_b = np.full(h_post, 0.40)
+    traj_a = np.full(h_post, 0.90)
+    results = {
+        ("B", "C"): _make_stage1_fit(rng, traj_b),
+        ("A", "B"): _make_stage1_fit(rng, traj_a - traj_b),
+        ("A", "C"): _make_stage1_fit(rng, traj_a),
+    }
+    arms = ("C", "B", "A")
+
+    rec_default = reconcile_multi_arm_draws(results, arms=arms, order=arms, seed=5)
+    rec_explicit = reconcile_multi_arm_draws(results, arms=arms, order=arms, seed=5, _model_options=shipped)
+    np.testing.assert_array_equal(rec_default.theta_draws, rec_explicit.theta_draws)
+    np.testing.assert_array_equal(rec_default.tau_draws, rec_explicit.tau_draws)
+    assert rec_default.theta_draws.shape[1:] == (len(arms) - 1, 2)
+    diag = rec_default.sampler_diagnostics
+    assert diag.sampler == "pakman_paninski_hmc_gibbs"
+    assert (diag.n_chains, diag.n_draws_per_chain, diag.n_warmup) == (4, 400, 200)
+    assert diag.converged and diag.r_hat <= 1.01 and diag.ess >= 400.0
+    assert set(diag.max_rhat_by_block) >= {"theta", "sigma", "kappa", "rho", "phi", "omega"}
+    assert set(rec_default.omega_draws) == set(results)  # Student-t_4 latent precisions per fitted pair
+    assert rec_default.prior_scale is None  # hierarchical scale, no plug-in constant
+
+    multi_default = reconcile_multi_arm_multi_outcome_draws(
+        {"m1": results, "m2": results},
+        composite_outcomes={"total": ("m1", "m2")},
+        arms=arms,
+        order=arms,
+        seed=5,
+    )
+    multi_explicit = reconcile_multi_arm_multi_outcome_draws(
+        {"m1": results, "m2": results},
+        composite_outcomes={"total": ("m1", "m2")},
+        arms=arms,
+        order=arms,
+        seed=5,
+        _model_options=shipped,
+    )
+    for name in ("m1", "m2", "total"):
+        np.testing.assert_array_equal(
+            multi_default.by_outcome[name].theta_draws, multi_explicit.by_outcome[name].theta_draws
+        )
+    assert multi_default.additivity_violation_rate == {"total": 0.0}
+    assert multi_default.max_abs_composite_discrepancy["total"] < 1e-12
+    assert multi_default.sampler_diagnostics.converged
+    # Without `cross_outcome_residuals` the SUR block is on with R fixed at the identity.
+    np.testing.assert_array_equal(multi_default.posterior_correlation_mean, np.eye(2))

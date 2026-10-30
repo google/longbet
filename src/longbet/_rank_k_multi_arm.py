@@ -27,10 +27,13 @@ single-outcome (:func:`reconcile_multi_arm_draws`) and multi-outcome
    correlation ``R``) analytically when updating ``Theta``, while accounting
    for fit-specific forest errors ``eta_{q} | omega_{q} ~ N(0, F_{q} / omega_{q})``
    and exact linear composite measurements.
-3. **Poset-cone prior & Huang--Wand Half-t_3 scales**: Enforces cover-relation
+3. **Poset-cone prior & hierarchical scales**: Enforces cover-relation
    monotonicity and per-period positivity in prior support (a polyhedral cone)
-   with exact cone-normalized scale updates (global Half-t_3 ``P1`` or local
-   per-cover Half-t_3 ``P2``).
+   with exact cone-normalized scale updates: an independent per-outcome
+   generalized-horseshoe prior ``(sigma_m / s_{0,m})^2 ~ BetaPrime(1/4, 1/4)`` on
+   the level scale and a Huang--Wand Half-t_3 prior on the dynamic-to-level
+   ratio ``kappa_m / sigma_m`` (``P1``, shipped), or local per-cover Half-t_3
+   scales (``P2``, ablation only).
 4. **Exact Pakman--Paninski (2014) truncated-Gaussian HMC**: Wall-reflecting
    harmonic HMC in posterior-whitened coordinates across 4 chains with
    unconditional auto-continuation until ``split-Rhat <= 1.01`` and
@@ -302,7 +305,7 @@ def _validate_prior_scale_scalar(value: Any, name: str = "prior_scale") -> float
         return None
     if isinstance(value, (str, bytes, bool, np.bool_)):
         raise ValueError(
-            f"{name} must be None (hierarchical Half-t_3 default) or a positive float; "
+            f"{name} must be None (hierarchical generalized-horseshoe default) or a positive float; "
             f"string/boolean modes such as {value!r} were removed in v0.11"
         )
     try:
@@ -3953,13 +3956,16 @@ def reconcile_multi_arm_draws(
         (transitive reduction computed automatically; mutually exclusive with ``order``).
       monotone: Enforce poset-cone monotonicity and per-period positivity in
         prior support (default ``True``).
-      prior_scale: ``None`` (default) places a hierarchical ``Half-t_3(s_0)``
-        scale prior on the top-arm level; a positive ``float`` fixes an
-        externally calibrated prior scale.
+      prior_scale: ``None`` (default) places the hierarchical per-outcome
+        generalized-horseshoe prior ``(sigma / s_0)^2 ~ BetaPrime(1/4, 1/4)`` on
+        the top-arm level scale (``s_0`` the pre-treatment outcome SD); a
+        positive ``float`` fixes an externally calibrated prior scale in outcome
+        units. Strings raise ``ValueError``.
       horizon: Estimand window ``1..H`` (default: full post-adoption window).
       n_modes: Exposure basis dimension ``K'`` (default ``2``: level + decay).
       seed: Deterministic PRNG seed for the 4-chain sampler.
-      _model_options: Private internal options mapping for ablation testing.
+      _model_options: Private internal options mapping for candidate comparisons
+        and ablations; ``None`` is the shipped configuration.
 
     Returns:
       :class:`MultiArmReconciliationResult`.

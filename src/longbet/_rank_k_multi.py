@@ -425,7 +425,48 @@ def reconcile_multi_arm_multi_outcome_draws(
     seed: int = 2026,
     _model_options: Mapping[str, Any] | None = None,
 ) -> MultiArmMultiOutcomeReconciliationResult:
-    """Jointly reconcile pairwise Stage-1 Rank-K fits across arms, outcomes, and composites."""
+    """Jointly reconcile pairwise Stage-1 Rank-K fits across arms, outcomes, and composites.
+
+    One joint hierarchical Bayesian model (see :mod:`longbet._rank_k_multi_arm`) over
+    all structural outcomes: a seemingly-unrelated-regressions likelihood on the
+    Stage-1 summaries whose cross-outcome correlation ``R`` is sampled from its
+    inverse-Wishart posterior, composites as sums of component parameters (with a
+    composite *fit*, when supplied, entering as an extra measurement), and the
+    poset-cone prior with independent per-outcome scales.
+
+    Args:
+      results_by_outcome: ``{outcome: {(arm_high, arm_low): RankKLongBetResult}}``;
+        every outcome must use the same pairs with the same orientation.
+      composite_outcomes: ``{composite: (member_outcome, ...)}`` linear composites
+        (sums of structural outcomes) to report.
+      composite_results: Optional pairwise fits of a composite outcome itself,
+        ``{composite: {(arm_high, arm_low): RankKLongBetResult}}``; each composite
+        must be declared in ``composite_outcomes``.
+      cross_outcome_residuals: ``(N_units, M)`` pre-period unit residual matrix
+        (columns in ``results_by_outcome`` order) or the
+        :class:`CrossOutcomeCorrelationResult` of
+        :func:`estimate_cross_outcome_correlation`; ``None`` fixes ``R = I``.
+      arms: Optional explicit sequence of arm labels (``arms[0]`` is control).
+      order: Optional total order ``(control, ..., top)`` for chain designs
+        (mutually exclusive with ``poset``).
+      poset: Optional ``(arm_high, arm_low)`` cover relations of a partial order
+        (mutually exclusive with ``order``).
+      monotone: Poset-cone monotonicity and per-period positivity as prior
+        support, one flag or a per-outcome mapping (default ``True``).
+      prior_scale: ``None`` (hierarchical generalized-horseshoe default), a
+        positive float, or a per-outcome mapping of those; strings raise
+        ``ValueError``.
+      horizon: Estimand window ``1..H`` (default: full post-adoption window).
+      n_modes: Exposure basis dimension ``K'`` (default ``2``: level + decay).
+      seed: Deterministic PRNG seed for the 4-chain sampler.
+      _model_options: Private internal options mapping for candidate comparisons
+        and ablations; ``None`` is the shipped configuration.
+
+    Returns:
+      :class:`MultiArmMultiOutcomeReconciliationResult` with one
+      :class:`~longbet._rank_k_multi_arm.MultiArmReconciliationResult` per
+      structural outcome and composite in ``by_outcome``.
+    """
     if not isinstance(results_by_outcome, Mapping) or not results_by_outcome:
         raise ValueError("`results_by_outcome` must be a non-empty mapping of {outcome: {(u, v): res}}")
     structural_outcomes = tuple(str(m) for m in results_by_outcome.keys())

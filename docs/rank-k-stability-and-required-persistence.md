@@ -41,7 +41,7 @@ Three failure modes make naive slope extrapolation look more precise than it is:
 
 1. **Trajectory draws.** From a two-arm fit, `event_time_trajectory(res, weighting="unit")` gives the `(S, H)`
    treated-average trajectory. From a nested three-arm design (C control, B base treatment, A base plus an
-   increment), `reconcile_nested_3arm_draws(res_bc, res_ab, res_ac, prior_scale=...)` gives coherent `BC`
+   increment), `reconcile_nested_3arm_draws(res_bc, res_ab, res_ac)` gives coherent `BC`
    (persistent plateau), `AB` (increment, often a fading pulse) and `AC = BC + AB` draws. Every function below
    accepts the reconciliation result directly.
 2. **In-sample stability** (`longbet._stability`):
@@ -127,7 +127,7 @@ To draw the figure (matplotlib required):
 axes = longbet.plot_required_persistence_and_payback(result, cost_highlight=4.0, alpha_highlight=1.0, unit="$")
 ```
 
-With real fits, replace `traj` by `longbet.reconcile_nested_3arm_draws(res_bc, res_ab, res_ac, prior_scale=...)`
+With real fits, replace `traj` by `longbet.reconcile_nested_3arm_draws(res_bc, res_ab, res_ac)`
 (three arms) or `longbet.event_time_trajectory(res, weighting="unit")` (two arms, no pulse split), and replace the
 secondary outcomes by their own trajectories. For the model-free check, pass the outcome by event time to
 `longbet.wearout_ancova(y_event, treated, baseline, strata=strata, early=(1, 6), late=(7, 12))` and hand the result

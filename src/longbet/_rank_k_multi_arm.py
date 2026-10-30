@@ -1667,29 +1667,27 @@ def _sample_truncated_mvn(
     f_raw = a_cone @ m_cov
     g_raw = a_cone @ mean
     row_norms = np.linalg.norm(f_raw, axis=1)
-    keep = row_norms > 1e-14
+    keep = row_norms > 1e-300
     if not np.any(keep):
         return mean + m_cov @ rng.standard_normal(d_dim)
     f_walls = f_raw[keep] / row_norms[keep, None]
     g_walls = g_raw[keep] / row_norms[keep]
 
-    # Ensure theta_current is strictly inside cone before whitening
-    theta_init = theta_current
-    min_slack = float(np.min(a_cone @ theta_init))
-    if min_slack <= 1e-11:
-        ray_slack = float(np.min(a_cone @ interior_ray))
-        push = (1e-6 - min_slack) / max(ray_slack, 1e-12)
-        theta_init = theta_init + max(push, 1e-8) * interior_ray
+    z_init = chol_prec.T @ (theta_current - mean)
+    min_w_slack = float(np.min(f_walls @ z_init + g_walls))
+    if min_w_slack <= 0.0:
+        ray_z = chol_prec.T @ interior_ray
+        ray_w_slack = float(np.min(f_walls @ ray_z))
+        z_init = z_init + ((-min_w_slack + 1e-12) / max(ray_w_slack, 1e-300)) * ray_z
 
-    z_init = chol_prec.T @ (theta_init - mean)
     z_draw = _pakman_paninski_hmc_whitened(z_init, f_walls, g_walls, rng, n_steps=n_hmc_steps)
     theta_draw = mean + m_cov @ z_draw
 
-    # Nudge tiny machine-rounding boundary violations (< 1e-13) onto cone interior
+    # Nudge tiny machine-rounding boundary violations (< 0) onto cone interior proportionally
     post_slack = float(np.min(a_cone @ theta_draw))
     if post_slack < 0.0:
         ray_slack = float(np.min(a_cone @ interior_ray))
-        theta_draw = theta_draw + ((-post_slack + 1e-14) / max(ray_slack, 1e-12)) * interior_ray
+        theta_draw = theta_draw + ((-post_slack * (1.0 + 1e-12) + 1e-300) / max(ray_slack, 1e-300)) * interior_ray
     return theta_draw
 
 
@@ -1778,8 +1776,10 @@ def _slice_sample_1d_with_logp(
     fx0 = float(logp_init) if (logp_init is not None and x0 == x_f) else float(log_prob_fn(x0))
     log_y = fx0 - float(rng.standard_exponential())
 
-    left = max(lo_b, x0 - float(rand()) * width)
-    right = min(hi_b, left + width)
+    left_raw = x0 - float(rand()) * width
+    right_raw = left_raw + width
+    left = lo_b if left_raw < lo_b else left_raw
+    right = hi_b if right_raw > hi_b else right_raw
 
     j_steps = int(float(rand()) * max_steps)
     k_steps = (max_steps - 1) - j_steps
@@ -3405,17 +3405,24 @@ def _reconcile_joint_bayesian_core(
     chain_rngs = [np.random.default_rng(child) for child in ss.spawn(n_chains + 1)]
     ppc_rng = chain_rngs[-1]
 
+    p1_tau_spread = (0.04, 0.25, 2.0, 12.0)
     chain_states: list[dict[str, Any]] = []
     for c_i in range(n_chains):
         rng_c = chain_rngs[c_i]
         jitter = float(rng_c.uniform(0.8, 1.25))
-        theta_c = theta_mode + 0.05 * jitter * interior_ray_joint
-        if a_cone_joint.shape[0] > 0 and float(np.min(a_cone_joint @ theta_c)) <= 1e-6:
-            theta_c = theta_mode + 0.1 * interior_ray_joint
+        tau_c_base = p1_tau_spread[c_i % len(p1_tau_spread)] if is_p1_global else tau_init_nom
+        ray_mult_c = min(tau_c_base, 1.0)
+        theta_c = theta_mode + 0.05 * ray_mult_c * jitter * interior_ray_joint
+        if a_cone_joint.shape[0] > 0 and float(np.min(a_cone_joint @ theta_c)) <= 0.0:
+            theta_c = theta_mode + 0.05 * ray_mult_c * interior_ray_joint
         sig_c_list = [
             float(fixed_sigmas[m])
             if fixed_sigmas[m] is not None
-            else (tau_init_nom * s0_scales[m] * float(rng_c.uniform(0.5, 1.8)))
+            else (
+                tau_c_base * s0_scales[m] * float(rng_c.uniform(0.75, 1.35))
+                if is_p1_global
+                else (tau_init_nom * s0_scales[m] * float(rng_c.uniform(0.5, 1.8)))
+            )
             for m in range(n_outcomes)
         ]
         sig_sq_c = np.array([sc * sc for sc in sig_c_list], dtype=np.float64)

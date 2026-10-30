@@ -41,6 +41,7 @@ from longbet._rank_k_multi_arm import (
     _resolve_arms_and_poset,
     _sample_invgamma,
     _sample_truncated_mvn,
+    _slice_sample_1d_with_logp,
     _update_scales_outcome,
 )
 from tests.test_rank_k_multi_arm import _make_stage1_fit
@@ -887,3 +888,59 @@ def test_per_outcome_independent_scale_zero_contamination() -> None:
     mean_top_joint = float(np.mean(joint.by_outcome["null"].contrast_mode1_draws[("A", "C")]))
     mean_top_solo = float(np.mean(solo_null.contrast_mode1_draws[("A", "C")]))
     assert abs(mean_top_joint - mean_top_solo) < 0.015
+
+
+def test_slice_sample_1d_boundary_detailed_balance() -> None:
+    """Verify bounded Neal (2003) slice sampler preserves exact stationarity near both endpoints."""
+    rng = np.random.default_rng(20261105)
+    bounds = (1e-5, 1.0 - 1e-5)
+
+    for a_par, b_par, width in ((2.0, 10.0, 0.25), (5.0, 1.5, 0.35)):
+        def log_beta(x: float, a: float = a_par, b: float = b_par) -> float:
+            return (a - 1.0) * math.log(x) + (b - 1.0) * math.log1p(-x)
+
+        x_cur = a_par / (a_par + b_par)
+        lp_cur: float | None = None
+        draws = np.empty(6000, dtype=np.float64)
+        for step in range(25_000):
+            x_cur, lp_cur = _slice_sample_1d_with_logp(
+                log_beta, x_cur, rng, width=width, max_steps=3, bounds=bounds, logp_init=lp_cur
+            )
+            if step >= 1000 and (step - 1000) % 4 == 0:
+                draws[(step - 1000) // 4] = x_cur
+
+        ks_res = stats.kstest(draws, "beta", args=(a_par, b_par))
+        assert ks_res.pvalue > 0.05, (
+            f"Bounded slice sampler failed KS stationarity on Beta({a_par}, {b_par}): p={ks_res.pvalue:.4g}"
+        )
+        med = float(stats.beta.ppf(0.5, a_par, b_par))
+        assert abs(float(np.mean(draws < med)) - 0.5) < 0.025
+
+
+def test_sample_truncated_mvn_ultrasubmicro_scale_invariance() -> None:
+    """Verify whitened cone-slack handling in `_sample_truncated_mvn` stays exact at `sigma = 1e-10`."""
+    rng = np.random.default_rng(20261106)
+    scale = 1e-10
+    prec = np.eye(2, dtype=np.float64) / (scale * scale)
+    mean = np.zeros(2, dtype=np.float64)
+    a_cone = np.array([[1.0, -0.5], [1.0, 0.5]], dtype=np.float64)
+    ray = np.array([1.0, 0.0], dtype=np.float64)
+
+    th = np.array([1e-16, 0.0], dtype=np.float64)  # well below old 1e-11 unwhitened threshold
+    draws = np.empty((2000, 2), dtype=np.float64)
+    for step in range(4400):
+        th = _sample_truncated_mvn(mean, prec, a_cone, th, ray, rng, n_hmc_steps=1)
+        if step >= 400 and (step - 400) % 2 == 0:
+            draws[(step - 400) // 2] = th / scale
+
+    # Exact rejection reference at unit scale
+    rej_list: list[np.ndarray] = []
+    while len(rej_list) < 4000:
+        cand = rng.standard_normal((4096, 2))
+        ok = np.all((cand @ a_cone.T) >= 0.0, axis=1)
+        rej_list.extend(cand[ok])
+    ref = np.asarray(rej_list[:4000])
+    assert stats.ks_2samp(draws[:, 0], ref[:, 0]).pvalue > 0.05
+    assert stats.ks_2samp(draws[:, 1], ref[:, 1]).pvalue > 0.05
+
+

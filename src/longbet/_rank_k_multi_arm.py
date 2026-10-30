@@ -108,25 +108,23 @@ _RHO_BETA_BETA = 1.5
 _PHI_BETA_ALPHA = 2.0
 _PHI_BETA_BETA = 10.0
 
-# Hierarchical standardized poset-cone scale prior hyperparameters (P1 / "global_halft"):
-#   tau ~ (1 - pi_act) * Half-t_{nu_null}(tau_null)
-#         + pi_act * Scaled-F(alpha_tau, nu_tau, tau_0)             [two-group global Cohen's-d scale]
-#   log(sigma_m / (tau * s_{0,m})) ~ N(0, sd_eta^2)                [outcome scale dispersion]
-#   gamma_m = kappa_m / sigma_m ~ Half-t_{nu_gamma}(gamma_0)       [dimensionless dynamic tilt ratio]
-# where s_{0,m} = sqrt(median_a(sigma^2_{pre,m,a})) is the 100% pre-treatment outcome SD
-# (falling back to 2 * SE_{top,m} / tau_0 on synthetic mock inputs without pre-period metadata).
-_SCALE_PRIOR_PI_ACT = 0.90
-_SCALE_PRIOR_TAU_NULL = 0.035
-_SCALE_PRIOR_NU_NULL = 1.5
-_SCALE_PRIOR_ALPHA_TAU = 3.0
-_SCALE_PRIOR_NU_TAU = 3.0
-_SCALE_PRIOR_TAU0 = 0.40
-_SCALE_PRIOR_LOG_ETA_SD = 0.32
+# Independent per-outcome standardized poset-cone scale prior hyperparameters (P1 / "global_halft"):
+#   tau_m = sigma_m / s_{0,m},  (tau_m / tau_0)^2 ~ F(1/2, 1/2) = BetaPrime(1/4, 1/4),  tau_0 = 1
+#   gamma_m = kappa_m / sigma_m ~ Half-t_3(0.50)
+# i.e. the shrinkage factor 1 / (1 + tau_m^2) ~ Beta(1/4, 1/4): a generalized horseshoe
+# (Armagan, Dunson & Clyde 2011) with a single smooth family, an integrable pole at tau_m = 0
+# (null outcomes shrink to zero) and a heavy tau_m^{-3/2} tail (active outcomes stay unshrunk).
+# s_{0,m} = sqrt(median_a(sigma^2_{pre,m,a})) is the pre-treatment outcome SD (falling back to
+# 2 * SE_{top,m} / tau_0 on synthetic mock inputs without pre-period metadata). Outcomes are
+# independent in prior scale; cross-outcome borrowing arises purely from SUR correlation R and
+# composite measurements.
+_SCALE_PRIOR_ALPHA_TAU = 0.5
+_SCALE_PRIOR_NU_TAU = 0.5
+_SCALE_PRIOR_TAU0 = 1.0
 _SCALE_PRIOR_NU_GAMMA = 3.0
-_SCALE_PRIOR_GAMMA0 = 0.55
+_SCALE_PRIOR_GAMMA0 = 0.50
 _SCALE_PRIOR_C0 = 1.0
 _SCALE_PRIOR_W_TAU_BOUND = 11.0
-_SCALE_PRIOR_ETA_BOUND = 8.0
 _SCALE_PRIOR_U_GAMMA_BOUND = 9.5
 _SCALE_PRIOR_TREE_LOCAL = False
 _SCALE_PRIOR_NU_LOCAL = 3.0
@@ -1837,33 +1835,19 @@ def _log_scaled_f_logscale(w_val: float, alpha: float, nu: float, log_scale: flo
     return log_norm + alpha * u - 0.5 * (alpha + nu) * math.log1p(math.exp(z))
 
 
-def _log_global_tau_prior(w_tau: float) -> float:
-    """Normalized log-density of ``w_tau = log(tau)`` under the two-group global scale prior."""
-    pi_act = _SCALE_PRIOR_PI_ACT
-    lp_act = _log_scaled_f_logscale(
+def _log_outcome_tau_prior(w_tau: float) -> float:
+    """Normalized log-density of ``w_tau = log(sigma_m / s_{0,m})`` under the per-outcome scale prior."""
+    return _log_scaled_f_logscale(
         w_tau, _SCALE_PRIOR_ALPHA_TAU, _SCALE_PRIOR_NU_TAU, math.log(_SCALE_PRIOR_TAU0)
     )
-    if pi_act >= 1.0:
-        return lp_act
-    lp_null = _log_scaled_f_logscale(
-        w_tau, 1.0, _SCALE_PRIOR_NU_NULL, math.log(_SCALE_PRIOR_TAU_NULL)
-    )
-    a0 = math.log(1.0 - pi_act) + lp_null
-    a1 = math.log(pi_act) + lp_act
-    m_top = a0 if a0 >= a1 else a1
-    return m_top + math.log(math.exp(a0 - m_top) + math.exp(a1 - m_top))
 
 
-def _sample_global_tau_prior(rng: np.random.Generator) -> float:
-    """Exact forward sample of ``tau`` on ``exp((-w_bound, w_bound))`` from the global scale prior."""
+def _sample_outcome_tau_prior(rng: np.random.Generator) -> float:
+    """Exact forward sample of ``tau_m = sigma_m / s_{0,m}`` on ``exp((-w_bound, w_bound))``."""
     wt_b = _SCALE_PRIOR_W_TAU_BOUND
     while True:
-        if float(rng.random()) < _SCALE_PRIOR_PI_ACT:
-            f_draw = float(rng.f(_SCALE_PRIOR_ALPHA_TAU, _SCALE_PRIOR_NU_TAU))
-            tau = _SCALE_PRIOR_TAU0 * math.sqrt(max(f_draw, 1e-300))
-        else:
-            f_draw = float(rng.f(1.0, _SCALE_PRIOR_NU_NULL))
-            tau = _SCALE_PRIOR_TAU_NULL * math.sqrt(max(f_draw, 1e-300))
+        f_draw = float(rng.f(_SCALE_PRIOR_ALPHA_TAU, _SCALE_PRIOR_NU_TAU))
+        tau = _SCALE_PRIOR_TAU0 * math.sqrt(max(f_draw, 1e-300))
         w_val = math.log(max(tau, 1e-300))
         if -wt_b < w_val < wt_b:
             return tau
@@ -1951,18 +1935,17 @@ def _update_scales_outcome(
             w_loc0 = np.log(np.maximum(lam_cur, 1e-12))
             both_gk = bool(k_dim >= 2 and dynamic_shrinkage)
             if coupled_p1:
-                eta_b_r = _SCALE_PRIOR_ETA_BOUND
-                sd_eta_r = _SCALE_PRIOR_LOG_ETA_SD
-                g_lo = max(log_s0_eff - eta_b_r - ws0, float(np.max(w_loc0 - 9.0)))
-                g_hi = min(log_s0_eff + eta_b_r - ws0, float(np.min(w_loc0 + 9.0)))
+                wt_b_r = _SCALE_PRIOR_W_TAU_BOUND
+                g_lo = max(log_s0_eff - wt_b_r - ws0, float(np.max(w_loc0 - 9.0)))
+                g_hi = min(log_s0_eff + wt_b_r - ws0, float(np.min(w_loc0 + 9.0)))
                 if g_hi - g_lo > 1e-9 and (g_lo < 0.0 < g_hi):
                     def _logp_gamma_p1(g_val: float) -> float:
-                        lp = -0.5 * (((ws0 + g_val - log_s0_eff) / sd_eta_r) ** 2)
+                        lp = _log_outcome_tau_prior(ws0 + g_val - log_s0_eff)
                         for e_i in range(spec.n_edges):
                             lp += _log_halft_unit(float(w_loc0[e_i]) - g_val, nu_loc)
                         return lp
 
-                    g_new = _slice_sample_1d(_logp_gamma_p1, 0.0, rng, bounds=(g_lo, g_hi))
+                    g_new = _slice_sample_1d(_logp_gamma_p1, 0.0, rng, width=2.5, bounds=(g_lo, g_hi))
                     sigma_sq = math.exp(2.0 * (ws0 + g_new))
                     if both_gk:
                         kappa_sq = math.exp(2.0 * (wk0 + g_new))
@@ -2007,28 +1990,27 @@ def _update_scales_outcome(
     )
 
     if coupled_p1:
-        sd_eta = _SCALE_PRIOR_LOG_ETA_SD
         log_gamma0 = math.log(_SCALE_PRIOR_GAMMA0)
         nu_gamma = _SCALE_PRIOR_NU_GAMMA
-        eta_b = _SCALE_PRIOR_ETA_BOUND
+        wt_b = _SCALE_PRIOR_W_TAU_BOUND
         ug_b = _SCALE_PRIOR_U_GAMMA_BOUND
 
         if fixed_sigma is None:
-            ws_lo = log_s0_eff - eta_b
-            ws_hi = log_s0_eff + eta_b
+            ws_lo = log_s0_eff - wt_b
+            ws_hi = log_s0_eff + wt_b
             if dynamic_shrinkage:
                 ws_lo = max(ws_lo, wk_cur - ug_b)
                 ws_hi = min(ws_hi, wk_cur + ug_b)
             if ws_hi - ws_lo > 1e-9 and (ws_lo < ws_cur < ws_hi):
                 def _logp_ws_p1(ws: float) -> float:
-                    lp = -0.5 * (((ws - log_s0_eff) / sd_eta) ** 2) - d0 * ws - c0 * math.exp(-2.0 * ws)
+                    lp = _log_outcome_tau_prior(ws - log_s0_eff) - d0 * ws - c0 * math.exp(-2.0 * ws)
                     if dynamic_shrinkage:
                         lp += _log_halft_unit(wk_cur - ws - log_gamma0, nu_gamma)
                     if logz_depends_on_ratio:
                         lp -= spec.log_normalizer(math.exp(wk_cur - ws), lam_cur)
                     return lp
 
-                ws_cur = _slice_sample_1d(_logp_ws_p1, ws_cur, rng, bounds=(ws_lo, ws_hi))
+                ws_cur = _slice_sample_1d(_logp_ws_p1, ws_cur, rng, width=2.5, bounds=(ws_lo, ws_hi))
 
         if dynamic_shrinkage:
             wk_lo = ws_cur - ug_b
@@ -2052,21 +2034,21 @@ def _update_scales_outcome(
                 wk_cur = _slice_sample_1d(_logp_wk_p1, wk_cur, rng, bounds=(wk_lo, wk_hi))
 
         # Constant-ratio joint radial scale step (ws, wk) = (ws, ws + u) where gamma = exp(u) & log Z_m(gamma) stay fixed
-        if fixed_sigma is None and dynamic_shrinkage and k_dim >= 2:
+        if fixed_sigma is None and dynamic_shrinkage:
             u_fixed = wk_cur - ws_cur
-            ws_lo_u = log_s0_eff - eta_b
-            ws_hi_u = log_s0_eff + eta_b
+            ws_lo_u = log_s0_eff - wt_b
+            ws_hi_u = log_s0_eff + wt_b
             if ws_hi_u - ws_lo_u > 1e-9 and (ws_lo_u < ws_cur < ws_hi_u):
                 c_comb = c0 + c_dyn * math.exp(-2.0 * u_fixed)
 
                 def _logp_ws_const_u_p1(ws: float) -> float:
                     return (
-                        -0.5 * (((ws - log_s0_eff) / sd_eta) ** 2)
+                        _log_outcome_tau_prior(ws - log_s0_eff)
                         - (d0 + d_dyn) * ws
                         - c_comb * math.exp(-2.0 * ws)
                     )
 
-                ws_cur = _slice_sample_1d(_logp_ws_const_u_p1, ws_cur, rng, bounds=(ws_lo_u, ws_hi_u))
+                ws_cur = _slice_sample_1d(_logp_ws_const_u_p1, ws_cur, rng, width=2.5, bounds=(ws_lo_u, ws_hi_u))
                 wk_cur = ws_cur + u_fixed
     else:
         if fixed_sigma is None:
@@ -2402,160 +2384,6 @@ def _compute_composite_ppc_pvalue(
 # ---- Joint Bayesian multi-chain reconciliation core ---------------------------------------------
 
 
-def _update_global_tau(
-    *,
-    w_tau: float,
-    sigma_sq: np.ndarray,
-    kappa_sq: np.ndarray,
-    log_s0_scales: list[float],
-    log_sk_scales: list[float],
-    free_outcome_idxs: tuple[int, ...],
-    dynamic_shrinkage: bool,
-    rng: np.random.Generator,
-    theta: np.ndarray | None = None,
-    prior_specs: list[_OutcomeConePriorSpec] | None = None,
-    local_scales: list[np.ndarray] | None = None,
-    n_nonctrl: int = 0,
-    k_dim: int = 1,
-) -> float:
-    """Centered slice + joint hierarchy translation update for global ``w_tau = log(tau)``."""
-    if not free_outcome_idxs:
-        return 0.0
-    del log_sk_scales
-    sd_eta = _SCALE_PRIOR_LOG_ETA_SD
-    wt_b = _SCALE_PRIOR_W_TAU_BOUND
-    eta_b = _SCALE_PRIOR_ETA_BOUND
-
-    ws_free = [0.5 * math.log(max(float(sigma_sq[m]), 1e-80)) for m in free_outcome_idxs]
-    wk_free = (
-        [0.5 * math.log(max(float(kappa_sq[m]), 1e-80)) for m in free_outcome_idxs]
-        if dynamic_shrinkage
-        else []
-    )
-
-    wt_lo = max([-wt_b] + [ws_free[i] - log_s0_scales[m] - eta_b for i, m in enumerate(free_outcome_idxs)])
-    wt_hi = min([wt_b] + [ws_free[i] - log_s0_scales[m] + eta_b for i, m in enumerate(free_outcome_idxs)])
-    if wt_hi - wt_lo > 1e-9 and (wt_lo < w_tau < wt_hi):
-        def _logp_wt(wt: float) -> float:
-            lp = _log_global_tau_prior(wt)
-            for idx_f, m in enumerate(free_outcome_idxs):
-                lp -= 0.5 * (((ws_free[idx_f] - wt - log_s0_scales[m]) / sd_eta) ** 2)
-            return lp
-
-        w_tau = _slice_sample_1d(_logp_wt, w_tau, rng, width=3.0, bounds=(wt_lo, wt_hi))
-
-    # Centered joint global translation (w_tau + d, ws_m + d, wk_m + d | theta) keeping eta_m & gamma_m fixed
-    if theta is not None and prior_specs is not None and local_scales is not None and n_nonctrl > 0:
-        any_logz_dep = any(
-            prior_specs[m].monotone and prior_specs[m].period_positivity and k_dim >= 2 and prior_specs[m].n_edges > 0
-            for m in free_outcome_idxs
-        )
-        if dynamic_shrinkage or k_dim == 1 or not any_logz_dep:
-            d_per_m = n_nonctrl * k_dim
-            h_float = float(prior_specs[free_outcome_idxs[0]].horizon)
-            quad_tot = 0.0
-            d_tot_free = 0.0
-            for idx_f, m in enumerate(free_outcome_idxs):
-                l0_m, _ = prior_specs[m].precision_and_logdet(local_scales[m])
-                tm = theta[m * d_per_m : (m + 1) * d_per_m].reshape(k_dim, n_nonctrl)
-                quad_tot += (0.5 * float(tm[0] @ l0_m @ tm[0]) / h_float) * math.exp(-2.0 * ws_free[idx_f])
-                d_tot_free += float(n_nonctrl)
-                if k_dim >= 2 and dynamic_shrinkage:
-                    cdyn_m = 0.5 * float(sum(tm[k] @ l0_m @ tm[k] for k in range(1, k_dim))) / h_float
-                    quad_tot += cdyn_m * math.exp(-2.0 * wk_free[idx_f])
-                    d_tot_free += float(n_nonctrl * (k_dim - 1))
-            dc_lo = -wt_b - w_tau
-            dc_hi = wt_b - w_tau
-            if dc_hi - dc_lo > 1e-9 and (dc_lo < 0.0 < dc_hi):
-                def _logp_dc(delta: float) -> float:
-                    return (
-                        _log_global_tau_prior(w_tau + delta)
-                        - d_tot_free * delta
-                        - quad_tot * math.exp(-2.0 * delta)
-                    )
-
-                d_c = _slice_sample_1d(_logp_dc, 0.0, rng, width=3.0, bounds=(dc_lo, dc_hi))
-                w_tau = w_tau + d_c
-                for idx_f, m in enumerate(free_outcome_idxs):
-                    sigma_sq[m] = math.exp(2.0 * (ws_free[idx_f] + d_c))
-                    if dynamic_shrinkage:
-                        kappa_sq[m] = math.exp(2.0 * (wk_free[idx_f] + d_c))
-
-    return w_tau
-
-
-def _asis_interweave_global_tau(
-    *,
-    w_tau: float,
-    theta: np.ndarray,
-    w_res: np.ndarray,
-    wx: np.ndarray,
-    sigma_sq: np.ndarray,
-    kappa_sq: np.ndarray,
-    prior_specs: list[_OutcomeConePriorSpec],
-    free_outcome_idxs: tuple[int, ...],
-    n_nonctrl: int,
-    k_dim: int,
-    dynamic_shrinkage: bool,
-    rng: np.random.Generator,
-) -> tuple[float, np.ndarray]:
-    """Yu & Meng (2011) global non-centered scale interweaving step for ``tau`` across free outcomes."""
-    if not free_outcome_idxs:
-        return w_tau, w_res
-    d_per_m = n_nonctrl * k_dim
-    any_logz_dep = any(
-        prior_specs[m].monotone and prior_specs[m].period_positivity and k_dim >= 2 and prior_specs[m].n_edges > 0
-        for m in free_outcome_idxs
-    )
-    if k_dim >= 2 and (not dynamic_shrinkage) and any_logz_dep:
-        return w_tau, w_res
-
-    scale_mode1_only = bool(k_dim >= 2 and not dynamic_shrinkage)
-    d_th = np.zeros_like(theta)
-    ws_free: list[float] = []
-    wk_free: list[float] = []
-    wt_b = _SCALE_PRIOR_W_TAU_BOUND
-    dt_lo = -wt_b - w_tau
-    dt_hi = wt_b - w_tau
-    for m in free_outcome_idxs:
-        base_m = m * d_per_m
-        if scale_mode1_only:
-            d_th[base_m : base_m + n_nonctrl] = theta[base_m : base_m + n_nonctrl]
-        else:
-            d_th[base_m : base_m + d_per_m] = theta[base_m : base_m + d_per_m]
-        ws_m = 0.5 * math.log(max(float(sigma_sq[m]), 1e-80))
-        ws_free.append(ws_m)
-        if dynamic_shrinkage:
-            wk_m = 0.5 * math.log(max(float(kappa_sq[m]), 1e-80))
-            wk_free.append(wk_m)
-
-    if float(np.dot(d_th, d_th)) <= 1e-50 or dt_hi - dt_lo <= 1e-9 or not (dt_lo < 0.0 < dt_hi):
-        return w_tau, w_res
-
-    u_wx = wx @ d_th
-    r_base = w_res + u_wx
-    d1 = float(np.dot(r_base, u_wx))
-    d2 = float(np.dot(u_wx, u_wx))
-    def _logp_dt(delta: float) -> float:
-        s = math.exp(delta)
-        return _log_global_tau_prior(w_tau + delta) + s * d1 - 0.5 * (s * s) * d2
-
-    d_new = _slice_sample_1d(_logp_dt, 0.0, rng, width=3.0, bounds=(dt_lo, dt_hi))
-    s_new = math.exp(d_new)
-    w_tau_new = w_tau + d_new
-    for idx_f, m in enumerate(free_outcome_idxs):
-        base_m = m * d_per_m
-        if scale_mode1_only:
-            theta[base_m : base_m + n_nonctrl] = s_new * d_th[base_m : base_m + n_nonctrl]
-        else:
-            theta[base_m : base_m + d_per_m] = s_new * d_th[base_m : base_m + d_per_m]
-        sigma_sq[m] = math.exp(2.0 * (ws_free[idx_f] + d_new))
-        if dynamic_shrinkage:
-            kappa_sq[m] = math.exp(2.0 * (wk_free[idx_f] + d_new))
-    w_res_new = r_base - s_new * u_wx
-    return w_tau_new, w_res_new
-
-
 def _asis_interweave_outcome_scales(
     *,
     m_idx: int,
@@ -2592,10 +2420,9 @@ def _asis_interweave_outcome_scales(
     logz_dep = bool(spec.monotone and spec.period_positivity and k_dim >= 2 and spec.n_edges > 0)
 
     skip_expensive_ratio_aa = bool(spec.use_local_scales and not spec.is_tree_poset)
-    sd_eta = _SCALE_PRIOR_LOG_ETA_SD
     log_gamma0 = math.log(_SCALE_PRIOR_GAMMA0)
     nu_gamma = _SCALE_PRIOR_NU_GAMMA
-    eta_b = _SCALE_PRIOR_ETA_BOUND
+    wt_b = _SCALE_PRIOR_W_TAU_BOUND
     ug_b = _SCALE_PRIOR_U_GAMMA_BOUND
 
     # AA-0: Non-centered Mode-1 scale interweaving holding eta_0 = theta_0 / sigma_m fixed
@@ -2608,8 +2435,8 @@ def _asis_interweave_outcome_scales(
         eta_0 = theta[sl_0] / sig_0
         if float(np.dot(eta_0, eta_0)) > 1e-50:
             if coupled_p1:
-                ws_lo = max(log_s0_eff_m - eta_b, wk_0_log - ug_b)
-                ws_hi = min(log_s0_eff_m + eta_b, wk_0_log + ug_b)
+                ws_lo = max(log_s0_eff_m - wt_b, wk_0_log - ug_b)
+                ws_hi = min(log_s0_eff_m + wt_b, wk_0_log + ug_b)
             else:
                 ws_lo, ws_hi = -13.0, 13.0
             if spec.a_cone.shape[0] > 0:
@@ -2635,7 +2462,7 @@ def _asis_interweave_outcome_scales(
                     sig = math.exp(ws)
                     if coupled_p1:
                         lp = (
-                            -0.5 * (((ws - log_s0_eff_m) / sd_eta) ** 2)
+                            _log_outcome_tau_prior(ws - log_s0_eff_m)
                             + _log_halft_unit(wk_0_log - ws - log_gamma0, nu_gamma)
                             + sig * c1_0
                             - 0.5 * (sig * sig) * c2_0
@@ -2646,7 +2473,7 @@ def _asis_interweave_outcome_scales(
                         lp -= spec.log_normalizer(kap_0 / sig, local_scales_m)
                     return lp
 
-                ws_new = _slice_sample_1d(_logp_aa_ws, ws_cur, rng, bounds=(ws_lo, ws_hi))
+                ws_new = _slice_sample_1d(_logp_aa_ws, ws_cur, rng, width=2.5, bounds=(ws_lo, ws_hi))
                 sig_new = math.exp(ws_new)
                 theta[sl_0] = sig_new * eta_0
                 w_res = r0_wy0 - sig_new * v_wx0
@@ -2710,8 +2537,8 @@ def _asis_interweave_outcome_scales(
                 sl_0 = slice(base_m, base_m + n_nonctrl)
                 th0_cur = theta[sl_0].copy()
                 if coupled_p1:
-                    d_lo = log_s0_eff_m - eta_b - ws0
-                    d_hi = log_s0_eff_m + eta_b - ws0
+                    d_lo = log_s0_eff_m - wt_b - ws0
+                    d_hi = log_s0_eff_m + wt_b - ws0
                 else:
                     d_lo = -13.0 - ws0
                     d_hi = 13.0 - ws0
@@ -2724,10 +2551,10 @@ def _asis_interweave_outcome_scales(
                     def _logp_aa_d0(delta: float) -> float:
                         s = math.exp(delta)
                         if coupled_p1:
-                            return -0.5 * (((ws0 + delta - log_s0_eff_m) / sd_eta) ** 2) + s * d1 - 0.5 * (s * s) * d2
+                            return _log_outcome_tau_prior(ws0 + delta - log_s0_eff_m) + s * d1 - 0.5 * (s * s) * d2
                         return _log_halft_unit(ws0 + delta - log_s0_eff_m, nu_sig) + s * d1 - 0.5 * (s * s) * d2
 
-                    d_new = _slice_sample_1d(_logp_aa_d0, 0.0, rng, bounds=(d_lo, d_hi))
+                    d_new = _slice_sample_1d(_logp_aa_d0, 0.0, rng, width=2.5, bounds=(d_lo, d_hi))
                     s_new = math.exp(d_new)
                     theta[sl_0] = s_new * th0_cur
                     w_res = r_base - s_new * u_wx
@@ -2737,8 +2564,8 @@ def _asis_interweave_outcome_scales(
                 wk0 = 0.5 * math.log(max(kappa_sq_m, 1e-80))
                 if coupled_p1:
                     shift_wk = bool(dynamic_shrinkage)
-                    d_lo = log_s0_eff_m - eta_b - ws0
-                    d_hi = log_s0_eff_m + eta_b - ws0
+                    d_lo = log_s0_eff_m - wt_b - ws0
+                    d_hi = log_s0_eff_m + wt_b - ws0
                 else:
                     shift_wk = bool(k_dim >= 2 and dynamic_shrinkage)
                     d_lo = max(-13.0 - ws0, -13.0 - wk0) if shift_wk else (-13.0 - ws0)
@@ -2752,13 +2579,13 @@ def _asis_interweave_outcome_scales(
                     def _logp_aa_joint(delta: float) -> float:
                         s = math.exp(delta)
                         if coupled_p1:
-                            return -0.5 * (((ws0 + delta - log_s0_eff_m) / sd_eta) ** 2) + s * d1 - 0.5 * (s * s) * d2
+                            return _log_outcome_tau_prior(ws0 + delta - log_s0_eff_m) + s * d1 - 0.5 * (s * s) * d2
                         lp = _log_halft_unit(ws0 + delta - log_s0_eff_m, nu_sig) + s * d1 - 0.5 * (s * s) * d2
                         if shift_wk:
                             lp += _log_halft_unit(wk0 + delta - log_sk_eff_m, nu_kap)
                         return lp
 
-                    d_new = _slice_sample_1d(_logp_aa_joint, 0.0, rng, bounds=(d_lo, d_hi))
+                    d_new = _slice_sample_1d(_logp_aa_joint, 0.0, rng, width=2.5, bounds=(d_lo, d_hi))
                     s_new = math.exp(d_new)
                     theta[sl_m] = s_new * th_m_cur
                     w_res = r_base - s_new * u_wx
@@ -2824,7 +2651,6 @@ def _run_single_gibbs_chain(
     s0_scales: list[float],
     sk_scales: list[float],
     fixed_sigmas: list[float | None],
-    use_hier_tau: bool,
     n_arms: int,
     n_outcomes: int,
     k_dim: int,
@@ -2846,7 +2672,6 @@ def _run_single_gibbs_chain(
     total_iters = int(n_steps) * thin_eff
 
     theta = state["theta"].copy()
-    w_tau = float(state["w_tau"])
     sigma_sq = state["sigma_sq"].copy()
     kappa_sq = state["kappa_sq"].copy()
     a_sigma = state["a_sigma"].copy()
@@ -2860,7 +2685,6 @@ def _run_single_gibbs_chain(
     pi_mix = float(state["pi_mix"])
     corr_r = state["corr_r"].copy()
 
-    free_outcome_idxs = tuple(m for m in range(n_outcomes) if fixed_sigmas[m] is None)
     log_s0_scales = [math.log(max(float(s0_scales[m]), 1e-16)) for m in range(n_outcomes)]
     log_sk_scales = [
         math.log(max(float(fixed_sigmas[m]) if fixed_sigmas[m] is not None else float(sk_scales[m]), 1e-16))
@@ -2869,7 +2693,6 @@ def _run_single_gibbs_chain(
 
     if record:
         tr_theta = np.empty((n_steps, d_total), dtype=np.float64)
-        tr_tau = np.empty(n_steps, dtype=np.float64)
         tr_sigma = np.empty((n_steps, n_outcomes), dtype=np.float64)
         tr_kappa = np.empty((n_steps, n_outcomes), dtype=np.float64)
         tr_local = [np.empty((n_steps, spec.n_edges), dtype=np.float64) for spec in prior_specs]
@@ -2879,7 +2702,7 @@ def _run_single_gibbs_chain(
         tr_flag = np.empty((n_steps, n_q), dtype=np.float64)
         tr_corr = np.empty((n_steps, n_outcomes, n_outcomes), dtype=np.float64)
     else:
-        tr_theta = tr_tau = tr_sigma = tr_kappa = tr_rho = tr_phi = tr_omega = tr_flag = tr_corr = None  # type: ignore[assignment]
+        tr_theta = tr_sigma = tr_kappa = tr_rho = tr_phi = tr_omega = tr_flag = tr_corr = None  # type: ignore[assignment]
         tr_local = []
 
     mk = n_outcomes * k_dim
@@ -3016,44 +2839,13 @@ def _run_single_gibbs_chain(
             chol_prec=chol_post,
         )
 
-        # 4. Exact collapsed SA + Yu & Meng (2011) ASIS scale updates (global tau + per-outcome)
+        # 4. Exact collapsed SA + Yu & Meng (2011) ASIS scale updates (independent per outcome)
         w_res = wy - wx @ theta
-        if use_hier_tau:
-            w_tau = _update_global_tau(
-                w_tau=w_tau,
-                sigma_sq=sigma_sq,
-                kappa_sq=kappa_sq,
-                log_s0_scales=log_s0_scales,
-                log_sk_scales=log_sk_scales,
-                free_outcome_idxs=free_outcome_idxs,
-                dynamic_shrinkage=dynamic_shrinkage,
-                rng=rng,
-                theta=theta,
-                prior_specs=prior_specs,
-                local_scales=local_scales,
-                n_nonctrl=n_nonctrl,
-                k_dim=k_dim,
-            )
-            w_tau, w_res = _asis_interweave_global_tau(
-                w_tau=w_tau,
-                theta=theta,
-                w_res=w_res,
-                wx=wx,
-                sigma_sq=sigma_sq,
-                kappa_sq=kappa_sq,
-                prior_specs=prior_specs,
-                free_outcome_idxs=free_outcome_idxs,
-                n_nonctrl=n_nonctrl,
-                k_dim=k_dim,
-                dynamic_shrinkage=dynamic_shrinkage,
-                rng=rng,
-            )
         for m in range(n_outcomes):
             spec_m = prior_specs[m]
             is_p1 = spec_m.scale_prior == "global_halft"
-            wt_shift = w_tau if (use_hier_tau and fixed_sigmas[m] is None) else 0.0
-            log_s0_eff_m = log_s0_scales[m] + wt_shift
-            log_sk_eff_m = log_sk_scales[m] + (wt_shift if (dynamic_shrinkage and not is_p1) else 0.0)
+            log_s0_eff_m = log_s0_scales[m]
+            log_sk_eff_m = log_sk_scales[m]
             nu_sig_m = 3.0
             nu_kap_m = _SCALE_PRIOR_NU_GAMMA if is_p1 else 3.0
             nu_loc_m = _SCALE_PRIOR_NU_LOCAL if is_p1 else 3.0
@@ -3286,7 +3078,6 @@ def _run_single_gibbs_chain(
         if record and ((it_idx + 1) % thin_eff == 0):
             rec_idx = it_idx // thin_eff
             tr_theta[rec_idx] = theta
-            tr_tau[rec_idx] = math.exp(w_tau)
             tr_sigma[rec_idx] = np.sqrt(np.maximum(sigma_sq, 1e-80))
             tr_kappa[rec_idx] = np.sqrt(np.maximum(kappa_sq, 1e-80))
             for m in range(n_outcomes):
@@ -3299,7 +3090,6 @@ def _run_single_gibbs_chain(
 
     new_state = {
         "theta": theta,
-        "w_tau": w_tau,
         "sigma_sq": sigma_sq,
         "kappa_sq": kappa_sq,
         "a_sigma": a_sigma,
@@ -3317,7 +3107,6 @@ def _run_single_gibbs_chain(
         return new_state, None
     traces: dict[str, Any] = {
         "theta": tr_theta,
-        "tau": tr_tau,
         "sigma": tr_sigma,
         "kappa": tr_kappa,
         "local": tr_local,
@@ -3549,7 +3338,7 @@ def _reconcile_joint_bayesian_core(
         ray_m[:n_nonctrl] = math.sqrt(float(h_eff)) * ray_scale_m * topo["interior_heights"]
         ray_parts.append(ray_m)
 
-    use_hier_tau = bool(opts["scale_prior"] == "global_halft" and any(fs is None for fs in fixed_sigmas))
+    is_p1_global = bool(opts["scale_prior"] == "global_halft")
 
     total_walls = sum(cb.shape[0] for cb in cone_blocks)
     a_cone_joint = np.zeros((total_walls, d_total), dtype=np.float64)
@@ -3587,8 +3376,7 @@ def _reconcile_joint_bayesian_core(
     wx0 = np.linalg.solve(chol_w0, x_des)
     wy0 = np.linalg.solve(chol_w0, y_vec)
     prec_init = wx0.T @ wx0
-    tau_init_nom = _SCALE_PRIOR_TAU0 if use_hier_tau else 1.0
-    is_p1_global = bool(opts["scale_prior"] == "global_halft")
+    tau_init_nom = _SCALE_PRIOR_TAU0 if is_p1_global else 1.0
     for m_i in range(n_outcomes):
         l0_m, _ = prior_specs[m_i].precision_and_logdet(np.ones(prior_specs[m_i].n_edges))
         s_init = fixed_sigmas[m_i] if fixed_sigmas[m_i] is not None else (tau_init_nom * s0_scales[m_i])
@@ -3624,11 +3412,10 @@ def _reconcile_joint_bayesian_core(
         theta_c = theta_mode + 0.05 * jitter * interior_ray_joint
         if a_cone_joint.shape[0] > 0 and float(np.min(a_cone_joint @ theta_c)) <= 1e-6:
             theta_c = theta_mode + 0.1 * interior_ray_joint
-        tau_c = (_SCALE_PRIOR_TAU0 * float(rng_c.uniform(0.6, 1.6))) if use_hier_tau else 1.0
         sig_c_list = [
             float(fixed_sigmas[m])
             if fixed_sigmas[m] is not None
-            else (tau_c * s0_scales[m] * float(rng_c.uniform(0.6, 1.6)))
+            else (tau_init_nom * s0_scales[m] * float(rng_c.uniform(0.5, 1.8)))
             for m in range(n_outcomes)
         ]
         sig_sq_c = np.array([sc * sc for sc in sig_c_list], dtype=np.float64)
@@ -3641,7 +3428,7 @@ def _reconcile_joint_bayesian_core(
                     if is_p1_global
                     else (
                         (
-                            (fixed_sigmas[m] if fixed_sigmas[m] is not None else tau_c * sk_scales[m])
+                            (fixed_sigmas[m] if fixed_sigmas[m] is not None else sk_scales[m])
                             * float(rng_c.uniform(0.6, 1.6))
                         )
                         ** 2
@@ -3663,7 +3450,6 @@ def _reconcile_joint_bayesian_core(
         )
         st_c = {
             "theta": theta_c,
-            "w_tau": math.log(max(tau_c, 1e-12)) if use_hier_tau else 0.0,
             "sigma_sq": sig_sq_c,
             "kappa_sq": kap_sq_c,
             "a_sigma": np.array([s0_scales[m] ** 2 for m in range(n_outcomes)], dtype=np.float64),
@@ -3698,7 +3484,6 @@ def _reconcile_joint_bayesian_core(
             s0_scales=s0_scales,
             sk_scales=sk_scales,
             fixed_sigmas=fixed_sigmas,
-            use_hier_tau=use_hier_tau,
             n_arms=n_arms,
             n_outcomes=n_outcomes,
             k_dim=k_dim,
@@ -3736,7 +3521,6 @@ def _reconcile_joint_bayesian_core(
             s0_scales=s0_scales,
             sk_scales=sk_scales,
             fixed_sigmas=fixed_sigmas,
-            use_hier_tau=use_hier_tau,
             n_arms=n_arms,
             n_outcomes=n_outcomes,
             k_dim=k_dim,
@@ -3761,12 +3545,6 @@ def _reconcile_joint_bayesian_core(
         ess_blocks["theta"] = min(s[1] for s in th_stats)
         ess_tail_min = min(s[2] for s in th_stats)
 
-        if use_hier_tau:
-            tau_stack = np.stack([t["tau"] for t in traces_list], axis=0)
-            t_rh, t_ess, _ = _split_rhat_and_ess_1d(tau_stack)
-            rhat_blocks["tau"] = t_rh
-            ess_blocks["tau"] = t_ess
-
         if any(fs is None for fs in fixed_sigmas):
             sig_stack = np.stack([t["sigma"] for t in traces_list], axis=0)
             s_stats = [
@@ -3776,6 +3554,9 @@ def _reconcile_joint_bayesian_core(
             ]
             rhat_blocks["sigma"] = max(s[0] for s in s_stats)
             ess_blocks["sigma"] = min(s[1] for s in s_stats)
+            if is_p1_global:
+                rhat_blocks["tau"] = rhat_blocks["sigma"]
+                ess_blocks["tau"] = ess_blocks["sigma"]
 
         if opts["dynamic_shrinkage"]:
             kap_stack = np.stack([t["kappa"] for t in traces_list], axis=0)
@@ -3859,7 +3640,6 @@ def _reconcile_joint_bayesian_core(
                 s0_scales=s0_scales,
                 sk_scales=sk_scales,
                 fixed_sigmas=fixed_sigmas,
-                use_hier_tau=use_hier_tau,
                 n_arms=n_arms,
                 n_outcomes=n_outcomes,
                 k_dim=k_dim,
@@ -3874,7 +3654,7 @@ def _reconcile_joint_bayesian_core(
             assert extra_tr is not None
             # Concatenate n_draws_chain + n_draws_chain at thin_stride and thin by 2 -> spacing 2 * thin_stride
             merged_c: dict[str, Any] = {}
-            for key in ("theta", "tau", "sigma", "kappa", "rho", "phi", "omega", "flag", "corr"):
+            for key in ("theta", "sigma", "kappa", "rho", "phi", "omega", "flag", "corr"):
                 cat = np.concatenate([chain_traces[c_i][key], extra_tr[key]], axis=0)
                 merged_c[key] = cat[1::2][:n_draws_chain]
             merged_local = []
@@ -3902,7 +3682,6 @@ def _reconcile_joint_bayesian_core(
 
     # Pool chains into (S, ...) posterior arrays
     theta_all = np.concatenate([t["theta"] for t in chain_traces], axis=0)  # (S, M * (A-1) * K')
-    tau_all = np.concatenate([t["tau"] for t in chain_traces], axis=0)  # (S,)
     sigma_all = np.concatenate([t["sigma"] for t in chain_traces], axis=0)  # (S, M)
     kappa_all = np.concatenate([t["kappa"] for t in chain_traces], axis=0)  # (S, M)
     rho_all = np.concatenate([t["rho"] for t in chain_traces], axis=0)  # (S, M)
@@ -4116,7 +3895,7 @@ def _reconcile_joint_bayesian_core(
             local_scale_draws=loc_draws_o,
             rho_draws=rho_draws_o,
             phi_draws=phi_draws_o,
-            tau_draws=tau_all,
+            tau_draws=sig_draws_o / max(s0_o, 1e-16),
             omega_draws=om_dict,
             tau_mu_draws=tau_mu_arr,
             tau_increment_draws=tau_inc,

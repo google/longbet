@@ -667,7 +667,7 @@ def test_iw2_marginal_z_slice_and_imh_matches_bartlett_correlation() -> None:
 
 
 def test_hierarchical_global_local_scale_prior_stationarity() -> None:
-    """Verify joint (tau, sigma_m, kappa_m = gamma_m * sigma_m, theta_m) transitions preserve exact posterior."""
+    """Verify per-outcome (tau_m, sigma_m = tau_m * s_{0,m}, kappa_m = gamma_m * sigma_m, theta_m) stationarity."""
     rng = np.random.default_rng(20261031)
     h_post = 4
     psi = orthonormal_exposure_basis(h_post, 2) / math.sqrt(float(h_post))
@@ -688,8 +688,8 @@ def test_hierarchical_global_local_scale_prior_stationarity() -> None:
     log_s0 = [math.log(s) for s in s0_scales]
     d_m = 4
     d_tot = 8
-    y_obs = np.array([0.30, 0.45, 0.05, -0.04, 0.15, 0.25, 0.02, 0.03], dtype=np.float64)
-    sd_obs = 0.40
+    y_obs = np.array([0.55, 0.70, 0.05, -0.04, 0.04, 0.03, 0.01, -0.01], dtype=np.float64)
+    sd_obs = 0.35
     wx = np.eye(d_tot, dtype=np.float64) / sd_obs
     wy = y_obs / sd_obs
     prec_lik = wx.T @ wx
@@ -702,17 +702,15 @@ def test_hierarchical_global_local_scale_prior_stationarity() -> None:
     interior_ray = np.array([0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0], dtype=np.float64)
 
     tau0 = rkma_mod._SCALE_PRIOR_TAU0
-    sd_eta = rkma_mod._SCALE_PRIOR_LOG_ETA_SD
     nu_gamma = rkma_mod._SCALE_PRIOR_NU_GAMMA
     gamma0 = rkma_mod._SCALE_PRIOR_GAMMA0
     wt_b = rkma_mod._SCALE_PRIOR_W_TAU_BOUND
-    eta_b = rkma_mod._SCALE_PRIOR_ETA_BOUND
     ug_b = rkma_mod._SCALE_PRIOR_U_GAMMA_BOUND
     nu_loc = rkma_mod._SCALE_PRIOR_NU_LOCAL
 
-    # Verify normalized two-group global log-scale density integrates to 1
+    # Verify normalized two-group per-outcome log-scale density integrates to 1
     w_grid = np.linspace(-25.0, 25.0, 20001)
-    p_grid = np.array([math.exp(rkma_mod._log_global_tau_prior(float(w))) for w in w_grid])
+    p_grid = np.array([math.exp(rkma_mod._log_outcome_tau_prior(float(w))) for w in w_grid])
     assert abs(float(np.trapezoid(p_grid, w_grid)) - 1.0) < 1e-5
 
     def _draw_box_halft(scale_val: float, nu: float, n_s: int, lo: float, hi: float) -> np.ndarray:
@@ -726,46 +724,26 @@ def test_hierarchical_global_local_scale_prior_stationarity() -> None:
             rem = rem[~ok]
         return out
 
-    def _draw_box_global_tau(n_s: int) -> np.ndarray:
+    def _draw_box_outcome_tau(n_s: int) -> np.ndarray:
         out = np.empty(n_s, dtype=np.float64)
         rem = np.arange(n_s)
         while rem.size > 0:
-            is_act = rng.random(rem.size) < rkma_mod._SCALE_PRIOR_PI_ACT
-            prop = np.empty(rem.size, dtype=np.float64)
-            n_act = int(np.sum(is_act))
-            if n_act > 0:
-                prop[is_act] = rkma_mod._SCALE_PRIOR_TAU0 * np.sqrt(
-                    np.maximum(
-                        rng.f(rkma_mod._SCALE_PRIOR_ALPHA_TAU, rkma_mod._SCALE_PRIOR_NU_TAU, size=n_act),
-                        1e-300,
-                    )
+            prop = rkma_mod._SCALE_PRIOR_TAU0 * np.sqrt(
+                np.maximum(
+                    rng.f(rkma_mod._SCALE_PRIOR_ALPHA_TAU, rkma_mod._SCALE_PRIOR_NU_TAU, size=rem.size),
+                    1e-300,
                 )
-            n_nul = rem.size - n_act
-            if n_nul > 0:
-                prop[~is_act] = rkma_mod._SCALE_PRIOR_TAU_NULL * np.sqrt(
-                    np.maximum(rng.f(1.0, rkma_mod._SCALE_PRIOR_NU_NULL, size=n_nul), 1e-300)
-                )
+            )
             w_p = np.log(np.maximum(prop, 1e-300))
             ok = (w_p > -wt_b) & (w_p < wt_b)
             out[rem[ok]] = prop[ok]
             rem = rem[~ok]
         return out
 
-    def _draw_box_norm(sd_val: float, n_s: int, lo: float, hi: float) -> np.ndarray:
-        out = np.empty(n_s, dtype=np.float64)
-        rem = np.arange(n_s)
-        while rem.size > 0:
-            prop = sd_val * rng.standard_normal(rem.size)
-            ok = (prop > lo) & (prop < hi)
-            out[rem[ok]] = prop[ok]
-            rem = rem[~ok]
-        return out
-
-    # 1. Exact importance-sampled reference draws from joint posterior
+    # 1. Exact importance-sampled reference draws from joint posterior with independent tau_m
     n_prop = 220_000
-    tau_p = _draw_box_global_tau(n_prop)
-    eta_p = np.vstack([_draw_box_norm(sd_eta, n_prop, -eta_b, eta_b) for _ in range(2)])
-    sig_p = np.vstack([tau_p * s0_scales[m] * np.exp(eta_p[m]) for m in range(2)])
+    tau_p = np.vstack([_draw_box_outcome_tau(n_prop) for _ in range(2)])
+    sig_p = np.vstack([tau_p[m] * s0_scales[m] for m in range(2)])
     gam_p = np.vstack([_draw_box_halft(gamma0, nu_gamma, n_prop, -ug_b, ug_b) for _ in range(2)])
     kap_p = sig_p * gam_p
     th_p = np.zeros((n_prop, d_tot), dtype=np.float64)
@@ -788,9 +766,8 @@ def test_hierarchical_global_local_scale_prior_stationarity() -> None:
     assert ess_is > 1500.0, f"Importance reference ESS too small: {ess_is:.1f}"
     idx_ref = rng.choice(n_prop, size=3500, replace=True, p=w_is)
 
-    # 2. Run hierarchical MCMC transitions
+    # 2. Run per-outcome MCMC transitions + ASIS interweaving
     theta = interior_ray.copy()
-    w_tau = math.log(tau0)
     sigma_sq = np.array([(tau0 * s) ** 2 for s in s0_scales], dtype=np.float64)
     kappa_sq = np.array([(tau0 * gamma0 * s) ** 2 for s in s0_scales], dtype=np.float64)
     a_sig = sigma_sq.copy()
@@ -798,7 +775,8 @@ def test_hierarchical_global_local_scale_prior_stationarity() -> None:
     lam = [np.ones(2, dtype=np.float64), np.ones(2, dtype=np.float64)]
     b_loc = [np.ones(2, dtype=np.float64), np.ones(2, dtype=np.float64)]
 
-    tr_tau = np.empty(3000, dtype=np.float64)
+    tr_tau0 = np.empty(3000, dtype=np.float64)
+    tr_tau1 = np.empty(3000, dtype=np.float64)
     tr_sig0 = np.empty(3000, dtype=np.float64)
     tr_sig1 = np.empty(3000, dtype=np.float64)
     tr_kap0 = np.empty(3000, dtype=np.float64)
@@ -816,37 +794,7 @@ def test_hierarchical_global_local_scale_prior_stationarity() -> None:
         theta = _sample_truncated_mvn(mean_post, prec_post, a_cone, theta, interior_ray, rng, n_hmc_steps=1)
 
         w_res = wy - wx @ theta
-        w_tau = rkma_mod._update_global_tau(
-            w_tau=w_tau,
-            sigma_sq=sigma_sq,
-            kappa_sq=kappa_sq,
-            log_s0_scales=log_s0,
-            log_sk_scales=log_s0,
-            free_outcome_idxs=(0, 1),
-            dynamic_shrinkage=True,
-            rng=rng,
-            theta=theta,
-            prior_specs=specs,
-            local_scales=lam,
-            n_nonctrl=2,
-            k_dim=2,
-        )
-        w_tau, w_res = rkma_mod._asis_interweave_global_tau(
-            w_tau=w_tau,
-            theta=theta,
-            w_res=w_res,
-            wx=wx,
-            sigma_sq=sigma_sq,
-            kappa_sq=kappa_sq,
-            prior_specs=specs,
-            free_outcome_idxs=(0, 1),
-            n_nonctrl=2,
-            k_dim=2,
-            dynamic_shrinkage=True,
-            rng=rng,
-        )
         for m in range(2):
-            ls_eff = log_s0[m] + w_tau
             sigma_sq[m], kappa_sq[m], a_sig[m], a_kap[m], lam[m], b_loc[m] = _update_scales_outcome(
                 theta_m=theta[m * d_m : (m + 1) * d_m],
                 spec=specs[m],
@@ -856,7 +804,7 @@ def test_hierarchical_global_local_scale_prior_stationarity() -> None:
                 a_kappa=float(a_kap[m]),
                 local_scales=lam[m],
                 b_local=b_loc[m],
-                log_s0_eff=ls_eff,
+                log_s0_eff=log_s0[m],
                 log_sk_eff=log_s0[m],
                 nu_sig=3.0,
                 nu_kap=nu_gamma,
@@ -877,7 +825,7 @@ def test_hierarchical_global_local_scale_prior_stationarity() -> None:
                 a_sigma_m=float(a_sig[m]),
                 a_kappa_m=float(a_kap[m]),
                 local_scales_m=lam[m],
-                log_s0_eff_m=ls_eff,
+                log_s0_eff_m=log_s0[m],
                 log_sk_eff_m=log_s0[m],
                 nu_sig=3.0,
                 nu_kap=nu_gamma,
@@ -888,14 +836,54 @@ def test_hierarchical_global_local_scale_prior_stationarity() -> None:
                 coupled_p1=True,
             )
         if step >= 400:
-            tr_tau[step - 400] = math.exp(w_tau)
+            tr_tau0[step - 400] = math.sqrt(sigma_sq[0]) / s0_scales[0]
+            tr_tau1[step - 400] = math.sqrt(sigma_sq[1]) / s0_scales[1]
             tr_sig0[step - 400] = math.sqrt(sigma_sq[0])
             tr_sig1[step - 400] = math.sqrt(sigma_sq[1])
             tr_kap0[step - 400] = math.sqrt(kappa_sq[0])
             tr_th0[step - 400] = theta[0]
 
-    assert stats.ks_2samp(tr_tau[::2], tau_p[idx_ref][::2]).pvalue > 0.01
+    assert stats.ks_2samp(tr_tau0[::2], tau_p[0, idx_ref][::2]).pvalue > 0.01
+    assert stats.ks_2samp(tr_tau1[::2], tau_p[1, idx_ref][::2]).pvalue > 0.01
     assert stats.ks_2samp(tr_sig0[::2], sig_p[0, idx_ref][::2]).pvalue > 0.01
     assert stats.ks_2samp(tr_sig1[::2], sig_p[1, idx_ref][::2]).pvalue > 0.01
     assert stats.ks_2samp(tr_kap0[::2], kap_p[0, idx_ref][::2]).pvalue > 0.01
     assert stats.ks_2samp(tr_th0[::2], th_p[idx_ref, 0][::2]).pvalue > 0.01
+
+
+def test_per_outcome_independent_scale_zero_contamination() -> None:
+    """Verify an active outcome does not inflate a null outcome's scale when R = I and no composite links them."""
+    arms = ("C", "B", "A")
+    rng = np.random.default_rng(20261100)
+    fits_active = {
+        ("B", "C"): _make_stage1_fit(rng, np.ones(4) * 1.20),
+        ("A", "B"): _make_stage1_fit(rng, np.ones(4) * 1.20),
+        ("A", "C"): _make_stage1_fit(rng, np.ones(4) * 2.40),
+    }
+    fits_null = {
+        ("B", "C"): _make_stage1_fit(rng, np.zeros(4)),
+        ("A", "B"): _make_stage1_fit(rng, np.zeros(4)),
+        ("A", "C"): _make_stage1_fit(rng, np.zeros(4)),
+    }
+
+    solo_null = reconcile_multi_arm_draws(
+        fits_null, arms=arms, order=arms, monotone=True, seed=20261101
+    )
+    joint = reconcile_multi_arm_multi_outcome_draws(
+        {"active": fits_active, "null": fits_null},
+        cross_outcome_residuals=None,
+        arms=arms,
+        order=arms,
+        monotone=True,
+        seed=20261102,
+    )
+
+    tau_act = joint.by_outcome["active"].tau_draws
+    tau_nul_joint = joint.by_outcome["null"].tau_draws
+    tau_nul_solo = solo_null.tau_draws
+    assert tau_act is not None and tau_nul_joint is not None and tau_nul_solo is not None
+    assert float(np.median(tau_act)) > 4.0 * float(np.median(tau_nul_joint))
+    assert abs(float(np.median(tau_nul_joint)) - float(np.median(tau_nul_solo))) < 0.04
+    mean_top_joint = float(np.mean(joint.by_outcome["null"].contrast_mode1_draws[("A", "C")]))
+    mean_top_solo = float(np.mean(solo_null.contrast_mode1_draws[("A", "C")]))
+    assert abs(mean_top_joint - mean_top_solo) < 0.015
